@@ -1,5 +1,23 @@
 # Deploy gratuito do MVP-0 (Vercel + Render + MongoDB Atlas M0)
 
+## O que está no ar (criado em 30/10/2026)
+
+| Recurso | Onde | Endereço / identificação |
+|---|---|---|
+| Web | Vercel, projeto `canteiro-web` (time `rizzi26s-projects`, raiz `apps/web`) | https://canteiro-web-nu.vercel.app (`canteiro-web.vercel.app` já era de outra conta) |
+| API | Render `canteiro-api` (`srv-dbig4pcs728c73f606m0`), Virginia, free | https://canteiro-api.onrender.com |
+| Agente | Render `canteiro-agente` (`srv-dbig4rvlk1mc73emi7t0`), Virginia, free, `MODELO_ROTEIRO=1` | https://canteiro-agente.onrender.com |
+| Banco | Atlas, projeto `canteiro`, cluster M0 `canteiro` (AWS us-east-1), usuário `canteiro-api` com `readWrite@canteiro` | `canteiro.lyhqjtc.mongodb.net` |
+
+- **Segredos de produção:** só em `~/.config/canteiro/producao.env` (fora do repo, `chmod 600`) e nos painéis.
+- **Rede do Atlas:** `0.0.0.0/0`, por decisão do usuário (o Render gratuito não tem IP fixo e as faixas compartilhadas
+  rotacionam). A proteção fica no usuário restrito, na senha de 32 caracteres e no TLS.
+- **Os serviços do Render foram criados pela API** (a CLI do Render só valida Blueprints), com a mesma configuração do
+  `render.yaml`. Mudou o `render.yaml`? Atualize o serviço pelo painel ou pela API (ou adote o arquivo como Blueprint).
+- **CI/CD:** o GitHub Actions (`.github/workflows/ci.yml`) roda a cada push e PR. O Render publica a API e o agente só
+  quando os checks passam (`autoDeployTrigger: checksPass`). A Vercel publica a web a cada push na `main`.
+
+
 | Peça | Onde | Plano |
 |---|---|---|
 | Web (Next.js, `apps/web`) | Vercel, **2º projeto** (o 1º é o protótipo na raiz) | Hobby (uso não comercial; para cobrar clientes, Pro) |
