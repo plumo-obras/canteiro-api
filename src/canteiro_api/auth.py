@@ -126,6 +126,23 @@ async def _anotar_tentativa(arm, cfg: Config, email: str, ip: str, sucesso: bool
     await arm.em_transacao(corpo)
 
 
+async def consumir_tentativa(arm, cfg: Config, chave: str, limite: int) -> bool:
+    """Conta uma tentativa na chave (mesma janela do login) e diz se ainda cabe. Para rota pública sem senha, onde
+    toda chamada conta, não só a que falha. A chave entra com hash: o ID não carrega IP nem e-mail cru."""
+    id_ = "tent-" + _sha(chave)
+
+    async def corpo(tx):
+        t = await tx.obter("tentativas", TENANT_SISTEMA, id_)
+        n = _ativo(t, cfg)
+        cabe = n < limite
+        # grava também quando recusa: a transação escreve o que leu para decidir (mesmo comportamento no Firestore)
+        tx.salvar("tentativas", {"id": id_, "tenant_id": TENANT_SISTEMA, "inicio": t["inicio"] if n else agora(),
+                                 "contagem": n + 1 if cabe else n})
+        return cabe
+
+    return await arm.em_transacao(corpo)
+
+
 # --- fluxos ---
 
 def _negado(msg: str = "E-mail ou senha incorretos.") -> HTTPException:

@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from functools import cache
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from canteiro_dominio.armazenamento import ConflitoDeId
@@ -12,7 +13,7 @@ from .armazenamento import criar_armazenamento
 from .cofre import criar_cofre
 from .config import Config
 from .nucleo import ErroNegocio
-from .rotas import auth, obras, propostas, sessoes
+from .rotas import auth, lista_espera, obras, propostas, sessoes
 
 
 def create_app(config: Config | None = None, arm=None) -> FastAPI:
@@ -57,7 +58,27 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.include_router(obras.r)
     app.include_router(propostas.r)
     app.include_router(sessoes.r)
+    app.include_router(lista_espera.r)
+    app.add_middleware(_CorsSoNaListaDeEspera, origens=config.origens_cors())
     return app
+
+
+class _CorsSoNaListaDeEspera:
+    """Só a lista de espera é chamada do navegador (a landing, em outro domínio). O resto da API o navegador nunca
+    alcança direto (a web fala com ela pelo servidor do Next), então não ganha cabeçalho de CORS nenhum."""
+
+    ROTAS = frozenset({"/lista-espera"})
+
+    def __init__(self, app, origens: list[str]):
+        self.app = app
+        # sem credenciais: a landing não manda cookie nem Authorization
+        self.cors = CORSMiddleware(app, allow_origins=origens, allow_methods=["POST"],
+                                   allow_headers=["Content-Type"], allow_credentials=False, max_age=600)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] in self.ROTAS:
+            return await self.cors(scope, receive, send)
+        return await self.app(scope, receive, send)
 
 
 @cache

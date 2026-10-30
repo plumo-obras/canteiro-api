@@ -32,6 +32,11 @@ class Config(BaseSettings):
     tentativas_por_email: int = 5
     tentativas_por_ip: int = 30
     janela_tentativas_minutos: int = 15
+    # cadastros na lista de espera por IP na mesma janela (rota pública, toda chamada conta)
+    lista_espera_por_ip: int = 10
+
+    # origens (vírgula) que podem chamar a API do navegador — hoje só a lista de espera da landing. Nunca "*".
+    cors_origens: str = "http://localhost:4321,http://127.0.0.1:4321"
 
     # créditos iniciais de um tenant novo (microdólares; 1 US$ = 1.000.000)
     franquia_padrao_microdolares: int = 20_000_000
@@ -39,6 +44,9 @@ class Config(BaseSettings):
     # seed: o e-mail é público; a senha só existe no .env local
     seed_admin_email: str = "admin@casavilanova.exemplo"
     seed_admin_senha: str = ""
+
+    def origens_cors(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.cors_origens.split(",") if o.strip() and o.strip() != "*"]
 
     def conferir(self) -> None:
         if len(self.jwt_segredo) < 32:

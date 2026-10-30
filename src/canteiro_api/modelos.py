@@ -77,6 +77,23 @@ class Renovacao(BaseModel):
     criado_em: datetime = Field(default_factory=agora)
 
 
+class InscritoEspera(BaseModel):
+    """Inscrito na lista de espera da landing. ID = hash do e-mail normalizado: repetir o cadastro não duplica."""
+    id: str
+    tenant_id: str = TENANT_SISTEMA
+    email: str
+    nome: str | None = None
+    empresa: str | None = None
+    papel: str | None = None
+    obras_ativas: int | None = None
+    origem: str | None = None
+    criado_em: datetime = Field(default_factory=agora)
+
+
+def id_de_inscrito(email: str) -> str:
+    return "espera-" + hashlib.sha256(normalizar_email(email).encode()).hexdigest()
+
+
 class EventoOutbox(Documento):
     """Gravado na mesma transação da mudança; o relay publica no Pub/Sub depois."""
     tipo: str                                 # pedido.criado, estoque.movimento…

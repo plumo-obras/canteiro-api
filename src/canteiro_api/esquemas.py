@@ -1,8 +1,9 @@
 """Corpos de requisição e respostas que não são documentos. Quantidade em milésimos e dinheiro em centavos."""
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from canteiro_dominio.modelos import EntradaRegistro, Insumo, Obra, Proposta, StatusPedido, TipoProposta
 
@@ -278,3 +279,39 @@ class RegistroSaida(EntradaRegistro):
 class Aprovacao(BaseModel):
     proposta: PropostaSaida
     registro: RegistroSaida = Field(description="o `registro.id` é o que o Desfazer usa")
+
+
+# --- lista de espera (landing pública, sem login) ---
+
+# Conferência de forma, não de existência: sem dependência nova e sem consulta a DNS. Um "@", nada de espaço, domínio
+# com ponto. O resto (caixa postal que existe) só o e-mail de confirmação prova.
+_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+$")
+
+
+class ListaEsperaCorpo(Entrada):
+    email: str = Field(min_length=3, max_length=254)
+    nome: str | None = Field(None, max_length=120)
+    empresa: str | None = Field(None, max_length=120)
+    papel: Literal["engenheiro", "mestre", "dono", "comprador", "outro"] | None = None
+    obras_ativas: int | None = Field(None, ge=0, le=999)
+    origem: str | None = Field(None, max_length=80)
+    # isca para robô: invisível na página; gente de verdade deixa em branco
+    site: str | None = Field(None, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def _email_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not _EMAIL.match(v):
+            raise ValueError("E-mail inválido.")
+        return v
+
+    @field_validator("nome", "empresa", "origem")
+    @classmethod
+    def _sem_espaco_sobrando(cls, v: str | None) -> str | None:
+        return (v.strip() or None) if v is not None else None
+
+
+class ListaEsperaResposta(BaseModel):
+    ok: bool = True
+    ja_estava: bool

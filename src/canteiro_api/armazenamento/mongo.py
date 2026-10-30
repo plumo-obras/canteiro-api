@@ -3,6 +3,7 @@
 Este é o ÚNICO módulo que importa `pymongo`. Ele mapeia `id` ↔ `_id`, exige tenant em toda leitura e usa transações
 reais (replica set), repetidas pelo próprio driver em conflito transitório.
 """
+import logging
 from typing import Any
 
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
@@ -13,6 +14,10 @@ from pymongo.write_concern import WriteConcern
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta
 
 from .base import DocumentoAusente, TransacaoComBuffer, validar_campos, validar_consulta, validar_doc
+
+# Em DEBUG o driver loga o comando inteiro, com o documento dentro: e-mail da lista de espera, hash de senha, chave
+# cifrada. Fica no máximo em INFO, mesmo com o resto da aplicação em DEBUG.
+logging.getLogger("pymongo.command").setLevel(logging.INFO)
 
 _OPS = {"==": "$eq", "in": "$in", "<": "$lt", "<=": "$lte", ">": "$gt", ">=": "$gte"}
 

@@ -19,6 +19,23 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   de outro cliente) · 409 conflito (já decidido, chave reutilizada, fora de ordem) · 422 regra de negócio · 429 tentativas.
 - OpenAPI em `GET /openapi.json` (e `/docs`).
 
+## Lista de espera (landing pública, sem login)
+
+Única rota que o navegador chama direto (a landing da Aprumo, `apps/site`, em outro domínio). Não exige token.
+
+- `POST /lista-espera` `{email, nome?, empresa?, papel?, obras_ativas?, origem?, site?}` → `{ok: true, ja_estava}`.
+  `email` obrigatório (até 254, conferido na forma); `nome`/`empresa` até 120; `origem` até 80 (ex. utm);
+  `papel` ∈ `engenheiro | mestre | dono | comprador | outro`; `obras_ativas` inteiro 0..999. Campo desconhecido → 422.
+- Guarda em `lista_espera` no tenant do sistema, ID = hash do e-mail normalizado (minúsculo, sem espaço nas pontas).
+  1ª vez → 201 `{ok:true, ja_estava:false}`; repetida → 200 `{ok:true, ja_estava:true}`, **sem sobrescrever** o que já
+  estava. Nunca devolve posição na fila nem dado guardado.
+- `site` é isca para robô (campo escondido na página): preenchido → 201 como se tivesse dado certo, e nada é gravado.
+- Limite por IP (`LISTA_ESPERA_POR_IP`, padrão 10, na mesma janela do login); toda chamada conta, inclusive a da isca.
+  Estourou → 429.
+- CORS só nesta rota, para as origens de `CORS_ORIGENS` (vírgula; `*` é ignorado), só `POST` com `Content-Type`,
+  sem credenciais. Origem fora da lista não recebe `Access-Control-Allow-Origin`. O resto da API não responde CORS.
+- O e-mail não vai para log (o adaptador do Mongo segura o log de comandos do driver em INFO).
+
 ## Obras e almoxarifado
 
 - `GET /obras` → `[Obra]`
