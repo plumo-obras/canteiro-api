@@ -157,9 +157,52 @@ plataforma escolhida antes de fechar.
 3. **Integrações:** MS Project (MPXJ), clima, busca de preço real (servidor + provedor), rastreio, planta (ver e marcar).
 4. **Escala:** servidor MCP público para os clientes, Vector Search nos documentos, ERP de obra.
 
+## 11. Chave própria × créditos da plataforma
+
+O cliente escolhe: **créditos do Canteiro** (padrão: a fatura da plataforma traz assinatura mensal/anual + consumo de
+IA) ou **chave própria da Anthropic** (o modelo é cobrado na conta dele; a fatura do Canteiro traz só a assinatura, e o
+consumo aparece como informativo).
+
+- O **livro de consumo** é o mesmo nos dois casos: cada chamada grava cliente, obra, rota, tokens e custo. A fatura
+  mensal e o detalhamento **por dia, por obra e por função** (conversa, briefing, WhatsApp, NF) saem dele.
+- Chave própria: cifrada num cofre (Secret Manager), usada só no serviço do agente, **testada ao conectar**.
+- Com o loop no nosso Cloud Run, trocar de chave é trocar o cliente da chamada. No Managed Agents, agentes e sessões
+  moram na organização da chave, então a chave própria exigiria manter o agente dentro da conta de cada cliente:
+  mais um motivo para começar pelo loop próprio.
+- Revenda: confirmar nos Termos Comerciais da Anthropic (ou com o time comercial) as condições para repassar consumo com margem.
+
+## 12. Como o agente roda (loop com ferramentas, não grafo de prompts)
+
+Um Cloud Run nosso recebe o evento (ou a pergunta). Dentro dele:
+
+1. **Roteador em código, sem LLM:** pelo tipo de evento escolhe as instruções e o subconjunto de ferramentas do caso
+   (ex.: `nf.recebida` → "conferência de recebimento").
+2. **Loop do agente** (Tool Runner do SDK): o modelo pede ferramentas (`buscar_pedido`, `ler_nf`,
+   `buscar_conhecimento`…), o nosso código executa contra a API central e devolve o resultado, até o modelo terminar.
+3. **Saída = propostas** (`propor_abatimento`, `propor_pedido`…), nunca gravação direta.
+
+O grafo encolhe para o roteador do passo 1. Fluxos 100% previsíveis continuam em código comum, e o modelo entra só
+onde há julgamento. No Managed Agents muda só quem roda o loop; as ferramentas continuam rodando do nosso lado.
+
+## 13. Base de conhecimento
+
+| Tipo | Exemplos | Acesso do agente |
+|---|---|---|
+| Dado estruturado e vivo | estoque, pedidos, NF, medições, cronograma | **sempre por ferramenta da API** (nunca pela base vetorial) |
+| Conhecimento em texto | projeto, memorial, contratos, RDOs antigos, procedimentos, histórico de problemas | RAG por `buscar_conhecimento(pergunta, obra, tipo)` → trechos **com fonte** (doc, página) para citar |
+| Memória aprendida | "a Joana sempre pede palete", "este fornecedor atrasa" | memória por cliente (ferramenta de memória do Claude ou armazenamento próprio) |
+
+- Onde: começar pelo **Atlas Vector Search** (mesmo banco, filtro por cliente/obra na mesma consulta). Alternativa:
+  serviço gerenciado do Google (Vertex AI RAG). Embeddings de terceiros (a Anthropic recomenda o Voyage AI; ou o do Google).
+- Documento pequeno (um memorial de 40 páginas) pode ir **inteiro no contexto** (1M tokens, com cache), sem RAG.
+- **Isolamento por cliente e obra em toda busca, no servidor.** Normas ABNT têm direitos (não indexar sem licença);
+  SINAPI é pública. Texto da base é dado, nunca instrução.
+
 ## 10. Decisões em aberto
 
 - Agente proativo no seu Cloud Run (Tool Runner + Scheduler) ou no Managed Agents (agendamento, memória e trava de custo prontos, mas beta e mais acoplado).
 - Claude pela API da Anthropic ou pela Google Cloud (faturamento único na GCP × recursos disponíveis).
 - Gateway de pagamento (Pix/boleto) e o formato do plano (franquia de créditos × pacote).
 - Serviço de transcrição de áudio.
+- Base de conhecimento: Atlas Vector Search ou serviço gerenciado do Google; provedor de embeddings.
+- Preço da assinatura com chave própria × com créditos.
