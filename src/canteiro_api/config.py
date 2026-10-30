@@ -24,6 +24,9 @@ class Config(BaseSettings):
 
     # IPs/redes (vírgula) dos proxies de confiança (ex.: o servidor do Next). Vazio = nunca ler X-Forwarded-For.
     trusted_proxies: str = ""
+    # Segredo que o Next (Vercel, sem IP fixo) manda em X-Canteiro-Proxy junto com X-Canteiro-Ip-Cliente.
+    # Com ele, a API aceita o IP do visitante informado pelo Next para o limite de tentativas. Vazio = desligado.
+    proxy_segredo: str = ""
 
     # limite de tentativas de login (janela deslizante simples)
     tentativas_por_email: int = 5

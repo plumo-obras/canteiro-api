@@ -1,3 +1,4 @@
+import hmac
 import ipaddress
 
 from fastapi import APIRouter, Request, status
@@ -28,6 +29,13 @@ def _ip(request: Request) -> str:
     o que está à esquerda dele foi escrito pelo próprio cliente.
     """
     direto = request.client.host if request.client else "desconhecido"
+    # A Vercel não tem IP fixo, então a lista de proxies não serve para o Next hospedado: ele se identifica
+    # por um segredo compartilhado e informa o IP do visitante (que a Vercel lhe entrega). Tempo constante.
+    segredo = request.app.state.config.proxy_segredo
+    enviado = request.headers.get("x-canteiro-proxy", "")
+    if segredo and enviado and hmac.compare_digest(enviado, segredo):
+        ip = request.headers.get("x-canteiro-ip-cliente", "").strip()
+        return ip if _valido(ip) else direto
     redes = _redes(request.app.state.config.trusted_proxies)
     if not redes or not _confiavel(direto, redes):
         return direto

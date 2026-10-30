@@ -161,12 +161,33 @@ def test_ip_da_cadeia():
 
     from canteiro_api.rotas.auth import _ip
 
-    def req(cliente, xff, proxies="10.0.0.0/8"):
-        return SimpleNamespace(client=SimpleNamespace(host=cliente), headers={"x-forwarded-for": xff},
-                               app=SimpleNamespace(state=SimpleNamespace(config=SimpleNamespace(trusted_proxies=proxies))))
+    def req(cliente, xff, proxies="10.0.0.0/8", segredo="", headers=None):
+        h = {"x-forwarded-for": xff, **(headers or {})}
+        cfg = SimpleNamespace(trusted_proxies=proxies, proxy_segredo=segredo)
+        return SimpleNamespace(client=SimpleNamespace(host=cliente), headers=h,
+                               app=SimpleNamespace(state=SimpleNamespace(config=cfg)))
 
     assert _ip(req("10.0.0.5", "1.1.1.1, 2.2.2.2, 10.0.0.9")) == "2.2.2.2"
     assert _ip(req("8.8.8.8", "1.1.1.1")) == "8.8.8.8"                  # quem chamou não é proxy nosso
     assert _ip(req("10.0.0.5", "1.1.1.1", proxies="")) == "10.0.0.5"    # nada configurado
     assert _ip(req("10.0.0.5", "lixo")) == "10.0.0.5"
     assert _ip(req("10.0.0.5", "")) == "10.0.0.5"
+
+
+def test_ip_informado_pelo_next_com_segredo():
+    """Na Vercel não há IP fixo: o Next prova quem é pelo segredo e informa o IP do visitante."""
+    from types import SimpleNamespace
+
+    from canteiro_api.rotas.auth import _ip
+
+    def req(headers, segredo="s3gredo-do-next"):
+        cfg = SimpleNamespace(trusted_proxies="", proxy_segredo=segredo)
+        return SimpleNamespace(client=SimpleNamespace(host="76.76.21.9"), headers=headers,
+                               app=SimpleNamespace(state=SimpleNamespace(config=cfg)))
+
+    ok = {"x-canteiro-proxy": "s3gredo-do-next", "x-canteiro-ip-cliente": "200.1.2.3"}
+    assert _ip(req(ok)) == "200.1.2.3"
+    assert _ip(req({**ok, "x-canteiro-proxy": "errado"})) == "76.76.21.9"        # segredo errado: IP da conexão
+    assert _ip(req({"x-canteiro-ip-cliente": "200.1.2.3"})) == "76.76.21.9"      # sem segredo: ignora o cabeçalho
+    assert _ip(req(ok, segredo="")) == "76.76.21.9"                               # desligado na API
+    assert _ip(req({**ok, "x-canteiro-ip-cliente": "lixo"})) == "76.76.21.9"     # IP inválido não vale
