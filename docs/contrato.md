@@ -9,10 +9,15 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 
 - `POST /auth/entrar` `{email, senha}` → `{acesso, renovacao, usuario:{id, nome, tenant_id, papel}}`.
   Acesso: JWT curto (15 min). Renovação: opaco, guardado no banco (hash), revogável, troca a cada uso.
-- `POST /auth/renovar` `{renovacao}` → novo par. `POST /auth/sair` revoga.
-- Senha com argon2. Limite de tentativas por e-mail e por IP. Papéis no banco: `viewer` (lê), `admin` (aprova e
+- `POST /auth/renovar` `{renovacao}` → novo par **e** `usuario` (mesmo corpo do `/auth/entrar`). `POST /auth/sair` revoga.
+- Senha com argon2. Limite de tentativas por e-mail e por IP. O IP só vem do `X-Forwarded-For` quando quem chama está
+  em `TRUSTED_PROXIES` (IPs/redes separados por vírgula no `.env`, vazio por padrão); vale o último endereço da cadeia
+  que não é proxy de confiança. Papéis no banco: `viewer` (lê), `admin` (aprova e
   opera), `master` (+usuários). O papel **nunca** vem do token: a API resolve no banco a cada requisição.
 - Todas as rotas abaixo exigem `Authorization: Bearer <acesso>` e só enxergam o `tenant_id` do usuário.
+- Erros: `{detail: "mensagem pronta para a pessoa"}`. 401 sem sessão · 403 papel insuficiente · 404 não existe (ou é
+  de outro cliente) · 409 conflito (já decidido, chave reutilizada, fora de ordem) · 422 regra de negócio · 429 tentativas.
+- OpenAPI em `GET /openapi.json` (e `/docs`).
 
 ## Obras e almoxarifado
 
@@ -23,9 +28,13 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50` → `[Movimento]` (mais novos primeiro)
 - `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, origem_doc?, chave_idempotencia}` →
   `Movimento`. Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
+  `tipo` ∈ `entrada | saida | ajuste` (transferência fica para depois); mesma chave com outro conteúdo → 409.
+  Saída de curva A sem `destino` → 422. Papel `admin`+. Gera `EntradaRegistro` com `desfazer` (estorno).
 - `POST /obras/{obra_id}/importar` (multipart, CSV `;` ou `,`, UTF-8 ou Windows-1252): colunas
   `nome;unidade;saldo;precisa_ate_o_fim;curva`. Cria insumos e um movimento de AJUSTE inicial. Responde a prévia
   (`?aplicar=false`) ou aplica (`?aplicar=true`). Número ambíguo ("2.760") volta como erro da linha.
+  Resposta sempre `{aplicado, linhas:[{linha, nome, unidade, saldo, precisa_ate_o_fim, curva}], erros:[{linha, campo, mensagem}]}`;
+  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra é erro da linha.
 
 ## Pedidos
 
@@ -36,22 +45,55 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 
 ## Propostas, aprovação e registro
 
-- `POST /propostas` `{obra_id, tipo, titulo, conta, fonte, dados}` → `Proposta` (pendente). Só valida e guarda: **não executa**.
+- `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados}` → `Proposta` (pendente). Só valida e
+  guarda: **não executa**. Qualquer papel propõe (o agente usa o token de quem conversa); `dados` inválido → 422.
   `dados` por tipo: `criar_pedido` = corpo do POST de pedido · `avancar_pedido` = `{pedido_id, para}` ·
   `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
 - `GET /propostas?status=pendente&obra_id=…` → `[Proposta]`
-- `POST /propostas/{id}/aprovar` → executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro`
+- `POST /propostas/{id}/aprovar` → `{proposta, registro}` (o `registro.id` é o que o Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro`
   com `desfazer` preenchido. `POST /propostas/{id}/recusar` `{motivo}`.
+- Aprovar grava em `Proposta.registro_id` o ID da `EntradaRegistro` da execução (a tela mostra o Desfazer mesmo depois
+  de recarregar); desfazer mantém o `registro_id` e muda a proposta para `desfeita`.
+- Proposta decidida traz `decidido_por` (ID) e `decidido_por_nome`. `EntradaRegistro.quem` é o nome legível;
+  vem também `quem_nome` (igual) e `usuario_id`.
 - `GET /registro?obra_id=…&limite=50` → `[EntradaRegistro]` · `POST /registro/{id}/desfazer` → aplica a operação inversa
   (estorno de movimento, volta de status do pedido) e registra o desfazer.
 
 ## Consumo de IA
 
-- `POST /uso` (só o serviço do agente, com token de serviço) `UsoIA` → grava a linha.
+- `POST /uso` (só o serviço do agente, com token de serviço) `UsoIA` → grava a linha. O corpo traz `tenant_id` e
+  `usuario_id` (claims `tid`/`sub` do token que a API já aceitou em `GET /creditos`) e o agente repete o `Authorization`
+  do usuário no cabeçalho `X-Canteiro-Usuario`, para a API conferir que batem. O `id` vem no corpo (UUIDv7 do agente):
+  repetir a chamada não duplica a linha.
 - `GET /uso?de=AAAA-MM-DD&ate=AAAA-MM-DD` → `{total, por_dia:[{dia, custo, tokens}], por_obra:[…], por_rota:[…]}`
   (somado na API a partir das linhas; sem agregação no banco, para ser portável).
-- `GET /creditos` → `{saldo_microdolares, franquia, chave_propria:bool}`. O agente consulta **antes** de chamar o modelo;
+- `GET /creditos` → `{saldo_microdolares, franquia, chave_propria:bool, usuario_id, tenant_id}`. O agente consulta **antes** de chamar o modelo;
   sem saldo (e sem chave própria) → 402 com mensagem para a pessoa.
+  O 402 traz o mesmo corpo de `Creditos` mais `detail` (mensagem para a pessoa). `POST /uso` aceita o token do usuário
+  vencido há até 60 min (a conversa pode passar dos 15 min do acesso; a assinatura continua conferida); corpo que não
+  bate com o token → 403; mesmo `id` → 200 sem duplicar. Com créditos (sem chave própria) o custo é descontado do saldo
+  na mesma transação.
+
+## Chave própria da Anthropic
+
+- `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "…abcd"}`. Guardada cifrada
+  (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE` desconecta.
+- `GET /interno/chave-anthropic` (só o serviço do agente: `Authorization: Bearer <token de serviço>` +
+  `X-Canteiro-Usuario: Bearer <acesso do usuário>`) → `{chave}` com `Cache-Control: no-store`; 404 sem chave própria.
+
+## Sessões de conversa (histórico do agente)
+
+Um documento por sessão (`sessoes`) e um por mensagem (`mensagens`, ID = `{sessao_id}-{seq:06d}`). A sessão é
+privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
+
+- `POST /sessoes` `{id?, obra_id?, titulo?, abas?}` → `Sessao` (201; mesmo `id` do mesmo dono → 200).
+  `Sessao = {id, tenant_id, dono, obra_id, titulo, abas:[obj] (≤ 20), total_mensagens, criado_em, atualizado_em}`.
+- `GET /sessoes?obra_id=&limite=30` → `[Sessao]` (mais recentes primeiro) · `GET /sessoes/{id}` →
+  `Sessao` · `PATCH /sessoes/{id}` `{titulo?, obra_id?, abas?}`.
+- `GET /sessoes/{id}/mensagens?depois_de=-1&limite=200` → `[{id, sessao_id, seq, papel, conteudo, criado_em}]` (por seq).
+- `POST /sessoes/{id}/mensagens` `{seq_inicial, mensagens:[{papel: user|assistant, conteudo: texto | [blocos]}]}`
+  (até 50) → `Sessao + mensagens` (201). Só acrescenta: `seq_inicial` tem de ser o `total_mensagens` atual; reenvio do
+  mesmo lote → 200; outra coisa → 409 com o esperado na mensagem. Mensagem acima de ~800 KB → 422.
 
 ## Agente
 
@@ -69,7 +111,7 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 | `historico_movimentos(obra_id, insumo_id)` | consulta | `GET …/movimentos` |
 | `listar_pedidos(obra_id, status?)` | consulta | `GET /obras/{id}/pedidos` |
 | `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa)` | propõe | `POST /propostas` (criar_pedido) |
-| `propor_avanco_pedido(pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido) |
+| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido) |
 | `propor_ajuste_estoque(obra_id, insumo_id, quantidade, motivo)` | propõe | `POST /propostas` (ajuste_estoque) |
 
 - As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API.

@@ -50,12 +50,13 @@ def reais(valor: str | int | float | Decimal) -> int:
 
 
 def fmt_qtd(m: int) -> str:
-    """1500 → '1,5'; 2760000 → '2.760'."""
-    d = Decimal(m) / 1000
+    """1500 → '1,5'; 2760000 → '2.760'; -500 → '-0,5' (o sinal vem à parte: int('-0') perderia o sinal)."""
+    sinal = "-" if m < 0 else ""
+    d = Decimal(abs(m)) / 1000
     inteiro, _, frac = f"{d:f}".partition(".")
     inteiro = f"{int(inteiro):,}".replace(",", ".")
     frac = frac.rstrip("0")
-    return f"{inteiro},{frac}" if frac else inteiro
+    return sinal + (f"{inteiro},{frac}" if frac else inteiro)
 
 
 def fmt_reais(c: int) -> str:

@@ -89,6 +89,8 @@ def test_ponto_com_tres_casas_e_ambiguo():
 def test_formatacao():
     assert fmt_qtd(2760000) == "2.760"
     assert fmt_qtd(1500) == "1,5"
+    assert fmt_qtd(-500) == "-0,5"
+    assert fmt_qtd(-2000) == "-2"
     assert fmt_reais(reais("1.299,90")) == "R$ 1.299,90"
     assert fmt_reais(-47200) == "-R$ 472,00"
 

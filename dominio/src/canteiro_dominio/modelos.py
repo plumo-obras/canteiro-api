@@ -117,6 +117,7 @@ class Proposta(Documento):
     tipo: TipoProposta
     titulo: str
     conta: str = ""                        # a linha de conta que justifica ("precisa … = falta …")
+    justificativa: str = ""                # por que o agente propõe, em uma frase (aparece no cartão)
     fonte: str = ""                        # de onde veio o dado
     dados: dict[str, Any]                  # payload validado pela API conforme o tipo
     sugerido_por: str = "agente"
@@ -124,6 +125,7 @@ class Proposta(Documento):
     decidido_por: str | None = None
     decidido_em: datetime | None = None
     motivo_recusa: str | None = None
+    registro_id: str | None = None         # a EntradaRegistro da execução: é o que o Desfazer usa (sobrevive a recarregar a tela)
 
 
 class EntradaRegistro(Documento):
