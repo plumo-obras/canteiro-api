@@ -5,10 +5,10 @@ from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
 from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
-from ..esquemas import AvancarCorpo, InsumoComConta, MovimentoCorpo, PedidoCorpo, Previa
+from ..esquemas import AvancarCorpo, InsumoComConta, MovimentoCorpo, PedidoCorpo, Previa, ResumoObra
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, obra_do_tenant
-from ..servicos import estoque, importacao, pedidos
+from ..servicos import estoque, importacao, pedidos, resumo
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -21,6 +21,11 @@ def _arm(request: Request):
 @r.get("/obras", response_model=list[Obra])
 async def listar_obras(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await arm.consultar(Consulta("obras", u.tenant_id, ordem=[("nome", "asc")]))
+
+
+@r.get("/obras/resumo", response_model=list[ResumoObra])
+async def resumo_obras(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await resumo.resumo_obras(arm, u.tenant_id)
 
 
 @r.get("/obras/{obra_id}/insumos", response_model=list[InsumoComConta])

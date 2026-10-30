@@ -22,6 +22,13 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 ## Obras e almoxarifado
 
 - `GET /obras` → `[Obra]`
+- `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, falta_comprar, pedidos_abertos,
+  valor_pedidos_abertos, nf_para_conferir, ultima_atividade}]` (por nome da obra), para a página inicial.
+  `pendencias` = propostas pendentes · `falta_comprar` = insumos com `Conta.comprar > 0` (a mesma Conta de
+  `GET …/insumos`) · `pedidos_abertos` = pedidos fora de `conferido`/`cancelado` e `valor_pedidos_abertos` a soma do
+  `valor` deles (centavos) · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
+  nova do registro da obra, ou `null`. Somado na API: uma consulta por coleção para o tenant inteiro (sem agregação no
+  banco) e uma leitura de 1 documento do registro por obra.
 - `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta}]`, onde
   `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar}` calculada por `regras.conta_de_falta`
   (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
@@ -74,9 +81,15 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   bate com o token → 403; mesmo `id` → 200 sem duplicar. Com créditos (sem chave própria) o custo é descontado do saldo
   na mesma transação.
 
-## Chave própria da Anthropic
+## Conta e chave própria da Anthropic
 
-- `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "…abcd"}`. Guardada cifrada
+- `GET /conta` (qualquer papel) → `{usuario:{id, nome, email, papel}, tenant:{id, nome}, chave_propria, creditos}`.
+  `papel` vem do banco nesta requisição. `chave_propria` = `{ativa: true, final, cadastrada_em}` ou `null` sem chave
+  conectada. `creditos` é o mesmo corpo de `GET /creditos`, mas **sem o 402**: sem saldo a conta responde 200 com
+  `saldo_microdolares` zerado (é a tela onde a pessoa vê isso). Pagamento de créditos ainda não existe.
+- `GET /conta/chave-anthropic` (qualquer papel) → `{ativa, final, cadastrada_em}` (`{false, null, null}` sem chave).
+  Nunca traz a chave nem o cifrado. `final` = os 4 últimos caracteres (a tela põe o "…").
+- `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "abcd"}`. Guardada cifrada
   (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE` desconecta.
 - `GET /interno/chave-anthropic` (só o serviço do agente: `Authorization: Bearer <token de serviço>` +
   `X-Canteiro-Usuario: Bearer <acesso do usuário>`) → `{chave}` com `Cache-Control: no-store`; 404 sem chave própria.

@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from canteiro_dominio.modelos import EntradaRegistro, Insumo, Proposta, StatusPedido, TipoProposta
+from canteiro_dominio.modelos import EntradaRegistro, Insumo, Obra, Proposta, StatusPedido, TipoProposta
 
 
 class Entrada(BaseModel):
@@ -168,6 +168,46 @@ class ChaveSituacao(BaseModel):
 
 class ChaveInterna(BaseModel):
     chave: str
+
+
+class ChaveEstado(BaseModel):
+    """Situação da chave própria para a tela. Nunca carrega a chave, nem cifrada."""
+    ativa: bool
+    final: str | None = Field(None, description="só os 4 últimos caracteres")
+    cadastrada_em: datetime | None = None
+
+
+# --- conta (perfil + cliente + créditos) ---
+
+class UsuarioConta(BaseModel):
+    id: str
+    nome: str
+    email: str
+    papel: str
+
+
+class TenantConta(BaseModel):
+    id: str
+    nome: str
+
+
+class MinhaConta(BaseModel):
+    usuario: UsuarioConta
+    tenant: TenantConta
+    chave_propria: ChaveEstado | None = Field(None, description="null quando não há chave conectada")
+    creditos: Creditos
+
+
+# --- página inicial ---
+
+class ResumoObra(BaseModel):
+    obra: Obra
+    pendencias: int = Field(description="propostas pendentes")
+    falta_comprar: int = Field(description="insumos com Conta.comprar > 0")
+    pedidos_abertos: int = Field(description="pedidos que ainda não foram conferidos nem cancelados")
+    valor_pedidos_abertos: int = Field(description="centavos")
+    nf_para_conferir: int = Field(description="pedidos recebidos esperando conferência")
+    ultima_atividade: datetime | None = Field(None, description="última entrada do registro da obra")
 
 
 # --- sessões de conversa ---

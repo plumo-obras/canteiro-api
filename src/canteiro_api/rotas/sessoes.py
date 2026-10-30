@@ -6,10 +6,12 @@ from canteiro_dominio.modelos import agora
 from ..auth import UsuarioAtual, exigir, usuario_atual, usuario_pelo_agente
 from ..esquemas import (
     ChaveCorpo,
+    ChaveEstado,
     ChaveInterna,
     ChaveSituacao,
     Mensagem,
     MensagensCorpo,
+    MinhaConta,
     SessaoAlteracao,
     SessaoComMensagens,
     SessaoConversa,
@@ -17,7 +19,7 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import NaoEncontrado, evento, registrar
-from ..servicos import sessoes
+from ..servicos import sessoes, uso
 
 r = APIRouter()
 
@@ -73,6 +75,32 @@ async def acrescentar_mensagens(sessao_id: str, corpo: MensagensCorpo, response:
 
 def _id_segredo(tenant_id: str) -> str:
     return f"anthropic-{tenant_id}"
+
+
+async def _chave_estado(arm, tenant_id: str) -> ChaveEstado:
+    t = await arm.obter("tenants", tenant_id, tenant_id)
+    s = await arm.obter("segredos", tenant_id, _id_segredo(tenant_id))
+    if not t or not t["chave_propria"] or not s or not s.get("cifrado"):
+        return ChaveEstado(ativa=False)
+    return ChaveEstado(ativa=True, final=s.get("final"), cadastrada_em=s.get("atualizado_em"))
+
+
+@r.get("/conta", response_model=MinhaConta, tags=["conta"])
+async def minha_conta(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    usuario = await arm.obter("usuarios", u.tenant_id, u.id)
+    t = await arm.obter("tenants", u.tenant_id, u.tenant_id)
+    if not usuario or not t:
+        raise NaoEncontrado("Cliente não encontrado.")
+    chave = await _chave_estado(arm, u.tenant_id)
+    # sem o 402 do /creditos: a tela da conta é justamente onde a pessoa vê que o saldo acabou
+    return MinhaConta(usuario={"id": u.id, "nome": usuario["nome"], "email": usuario["email"], "papel": u.papel.value},
+                      tenant={"id": t["id"], "nome": t["nome"]}, chave_propria=chave if chave.ativa else None,
+                      creditos=await uso.creditos(arm, u.tenant_id, u.id))
+
+
+@r.get("/conta/chave-anthropic", response_model=ChaveEstado, tags=["conta"])
+async def situacao_chave(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await _chave_estado(arm, u.tenant_id)
 
 
 @r.put("/conta/chave-anthropic", response_model=ChaveSituacao, tags=["conta"])

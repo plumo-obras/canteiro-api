@@ -91,14 +91,12 @@ def mesmo_movimento(existente: dict, corpo) -> bool:
         corpo.insumo_id, corpo.tipo, corpo.quantidade, corpo.destino)
 
 
-async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
-    """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra."""
-    insumos = await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)], [("nome", "asc")]))
-    saldos = {s["id"]: s["saldo"] for s in
-              await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
-    abertos = [s.value for s in A_CAMINHO | EM_COTACAO]
-    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                  Filtro("status", "in", abertos)]))
+PEDIDOS_ABERTOS = [s.value for s in A_CAMINHO | EM_COTACAO]
+
+
+def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) -> list[dict]:
+    """Junta insumos, saldos e pedidos abertos já lidos. Separado da leitura para o resumo de obras reaproveitar a
+    mesma conta lendo o tenant inteiro de uma vez."""
     a_caminho: dict[str, int] = {}
     cotando: dict[str, int] = {}
     for p in pedidos:
@@ -107,3 +105,13 @@ async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     return [{"insumo": i, "conta": asdict(conta_de_falta(
         precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0), a_caminho=a_caminho.get(i["id"], 0),
         cotando=cotando.get(i["id"], 0), transferencia=0))} for i in insumos]
+
+
+async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
+    """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra."""
+    insumos = await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)], [("nome", "asc")]))
+    saldos = {s["id"]: s["saldo"] for s in
+              await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
+    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
+                                                                  Filtro("status", "in", PEDIDOS_ABERTOS)]))
+    return com_conta(insumos, saldos, pedidos)
