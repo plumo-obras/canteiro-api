@@ -88,8 +88,8 @@ async def test_cors_libera_so_origem_configurada(http):
 
 
 async def test_cors_vem_da_config_e_nao_vaza_para_outras_rotas(arm, config):
-    async with await _cliente(arm, config, cors_origens="https://aprumo.vercel.app, *") as c:
-        h = {"Origin": "https://aprumo.vercel.app", "Access-Control-Request-Method": "POST"}
+    async with await _cliente(arm, config, cors_origens="https://plumo.vercel.app, *") as c:
+        h = {"Origin": "https://plumo.vercel.app", "Access-Control-Request-Method": "POST"}
         assert (await c.options("/lista-espera", headers=h)).headers["access-control-allow-origin"] == h["Origin"]
         local = {**h, "Origin": ORIGEM_OK}                 # o padrão foi trocado pela env
         assert "access-control-allow-origin" not in (await c.options("/lista-espera", headers=local)).headers

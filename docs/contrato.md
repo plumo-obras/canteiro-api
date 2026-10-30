@@ -21,7 +21,7 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 
 ## Lista de espera (landing pública, sem login)
 
-Única rota que o navegador chama direto (a landing da Aprumo, `apps/site`, em outro domínio). Não exige token.
+Única rota que o navegador chama direto (a landing da Plumo, `apps/site`, em outro domínio). Não exige token.
 
 - `POST /lista-espera` `{email, nome?, empresa?, papel?, obras_ativas?, origem?, site?}` → `{ok: true, ja_estava}`.
   `email` obrigatório (até 254, conferido na forma); `nome`/`empresa` até 120; `origem` até 80 (ex. utm);

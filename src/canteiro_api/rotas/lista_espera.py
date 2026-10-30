@@ -1,4 +1,4 @@
-"""Lista de espera da landing (Aprumo). Rota pública: sem login, chamada direto do navegador (CORS em main.py).
+"""Lista de espera da landing (Plumo). Rota pública: sem login, chamada direto do navegador (CORS em main.py).
 
 Nada aqui pode virar oráculo de quem está inscrito além do próprio e-mail informado: a resposta só diz se aquele
 e-mail já estava na lista, nunca posição na fila nem dado de outra pessoa. E o e-mail não vai para log.

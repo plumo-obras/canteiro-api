@@ -5,7 +5,7 @@
 | Recurso | Onde | Endereço / identificação |
 |---|---|---|
 | Web | Vercel, projeto `canteiro-web` (time `rizzi26s-projects`, raiz `apps/web`) | https://canteiro-web-nu.vercel.app (`canteiro-web.vercel.app` já era de outra conta) |
-| Landing (Aprumo, lista de espera) | Vercel, projeto `aprumo-site` (raiz `apps/site`, estático, sem build) | https://aprumo-site-nine.vercel.app (`aprumo-site.vercel.app` já era de outra conta: **não** ponha esse endereço no `CORS_ORIGENS`) |
+| Landing (Plumo, lista de espera) | Vercel, projeto `plumo-site` (raiz `apps/site`, estático, sem build) | https://plumo-site.vercel.app (a 1ª versão saiu como Aprumo em `aprumo-site-nine.vercel.app`, que segue apontando para o mesmo projeto; `aprumo-site.vercel.app` é de outra conta) |
 | API | Render `canteiro-api` (`srv-dbig4pcs728c73f606m0`), Virginia, free | https://canteiro-api.onrender.com |
 | Agente | Render `canteiro-agente` (`srv-dbig4rvlk1mc73emi7t0`), Virginia, free, `MODELO_ROTEIRO=1` | https://canteiro-agente.onrender.com |
 | Banco | Atlas, projeto `canteiro`, cluster M0 `canteiro` (AWS us-east-1), usuário `canteiro-api` com `readWrite@canteiro` | `canteiro.lyhqjtc.mongodb.net` |
