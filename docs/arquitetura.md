@@ -52,7 +52,17 @@ da API**, **eventos via Google Pub/Sub**, **assinatura + consumo de IA por clien
   Pub/Sub. Sem isso, um crash entre "gravou" e "publicou" faz o agente perder eventos.
 - **Contrato público:** OpenAPI → gera o SDK do front e as ferramentas do agente (ver §4).
 
-## 3. MongoDB: funciona, com três cuidados
+## 3. MongoDB agora, Firestore (Firebase) depois
+
+**Decisão (30/10/2026): o banco vai migrar para o Firestore, então tudo precisa ser compatível desde já.** O código fala
+só com a porta `canteiro_dominio.armazenamento`, que aceita apenas o que o Firestore aceita: igualdade e `in` (≤ 30),
+desigualdade em um campo, ordenação começando por esse campo, limite; sem joins, regex ou aggregation pipeline;
+unicidade e idempotência pelo ID do documento; transação com leituras antes das escritas (≤ 500); dinheiro e quantidade
+em inteiros (centavos, milésimos); IDs UUIDv7 nossos; nenhuma lista que cresce dentro de um documento. A migração vira
+"escrever o adaptador Firestore e passar na mesma suíte de testes de contrato" que hoje roda contra memória e Mongo.
+Busca vetorial (base de conhecimento) e eventos ficam atrás de interfaces próprias, porque Atlas e Firestore diferem ali.
+
+### Cuidados que valem nos dois bancos
 
 Documentos encaixam bem em obra, sessão de conversa, RDO, NF (XML vira documento), planta/metadados, cronograma importado.
 O cuidado está no que é **dinheiro e estoque**:

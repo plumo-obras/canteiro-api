@@ -1,0 +1,23 @@
+# Ambiente local: MongoDB em replica set de 1 nó (transações exigem replica set) + emulador do Pub/Sub.
+# Subir:  docker compose -f infra/docker-compose.yml up -d
+services:
+  mongo:
+    image: mongo:8
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      # inicia o replica set na 1ª subida e depois só confirma que está de pé
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 5s
+
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "beta", "emulators", "pubsub", "start", "--host-port=0.0.0.0:8085", "--project=canteiro-local"]
+    ports: ["8085:8085"]
+
+volumes:
+  mongo-data:
