@@ -49,11 +49,17 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta}]`, onde
   `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar}` calculada por `regras.conta_de_falta`
   (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
+- `POST /obras/{obra_id}/insumos` `{nome, unidade, curva?="C", precisa_ate_o_fim?=0}` → `Insumo` + `registro_id`
+  (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
+  maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Sem desfazer.
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50` → `[Movimento]` (mais novos primeiro)
 - `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, origem_doc?, chave_idempotencia}` →
-  `Movimento`. Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
+  `Movimento + registro_id` (o ID da `EntradaRegistro` criada: é o que o Desfazer usa logo depois da ação; derivado
+  do movimento, então a repetição da chave devolve o mesmo `registro_id`). Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
   `tipo` ∈ `entrada | saida | ajuste` (transferência fica para depois); mesma chave com outro conteúdo → 409.
   Saída de curva A sem `destino` → 422. Papel `admin`+. Gera `EntradaRegistro` com `desfazer` (estorno).
+- `Movimento.quem` é o **nome** de quem lançou (o que a tela mostra); o ID do usuário vem em `usuario_id` (`null` em
+  movimento semeado). Vale para movimento da tela, da conferência de pedido, de proposta aprovada e da importação.
 - `POST /obras/{obra_id}/importar` (multipart, CSV `;` ou `,`, UTF-8 ou Windows-1252): colunas
   `nome;unidade;saldo;precisa_ate_o_fim;curva`. Cria insumos e um movimento de AJUSTE inicial. Responde a prévia
   (`?aplicar=false`) ou aplica (`?aplicar=true`). Número ambíguo ("2.760") volta como erro da linha.
@@ -63,23 +69,52 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 ## Pedidos
 
 - `GET /obras/{obra_id}/pedidos?status=…` → `[Pedido]`
-- `POST /obras/{obra_id}/pedidos` `{insumo_id, quantidade, fornecedor, valor, previsao?}` → `Pedido` (status em_cotacao; número PED-NNNN por tenant)
-- `POST /pedidos/{pedido_id}/avancar` `{para}` → `Pedido`. Valida em `regras.validar_transicao`. Para `conferido`:
-  cria o movimento de ENTRADA (origem_doc = número) na mesma transação.
+- `Pedido` tem também `quantidade_recebida` (milésimos) e `nf`, ambos `null` até a conferência.
+- `POST /obras/{obra_id}/pedidos` `{insumo_id, quantidade, fornecedor, valor, previsao?, aprovado?}` →
+  `Pedido + registro_id` (201; número PED-NNNN por tenant). `aprovado` (padrão `false`): `false` → status
+  `em_cotacao`; `true` → nasce `aprovado` (compra já decidida). O desfazer (`cancelar_pedido`) guarda o status de
+  nascimento em `status_criado` e só cancela se o pedido ainda estiver nele; se já andou → 409.
+- `POST /pedidos/{pedido_id}/avancar` `{para, quantidade_recebida?, nf?}` → `Pedido + registro_id`. Valida em
+  `regras.validar_transicao`. Para `conferido`: cria o movimento de ENTRADA na mesma transação e grava no pedido
+  `quantidade_recebida` e `nf`.
+  - `quantidade_recebida` (milésimos, > 0; padrão = `quantidade` do pedido) é o que entra no almoxarifado. Menos que o
+    pedido é aceito e o pedido fecha mesmo assim: a diferença deixa de estar "a caminho" e volta como falta na Conta.
+    Mais que o pedido também é aceito.
+  - `nf` (até 60 caracteres; em branco = não informada): o `origem_doc` da entrada vira `"PED-0157 · NF 4471"`
+    (sem NF, só o número).
+  - Os dois só valem com `para = conferido`; com outro destino → 422.
+  - Registro: `"PED-0157: recebido → conferido · chegaram 36 de 40 m³ (NF 4471)"` (o trecho "chegaram…" só aparece
+    quando há divergência; "(NF …)" só com NF).
+  - Desfazer a conferência estorna exatamente o que entrou e volta `quantidade_recebida` e `nf` para `null`.
 
 ## Propostas, aprovação e registro
 
 - `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados}` → `Proposta` (pendente). Só valida e
   guarda: **não executa**. Qualquer papel propõe (o agente usa o token de quem conversa); `dados` inválido → 422.
-  `dados` por tipo: `criar_pedido` = corpo do POST de pedido · `avancar_pedido` = `{pedido_id, para}` ·
-  `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
+  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, previsao?}` (o corpo do POST de
+  pedido **sem** `aprovado`) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
+  `POST …/avancar`) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
 - `GET /propostas?status=pendente&obra_id=…` → `[Proposta]`
-- `POST /propostas/{id}/aprovar` → `{proposta, registro}` (o `registro.id` é o que o Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro`
-  com `desfazer` preenchido. `POST /propostas/{id}/recusar` `{motivo}`.
+- `POST /propostas/{id}/aprovar` `{ajustes?}` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o
+  Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro` com `desfazer`
+  preenchido. `POST /propostas/{id}/recusar` `{motivo}`.
+- Aprovar `criar_pedido` cria o pedido já **`aprovado`** (não `em_cotacao`): a aprovação da proposta é a aprovação da
+  compra. O texto do registro termina em `· aprovado`.
+- **Ajustar e aprovar**: `ajustes` corrige campos de `dados` antes de executar. Chaves aceitas por tipo:
+  `criar_pedido` → `quantidade, fornecedor, valor, previsao` · `avancar_pedido` → `quantidade_recebida, nf` (só se
+  `dados.para = conferido`, senão 422) · `ajuste_estoque` → `quantidade, motivo`. Chave fora da lista → 422. Os dados
+  mesclados são revalidados com as regras da criação (ex.: ajuste de zero → 422); erro deixa a proposta pendente.
+  Na mesma transação a proposta grava `dados` (o que foi executado), `dados_originais` (o que o agente propôs) e
+  `ajustada: true`, e o texto do registro ganha o sufixo `· ajustado: quantidade 34 → 30 sc; fornecedor A → B`
+  (`—` para campo que estava vazio). Sem corpo, `ajustes` vazio ou com os mesmos valores = aprovação normal
+  (`ajustada: false`, `dados_originais: null`).
 - Aprovar grava em `Proposta.registro_id` o ID da `EntradaRegistro` da execução (a tela mostra o Desfazer mesmo depois
   de recarregar); desfazer mantém o `registro_id` e muda a proposta para `desfeita`.
 - Proposta decidida traz `decidido_por` (ID) e `decidido_por_nome`. `EntradaRegistro.quem` é o nome legível;
   vem também `quem_nome` (igual) e `usuario_id`.
+- Respostas de escrita que já trazem o ID do registro, para a tela oferecer **Desfazer** logo depois: `POST
+  /obras/{id}/movimentos`, `POST /obras/{id}/pedidos` e `POST /pedidos/{id}/avancar` (campo `registro_id`) e `POST
+  /propostas/{id}/aprovar` (`registro.id`).
 - `GET /registro?obra_id=…&limite=50` → `[EntradaRegistro]` · `POST /registro/{id}/desfazer` → aplica a operação inversa
   (estorno de movimento, volta de status do pedido) e registra o desfazer.
 
@@ -141,7 +176,7 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 | `historico_movimentos(obra_id, insumo_id)` | consulta | `GET …/movimentos` |
 | `listar_pedidos(obra_id, status?)` | consulta | `GET /obras/{id}/pedidos` |
 | `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa)` | propõe | `POST /propostas` (criar_pedido) |
-| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido) |
+| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa, quantidade_recebida?, nf?)` | propõe | `POST /propostas` (avancar_pedido) |
 | `propor_ajuste_estoque(obra_id, insumo_id, quantidade, motivo)` | propõe | `POST /propostas` (ajuste_estoque) |
 
 - As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API.
@@ -150,4 +185,5 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
 Casa Vila Nova do protótipo: insumos bloco (entrou 4.000, saiu 1.050 + 190 de quebra = 2.760), aço (3.940 precisa,
 140 saldo, PED-0158 de 3.200 kg em trânsito, PED-0167 de 600 kg em cotação), cimento (precisa 200, saldo 46, PED-0160
-de 120 sc a caminho), areia (PED-0157 recebido, 40 m³ na NF). Um usuário `admin` de exemplo, senha só no `.env` local.
+de 120 sc a caminho), areia (PED-0157 recebido, 40 m³ na NF). Movimentos semeados com `quem = "Joana (mestre)"`.
+Um usuário `admin` de exemplo, senha só no `.env` local.

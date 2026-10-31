@@ -53,7 +53,7 @@ def documentos(cfg: Config, t: str = TENANT_EXEMPLO) -> dict[str, list[dict]]:
 
     def mov(ins, tipo, q, dias, **kw):
         movs.append(Movimento(id=_id(f"mov:{ins.id}:{len(movs)}"), tenant_id=t, obra_id=o, insumo_id=ins.id,
-                              tipo=tipo, quantidade=qtd(q), quem="seed", origem="sistema",
+                              tipo=tipo, quantidade=qtd(q), quem="Joana (mestre)", origem="sistema",
                               criado_em=base + timedelta(days=dias), **kw))
 
     # bloco: entrou 4.000, saiu 1.050 para a alvenaria e 190 de quebra = 2.760

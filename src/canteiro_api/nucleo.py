@@ -46,9 +46,9 @@ def evento(tx, tenant_id: str, tipo: str, obra_id: str | None, dados: dict[str, 
 
 
 def registrar(tx, u: UsuarioAtual, *, obra_id: str | None, texto: str, origem: str = "tela",
-              proposta_id: str | None = None, desfazer: dict | None = None) -> dict:
+              proposta_id: str | None = None, desfazer: dict | None = None, id: str | None = None) -> dict:
     e = EntradaRegistro(tenant_id=u.tenant_id, obra_id=obra_id, quem=u.nome, origem=origem, texto=texto,
-                        proposta_id=proposta_id, desfazer=desfazer)
+                        proposta_id=proposta_id, desfazer=desfazer, **({"id": id} if id else {}))
     # `quem` já é o nome legível; `quem_nome` explicita para a tela, `usuario_id` fica para auditoria
     d = {**doc(e), "quem_nome": u.nome, "usuario_id": u.id}
     tx.criar("registro", d)
@@ -56,10 +56,11 @@ def registrar(tx, u: UsuarioAtual, *, obra_id: str | None, texto: str, origem: s
 
 
 def executar_e_registrar(tx, u: UsuarioAtual, op: Operacao, *, origem: str = "tela",
-                               proposta_id: str | None = None) -> tuple[Any, dict]:
+                               proposta_id: str | None = None, registro_id: str | None = None) -> tuple[Any, dict]:
+    """`registro_id` fixo quando a escrita é idempotente: a repetição devolve o mesmo registro (e o mesmo Desfazer)."""
     resultado = op.aplicar()
     entrada = registrar(tx, u, obra_id=op.obra_id, texto=op.texto(resultado), origem=origem,
-                        proposta_id=proposta_id, desfazer=op.desfazer(resultado))
+                        proposta_id=proposta_id, desfazer=op.desfazer(resultado), id=registro_id)
     return resultado, entrada
 
 

@@ -8,7 +8,16 @@ from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import StatusProposta, UsoIA
 
 from ..auth import UsuarioAtual, exigir, usuario_atual, usuario_pelo_agente
-from ..esquemas import Aprovacao, Creditos, PropostaCorpo, PropostaSaida, RecusarCorpo, RegistroSaida, RelatorioUso
+from ..esquemas import (
+    Aprovacao,
+    AprovarCorpo,
+    Creditos,
+    PropostaCorpo,
+    PropostaSaida,
+    RecusarCorpo,
+    RegistroSaida,
+    RelatorioUso,
+)
 from ..modelos import Papel
 from ..nucleo import ErroNegocio
 from ..servicos import propostas, uso
@@ -39,8 +48,10 @@ async def listar(status_: StatusProposta | None = Query(None, alias="status"), o
 
 
 @r.post("/propostas/{proposta_id}/aprovar", response_model=Aprovacao, tags=["propostas"])
-async def aprovar(proposta_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
-    prop, registro = await propostas.aprovar(arm, u, proposta_id)
+async def aprovar(proposta_id: str, corpo: AprovarCorpo | None = None, u: UsuarioAtual = Depends(admin),
+                  arm=Depends(_arm)):
+    # sem corpo (ou sem ajustes) aprova como o agente propôs; com `ajustes`, aprova a versão corrigida
+    prop, registro = await propostas.aprovar(arm, u, proposta_id, corpo.ajustes if corpo else None)
     return {"proposta": prop, "registro": registro}
 
 

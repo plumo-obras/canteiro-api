@@ -5,7 +5,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from canteiro_dominio.modelos import EntradaRegistro, Insumo, Obra, Proposta, StatusPedido, TipoProposta
+from canteiro_dominio.modelos import (
+    EntradaRegistro,
+    Insumo,
+    Movimento,
+    Obra,
+    Pedido,
+    Proposta,
+    StatusPedido,
+    TipoProposta,
+)
 
 
 class Entrada(BaseModel):
@@ -49,6 +58,19 @@ class InsumoComConta(BaseModel):
     conta: ContaSaida
 
 
+class InsumoCorpo(Entrada):
+    """Insumo cadastrado pela tela: o que chegou ou foi comprado sem estar na planilha do orçamento."""
+    nome: str = Field(min_length=1, max_length=120)
+    unidade: str = Field(min_length=1, max_length=12)
+    curva: Literal["A", "B", "C"] = "C"
+    precisa_ate_o_fim: int = Field(0, ge=0,
+                                   description="milésimos; 0 = fora do orçamento (não entra na conta de falta)")
+
+
+class InsumoSaida(Insumo):
+    registro_id: str | None = Field(None, description="a EntradaRegistro do cadastro")
+
+
 class MovimentoCorpo(Entrada):
     insumo_id: str
     # transferência entre obras ainda não existe no MVP-0
@@ -59,7 +81,9 @@ class MovimentoCorpo(Entrada):
     chave_idempotencia: str = Field(min_length=8, max_length=200)
 
 
-class PedidoCorpo(Entrada):
+class PedidoDados(Entrada):
+    """O pedido em si. É também o `dados` da proposta `criar_pedido`, que não aceita `aprovado`: aprovar a proposta já
+    é a aprovação."""
     insumo_id: str
     quantidade: int = Field(gt=0, description="milésimos")
     fornecedor: str = Field(min_length=1, max_length=200)
@@ -67,11 +91,27 @@ class PedidoCorpo(Entrada):
     previsao: str | None = Field(None, max_length=50)
 
 
-class AvancarCorpo(Entrada):
+class PedidoCorpo(PedidoDados):
+    aprovado: bool = Field(False, description="true: nasce aprovado (compra já decidida); false: em cotação")
+
+
+class Conferencia(Entrada):
+    """Só fazem sentido com `para = conferido` (regras.validar_conferencia recusa no resto)."""
+    quantidade_recebida: int | None = Field(None, gt=0, description="milésimos; padrão = a quantidade do pedido")
+    nf: str | None = Field(None, max_length=60, description="número da nota fiscal da entrega")
+
+    @field_validator("nf")
+    @classmethod
+    def _nf_sem_espaco(cls, v: str | None) -> str | None:
+        # NF em branco é "não informada", não uma NF vazia que apareceria como "NF " no documento de origem
+        return (v.strip() or None) if v is not None else None
+
+
+class AvancarCorpo(Conferencia):
     para: StatusPedido
 
 
-class AvancarPedidoDados(Entrada):
+class AvancarPedidoDados(Conferencia):
     pedido_id: str
     para: StatusPedido
 
@@ -83,9 +123,16 @@ class AjusteEstoqueDados(Entrada):
 
 
 DADOS_POR_TIPO: dict[TipoProposta, type[Entrada]] = {
-    TipoProposta.CRIAR_PEDIDO: PedidoCorpo,
+    TipoProposta.CRIAR_PEDIDO: PedidoDados,
     TipoProposta.AVANCAR_PEDIDO: AvancarPedidoDados,
     TipoProposta.AJUSTE_ESTOQUE: AjusteEstoqueDados,
+}
+
+# O que quem aprova pode corrigir antes de aprovar. Fora daqui (insumo, pedido, destino do status) já é outra proposta.
+AJUSTAVEIS: dict[TipoProposta, set[str]] = {
+    TipoProposta.CRIAR_PEDIDO: {"quantidade", "fornecedor", "valor", "previsao"},
+    TipoProposta.AVANCAR_PEDIDO: {"quantidade_recebida", "nf"},
+    TipoProposta.AJUSTE_ESTOQUE: {"quantidade", "motivo"},
 }
 
 
@@ -97,6 +144,10 @@ class PropostaCorpo(Entrada):
     justificativa: str = Field("", max_length=1000)
     fonte: str = Field("", max_length=1000)
     dados: dict
+
+
+class AprovarCorpo(Entrada):
+    ajustes: dict[str, Any] | None = Field(None, description="campos de `dados` corrigidos antes de aprovar")
 
 
 class RecusarCorpo(Entrada):
@@ -274,6 +325,14 @@ class PropostaSaida(Proposta):
 class RegistroSaida(EntradaRegistro):
     quem_nome: str | None = None
     usuario_id: str | None = None
+
+
+class PedidoSaida(Pedido):
+    registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita: é o que o Desfazer usa")
+
+
+class MovimentoSaida(Movimento):
+    registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita; null na repetição da chave")
 
 
 class Aprovacao(BaseModel):

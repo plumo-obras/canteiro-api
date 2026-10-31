@@ -77,3 +77,21 @@ EM_COTACAO = {StatusPedido.EM_COTACAO}
 def validar_transicao(de: StatusPedido, para: StatusPedido) -> None:
     if para not in TRANSICOES[de]:
         raise RegraViolada(f"O pedido não pode ir de '{de.value}' para '{para.value}'.")
+
+
+def validar_conferencia(para: StatusPedido, *, quantidade_recebida: int | None = None, nf: str | None = None) -> None:
+    """Quantidade recebida e NF descrevem a chegada do material: fora da conferência não têm onde entrar, e aceitar
+    calado faria a pessoa achar que registrou algo que foi descartado."""
+    if para != StatusPedido.CONFERIDO and (quantidade_recebida is not None or nf is not None):
+        raise RegraViolada("Quantidade recebida e NF só valem ao conferir o pedido.")
+    if quantidade_recebida is not None and quantidade_recebida <= 0:
+        raise RegraViolada("A quantidade recebida tem de ser maior que zero.")
+
+
+def quantidade_conferida(*, pedida: int, recebida: int | None) -> int:
+    """O que entra no almoxarifado ao conferir: o que chegou de fato, ou o pedido inteiro se ninguém informou.
+
+    Entrega a mais é aceita (o fornecedor mandou e o material está no canteiro); entrega a menos não deixa o resto
+    "a caminho": o pedido fecha em conferido e a diferença volta a aparecer como falta na conta.
+    """
+    return pedida if recebida is None else recebida

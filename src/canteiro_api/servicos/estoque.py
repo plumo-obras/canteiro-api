@@ -3,13 +3,13 @@ import uuid
 from dataclasses import asdict
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import Movimento, Saldo, StatusPedido, TipoMovimento, agora
+from canteiro_dominio.modelos import Insumo, Movimento, Saldo, StatusPedido, TipoMovimento, agora
 from canteiro_dominio.regras import A_CAMINHO, EM_COTACAO, RegraViolada, conta_de_falta, efeito_no_saldo, validar_saida
 from canteiro_dominio.tipos import fmt_qtd
 
 from ..auth import UsuarioAtual
 from ..modelos import doc
-from ..nucleo import Conflito, NaoEncontrado, Operacao, evento, insumo_da_obra
+from ..nucleo import Conflito, NaoEncontrado, Operacao, evento, insumo_da_obra, obra_do_tenant, registrar
 
 _NS = uuid.UUID("6f1c2a52-3b7e-4c1e-9a55-0c4a1f2b7d10")
 
@@ -38,8 +38,8 @@ async def preparar_movimento(tx, u: UsuarioAtual, *, obra_id: str, insumo_id: st
     insumo = insumo or await insumo_da_obra(tx, u.tenant_id, obra_id, insumo_id)
     saldo = await tx.obter("saldos", u.tenant_id, insumo_id)
     m = Movimento(id=id, tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=insumo_id, tipo=tipo,
-                  quantidade=quantidade, destino=destino, origem_doc=origem_doc, quem=u.id, origem=origem,
-                  desfaz=desfaz)
+                  quantidade=quantidade, destino=destino, origem_doc=origem_doc, quem=u.nome, usuario_id=u.id,
+                  origem=origem, desfaz=desfaz)
     if tipo == TipoMovimento.AJUSTE and quantidade == 0:
         raise RegraViolada("Ajuste de zero não muda nada.")
     efeito = efeito_no_saldo(m)
@@ -61,7 +61,9 @@ async def preparar_movimento(tx, u: UsuarioAtual, *, obra_id: str, insumo_id: st
         verbo = {"entrada": "Entrada", "saida": "Saída", "ajuste": "Ajuste"}.get(d["tipo"], d["tipo"])
         sufixo = f" ({d['destino']})" if d.get("destino") else ""
         estorno = "Estorno: " if desfaz else ""
-        return f"{estorno}{verbo} de {fmt_qtd(abs(quantidade))} {insumo['unidade']} de {insumo['nome']}{sufixo}"
+        # no ajuste o sinal é a informação ("−20" sumiu, "+20" apareceu); entrada e saída já dizem a direção no verbo
+        sinal = ("+" if quantidade > 0 else "-") if d["tipo"] == "ajuste" else ""
+        return f"{estorno}{verbo} de {sinal}{fmt_qtd(abs(quantidade))} {insumo['unidade']} de {insumo['nome']}{sufixo}"
 
     return Operacao(obra_id=obra_id, aplicar=aplicar, texto=texto,
                     desfazer=lambda d: None if desfaz else {"op": "estornar_movimento", "movimento_id": d["id"]})
@@ -115,3 +117,34 @@ async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
                                                                   Filtro("status", "in", PEDIDOS_ABERTOS)]))
     return com_conta(insumos, saldos, pedidos)
+
+
+def _nome_chave(nome: str) -> str:
+    return " ".join(nome.split()).casefold()
+
+
+async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade: str, curva: str,
+                       precisa_ate_o_fim: int) -> dict:
+    """Cadastra um insumo na obra. O nome é a chave: "Areia  média" e "areia média" são o mesmo insumo.
+
+    A checagem contra os que já existem (inclusive os importados, de ID aleatório) é uma consulta antes da transação;
+    o ID derivado do nome fecha a corrida de dois cadastros iguais ao mesmo tempo (o segundo cai em ConflitoDeId).
+    """
+    nome = " ".join(nome.split())
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    existentes = await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
+        raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
+    ins = Insumo(id=id_derivado(u.tenant_id, "insumo", obra_id, _nome_chave(nome)), tenant_id=u.tenant_id,
+                 obra_id=obra_id, nome=nome, unidade=unidade.strip(), curva=curva, precisa_ate_o_fim=precisa_ate_o_fim)
+    d = doc(ins)
+
+    async def corpo(tx):
+        tx.criar("insumos", d)
+        tx.criar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=0)))
+        reg = registrar(tx, u, obra_id=obra_id, origem="tela",
+                        texto=f"Cadastrou o insumo {nome} ({ins.unidade}, curva {curva})")
+        evento(tx, u.tenant_id, "estoque.insumo_criado", obra_id, {"insumo_id": ins.id})
+        return {**d, "registro_id": reg["id"]}
+
+    return await arm.em_transacao(corpo)

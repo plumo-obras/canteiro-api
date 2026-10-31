@@ -1,8 +1,16 @@
 import pytest
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import Movimento, StatusPedido, TipoMovimento
-from canteiro_dominio.regras import RegraViolada, conta_de_falta, saldo_de, validar_saida, validar_transicao
+from canteiro_dominio.modelos import Movimento, Pedido, Proposta, StatusPedido, TipoMovimento, TipoProposta
+from canteiro_dominio.regras import (
+    RegraViolada,
+    conta_de_falta,
+    quantidade_conferida,
+    saldo_de,
+    validar_conferencia,
+    validar_saida,
+    validar_transicao,
+)
 from canteiro_dominio.tipos import fmt_qtd, fmt_reais, qtd, reais
 
 
@@ -112,3 +120,43 @@ def test_ordem_tem_de_comecar_pelo_campo_da_desigualdade():
     with pytest.raises(ValueError):
         Consulta("pedidos", "t1", [Filtro("valor", ">", 0)], ordem=[("criado_em", "desc")]).validar()
     Consulta("pedidos", "t1", [Filtro("valor", ">", 0)], ordem=[("valor", "desc")]).validar()
+
+
+# --- conferência com o que chegou de fato ---
+
+def test_conferida_padrao_e_o_pedido_inteiro():
+    assert quantidade_conferida(pedida=qtd(40), recebida=None) == qtd(40)
+
+
+def test_conferida_aceita_a_menos_e_a_mais():
+    assert quantidade_conferida(pedida=qtd(40), recebida=qtd(36)) == qtd(36)
+    assert quantidade_conferida(pedida=qtd(40), recebida=qtd(45)) == qtd(45)
+
+
+def test_entrega_parcial_devolve_a_diferenca_para_a_falta():
+    # areia: precisa 60, saldo 12, PED-0157 de 40 a caminho → falta 8; chegaram 36 e o pedido fechou → falta 12
+    antes = conta_de_falta(precisa=qtd(60), saldo=qtd(12), a_caminho=qtd(40))
+    depois = conta_de_falta(precisa=qtd(60), saldo=qtd(12) + quantidade_conferida(pedida=qtd(40), recebida=qtd(36)))
+    assert (antes.falta, depois.falta) == (qtd(8), qtd(12))
+
+
+def test_quantidade_recebida_e_nf_so_ao_conferir():
+    validar_conferencia(StatusPedido.CONFERIDO, quantidade_recebida=qtd(36), nf="4471")
+    validar_conferencia(StatusPedido.RECEBIDO)
+    for extra in ({"quantidade_recebida": qtd(1)}, {"nf": "4471"}):
+        with pytest.raises(RegraViolada, match="só valem ao conferir"):
+            validar_conferencia(StatusPedido.RECEBIDO, **extra)
+
+
+def test_quantidade_recebida_tem_de_ser_positiva():
+    for q in (0, -qtd(1)):
+        with pytest.raises(RegraViolada):
+            validar_conferencia(StatusPedido.CONFERIDO, quantidade_recebida=q)
+
+
+def test_campos_novos_tem_padrao_compativel_com_documento_antigo():
+    p = Pedido(tenant_id="t1", numero="PED-0001", obra_id="o1", insumo_id="i1", quantidade=1, fornecedor="f", valor=0)
+    assert (p.quantidade_recebida, p.nf) == (None, None)
+    pr = Proposta(tenant_id="t1", obra_id="o1", tipo=TipoProposta.CRIAR_PEDIDO, titulo="x", dados={})
+    assert (pr.ajustada, pr.dados_originais) == (False, None)
+    assert mov(TipoMovimento.ENTRADA, 1).usuario_id is None

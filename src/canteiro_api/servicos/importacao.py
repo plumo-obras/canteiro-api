@@ -104,8 +104,8 @@ def _gravar_lote(u: UsuarioAtual, obra_id: str, lote: list[LinhaImportada]):
             tx.criar("insumos", doc(ins))
             if linha.saldo:
                 tx.criar("movimentos", doc(Movimento(tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=ins.id,
-                                                     tipo=TipoMovimento.AJUSTE, quantidade=linha.saldo, quem=u.id,
-                                                     origem="sistema", origem_doc="importação")))
+                                                     tipo=TipoMovimento.AJUSTE, quantidade=linha.saldo, quem=u.nome,
+                                                     usuario_id=u.id, origem="sistema", origem_doc="importação")))
             tx.salvar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=linha.saldo)))
         registrar(tx, u, obra_id=obra_id, texto=f"Importou {len(lote)} insumo(s) da planilha", origem="tela")
         evento(tx, u.tenant_id, "estoque.importado", obra_id, {"insumos": len(lote)})

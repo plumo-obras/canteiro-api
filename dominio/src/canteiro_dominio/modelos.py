@@ -62,7 +62,8 @@ class Movimento(Documento):
     quantidade: Milesimos                  # sempre positiva, exceto em AJUSTE
     destino: str | None = None             # frente de serviço (obrigatório em saída de curva A)
     origem_doc: str | None = None          # PED-…, TRF-…, NF…
-    quem: str
+    quem: str                              # nome legível de quem lançou (a tela mostra direto, sem buscar usuário)
+    usuario_id: str | None = None          # o ID fica à parte, para auditoria (None em dado semeado/importado antigo)
     origem: str = "tela"                   # tela | agente | whatsapp | sistema
     desfaz: str | None = None              # ID do movimento que este estorna
 
@@ -96,6 +97,13 @@ class Pedido(Documento):
     status: StatusPedido = StatusPedido.EM_COTACAO
     previsao: str | None = None
     rastreio: str | None = None
+    # Preenchidos ao conferir: o que chegou de fato pode diferir do pedido (entrega parcial ou a mais) e a NF amarra a
+    # entrada ao documento do fornecedor. O desfazer da conferência limpa os dois.
+    quantidade_recebida: Milesimos | None = None
+    nf: str | None = None
+    # Quantas vezes já foi conferido: entra no ID da entrada no almoxarifado. Conferir, desfazer e conferir de novo é
+    # uma segunda entrada (a primeira foi estornada), não a repetição da mesma gravação.
+    conferencias: int = 0
 
 
 class StatusProposta(StrEnum):
@@ -126,6 +134,10 @@ class Proposta(Documento):
     decidido_em: datetime | None = None
     motivo_recusa: str | None = None
     registro_id: str | None = None         # a EntradaRegistro da execução: é o que o Desfazer usa (sobrevive a recarregar a tela)
+    # Quem aprova pode corrigir a proposta antes (ex.: 30 sc em vez de 34). `dados` passa a ser o que foi executado e
+    # `dados_originais` guarda o que o agente propôs, para a auditoria mostrar a diferença.
+    ajustada: bool = False
+    dados_originais: dict[str, Any] | None = None
 
 
 class EntradaRegistro(Documento):

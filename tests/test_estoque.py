@@ -64,6 +64,23 @@ async def test_mesma_chave_mesmo_resultado(vila):
     assert c.status_code == 409
 
 
+async def test_movimento_traz_nome_de_quem_e_registro_para_desfazer(vila):
+    corpo = {"insumo_id": vila.insumo["cimento"], "tipo": "saida", "quantidade": qtd(4), "destino": "Laje",
+             "chave_idempotencia": "saida-cimento-nome"}
+    r = await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h, json=corpo)
+    m = r.json()
+    assert (m["quem"], m["usuario_id"]) == ("Admin da Vila Nova", vila.sessao["usuario"]["id"])
+    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
+    assert m["registro_id"] == reg["id"] and reg["desfazer"]["op"] == "estornar_movimento"
+    # a repetição da chave aponta para o mesmo registro (o Desfazer da tela continua valendo)
+    assert (await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h, json=corpo)).json() == m
+    assert (await vila.http.post(f"/registro/{m['registro_id']}/desfazer", headers=vila.h)).status_code == 200
+    assert (await vila.conta("cimento"))["saldo"] == qtd(46)
+    movs = (await vila.http.get(f"/obras/{vila.obra}/insumos/{vila.insumo['cimento']}/movimentos",
+                                headers=vila.h)).json()
+    assert movs[-1]["quem"] == "Joana (mestre)"                  # o seed também mostra um nome, não "seed"
+
+
 async def test_mesma_chave_em_paralelo_grava_uma_vez(vila):
     corpo = {"insumo_id": vila.insumo["areia"], "tipo": "entrada", "quantidade": qtd(5),
              "chave_idempotencia": "paralelo-areia-1"}
@@ -127,3 +144,43 @@ async def test_desfazer_movimento_estorna(vila):
     movs = (await vila.http.get(f"/obras/{vila.obra}/insumos/{vila.insumo['bloco']}/movimentos",
                                 headers=vila.h)).json()
     assert movs[0]["desfaz"] == movs[1]["id"]
+
+
+# --- insumo cadastrado pela tela ---
+async def test_cadastrar_insumo_novo_e_lancar_entrada(vila):
+    r = await vila.http.post(f"/obras/{vila.obra}/insumos", headers=vila.h,
+                             json={"nome": "  Cal  hidratada ", "unidade": "sc"})
+    assert r.status_code == 201, r.text
+    ins = r.json()
+    assert (ins["nome"], ins["unidade"], ins["curva"], ins["precisa_ate_o_fim"]) == ("Cal hidratada", "sc", "C", 0)
+    assert ins["registro_id"]
+    lista = (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()
+    cal = next(i for i in lista if i["insumo"]["id"] == ins["id"])
+    assert (cal["conta"]["saldo"], cal["conta"]["falta"]) == (0, 0)       # fora do orçamento: nada a comprar
+    m = await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h,
+                             json={"insumo_id": ins["id"], "tipo": "entrada", "quantidade": 10_000,
+                                   "chave_idempotencia": "cal-entrada-1"})
+    assert m.status_code == 201, m.text
+    reg = (await vila.http.get("/registro", headers=vila.h)).json()
+    assert reg[1]["texto"] == "Cadastrou o insumo Cal hidratada (sc, curva C)"
+
+
+async def test_cadastrar_insumo_com_nome_que_ja_existe(vila):
+    # o bloco veio do seed (ID aleatório): a checagem é pelo nome, sem diferenciar maiúsculas e espaços
+    nome = (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()[0]["insumo"]["nome"]
+    url = f"/obras/{vila.obra}/insumos"
+    r = await vila.http.post(url, headers=vila.h, json={"nome": nome.upper(), "unidade": "un"})
+    assert r.status_code == 409
+    primeira = await vila.http.post(url, headers=vila.h, json={"nome": "Brita 1", "unidade": "m³"})
+    assert primeira.status_code == 201
+    r2 = await vila.http.post(url, headers=vila.h, json={"nome": "brita  1", "unidade": "m³"})
+    assert r2.status_code == 409
+
+
+async def test_cadastrar_insumo_exige_admin_e_valida(vila):
+    h, _ = await vila.usuario("viewer")
+    url = f"/obras/{vila.obra}/insumos"
+    assert (await vila.http.post(url, headers=h, json={"nome": "X", "unidade": "un"})).status_code == 403
+    for ruim in ({"nome": "", "unidade": "un"}, {"nome": "X", "unidade": ""},
+                 {"nome": "X", "unidade": "un", "curva": "D"}, {"nome": "X", "unidade": "un", "precisa_ate_o_fim": -1}):
+        assert (await vila.http.post(url, headers=vila.h, json=ruim)).status_code == 422

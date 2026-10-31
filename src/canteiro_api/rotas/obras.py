@@ -5,7 +5,18 @@ from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
 from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
-from ..esquemas import AvancarCorpo, InsumoComConta, MovimentoCorpo, PedidoCorpo, Previa, ResumoObra
+from ..esquemas import (
+    AvancarCorpo,
+    InsumoComConta,
+    InsumoCorpo,
+    InsumoSaida,
+    MovimentoCorpo,
+    MovimentoSaida,
+    PedidoCorpo,
+    PedidoSaida,
+    Previa,
+    ResumoObra,
+)
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, obra_do_tenant
 from ..servicos import estoque, importacao, pedidos, resumo
@@ -34,6 +45,14 @@ async def insumos(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=De
     return await estoque.insumos_com_conta(arm, u.tenant_id, obra_id)
 
 
+@r.post("/obras/{obra_id}/insumos", response_model=InsumoSaida, status_code=status.HTTP_201_CREATED)
+async def criar_insumo(obra_id: str, corpo: InsumoCorpo, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    try:
+        return await estoque.criar_insumo(arm, u, obra_id, **corpo.model_dump())
+    except ConflitoDeId:
+        raise Conflito(f"'{corpo.nome}' já está cadastrado nesta obra.") from None
+
+
 @r.get("/obras/{obra_id}/insumos/{insumo_id}/movimentos", response_model=list[Movimento])
 async def movimentos(obra_id: str, insumo_id: str, limite: int = Query(50, ge=1, le=200),
                      u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
@@ -43,11 +62,13 @@ async def movimentos(obra_id: str, insumo_id: str, limite: int = Query(50, ge=1,
                                         [("criado_em", "desc")], limite=limite))
 
 
-@r.post("/obras/{obra_id}/movimentos", response_model=Movimento, status_code=status.HTTP_201_CREATED,
+@r.post("/obras/{obra_id}/movimentos", response_model=MovimentoSaida, status_code=status.HTTP_201_CREATED,
         responses={200: {"description": "repetição da mesma chave: devolve o movimento já gravado"}})
 async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Response,
                            u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     id_ = estoque.id_movimento(u.tenant_id, corpo.chave_idempotencia)
+    # derivado do movimento: a repetição da chave devolve o mesmo `registro_id` sem precisar procurar o registro
+    id_registro = estoque.id_derivado(u.tenant_id, "registro", id_)
 
     async def tx_corpo(tx):
         existente = await tx.obter("movimentos", u.tenant_id, id_)
@@ -57,7 +78,7 @@ async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Respon
         op = await estoque.preparar_movimento(
             tx, u, obra_id=obra_id, insumo_id=corpo.insumo_id, tipo=TipoMovimento(corpo.tipo),
             quantidade=corpo.quantidade, id=id_, destino=corpo.destino, origem_doc=corpo.origem_doc)
-        mov, _ = executar_e_registrar(tx, u, op)
+        mov, _ = executar_e_registrar(tx, u, op, registro_id=id_registro)
         return mov, True
 
     try:
@@ -69,7 +90,7 @@ async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Respon
         if mov["obra_id"] != obra_id or not estoque.mesmo_movimento(mov, corpo):
             raise Conflito("Esta chave de idempotência já foi usada para outro movimento.")
         response.status_code = status.HTTP_200_OK
-    return mov
+    return {**mov, "registro_id": id_registro}
 
 
 @r.post("/obras/{obra_id}/importar", response_model=Previa)
@@ -94,19 +115,24 @@ async def listar_pedidos(obra_id: str, status_: StatusPedido | None = Query(None
     return await arm.consultar(Consulta("pedidos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite))
 
 
-@r.post("/obras/{obra_id}/pedidos", response_model=Pedido, status_code=status.HTTP_201_CREATED, tags=["pedidos"])
+@r.post("/obras/{obra_id}/pedidos", response_model=PedidoSaida, status_code=status.HTTP_201_CREATED,
+        tags=["pedidos"])
 async def criar_pedido(obra_id: str, corpo: PedidoCorpo, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     async def tx_corpo(tx):
-        op = await pedidos.preparar_criar_pedido(tx, u, obra_id, corpo)
-        return executar_e_registrar(tx, u, op)[0]
+        op = await pedidos.preparar_criar_pedido(
+            tx, u, obra_id, corpo, status=StatusPedido.APROVADO if corpo.aprovado else StatusPedido.EM_COTACAO)
+        pedido, entrada = executar_e_registrar(tx, u, op)
+        return {**pedido, "registro_id": entrada["id"]}
 
     return await arm.em_transacao(tx_corpo)
 
 
-@r.post("/pedidos/{pedido_id}/avancar", response_model=Pedido, tags=["pedidos"])
+@r.post("/pedidos/{pedido_id}/avancar", response_model=PedidoSaida, tags=["pedidos"])
 async def avancar(pedido_id: str, corpo: AvancarCorpo, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     async def tx_corpo(tx):
-        op = await pedidos.preparar_avancar(tx, u, pedido_id, corpo.para)
-        return executar_e_registrar(tx, u, op)[0]
+        op = await pedidos.preparar_avancar(tx, u, pedido_id, corpo.para,
+                                            quantidade_recebida=corpo.quantidade_recebida, nf=corpo.nf)
+        pedido, entrada = executar_e_registrar(tx, u, op)
+        return {**pedido, "registro_id": entrada["id"]}
 
     return await arm.em_transacao(tx_corpo)
