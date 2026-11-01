@@ -124,7 +124,7 @@ def _nome_chave(nome: str) -> str:
 
 
 async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade: str, curva: str,
-                       precisa_ate_o_fim: int) -> dict:
+                       precisa_ate_o_fim: int, valor_unitario: int = 0) -> dict:
     """Cadastra um insumo na obra. O nome é a chave: "Areia  média" e "areia média" são o mesmo insumo.
 
     A checagem contra os que já existem (inclusive os importados, de ID aleatório) é uma consulta antes da transação;
@@ -136,7 +136,8 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
     ins = Insumo(id=id_derivado(u.tenant_id, "insumo", obra_id, _nome_chave(nome)), tenant_id=u.tenant_id,
-                 obra_id=obra_id, nome=nome, unidade=unidade.strip(), curva=curva, precisa_ate_o_fim=precisa_ate_o_fim)
+                 obra_id=obra_id, nome=nome, unidade=unidade.strip(), curva=curva, precisa_ate_o_fim=precisa_ate_o_fim,
+                 valor_unitario=valor_unitario)
     d = doc(ins)
 
     async def corpo(tx):

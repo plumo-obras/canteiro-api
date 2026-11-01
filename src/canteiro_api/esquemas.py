@@ -65,6 +65,7 @@ class InsumoCorpo(Entrada):
     curva: Literal["A", "B", "C"] = "C"
     precisa_ate_o_fim: int = Field(0, ge=0,
                                    description="milésimos; 0 = fora do orçamento (não entra na conta de falta)")
+    valor_unitario: int = Field(0, ge=0, description="centavos; 0 = sem preço")
 
 
 class InsumoSaida(Insumo):
@@ -154,6 +155,121 @@ class RecusarCorpo(Entrada):
     motivo: str = Field(min_length=1, max_length=1000)
 
 
+# --- obra (onboarding) ---
+
+Tipologia = Literal["casa", "sobrado", "predio", "galpao", "reforma", "comercial", "outro"]
+Padrao = Literal["baixo", "normal", "alto"]
+Regime = Literal["empreitada", "administracao"]
+
+
+class _DadosObra(Entrada):
+    """Os campos da obra que a pessoa preenche. Texto chega aparado: espaço sobrando viraria diferença no PATCH."""
+    cidade: str = Field("", max_length=80)
+    cep: str = Field("", max_length=9)
+    uf: str = Field("", max_length=2)
+    endereco: str = Field("", max_length=200)
+    tipologia: Tipologia | None = None
+    area_construida: int = Field(0, ge=0, le=10_000_000_000, description="m² em milésimos")
+    pavimentos: int = Field(0, ge=0, le=200)
+    padrao: Padrao | None = None
+    regime: Regime | None = None
+    cliente: str = Field("", max_length=120)
+    inicio: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="AAAA-MM-DD")
+    prazo_meses: int = Field(0, ge=0, le=240)
+    verba: int = Field(0, ge=0, description="centavos")
+
+    @field_validator("cidade", "cep", "endereco", "cliente")
+    @classmethod
+    def _aparar(cls, v: str) -> str:
+        return " ".join(v.split())
+
+    @field_validator("uf")
+    @classmethod
+    def _uf(cls, v: str) -> str:
+        return v.strip().upper()
+
+
+class ObraCorpo(_DadosObra):
+    nome: str = Field(min_length=1, max_length=120)
+    chave_idempotencia: str = Field(min_length=8, max_length=64)
+
+    @field_validator("nome")
+    @classmethod
+    def _nome(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not v:
+            raise ValueError("Nome vazio.")
+        return v
+
+
+class ObraEdicao(_DadosObra):
+    """Todos opcionais: só o que veio no corpo muda (exclude_unset)."""
+    nome: str | None = Field(None, min_length=1, max_length=120)
+
+    @field_validator("nome")
+    @classmethod
+    def _nome(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = " ".join(v.split())
+        if not v:
+            raise ValueError("Nome vazio.")
+        return v
+
+
+class ObraSaida(Obra):
+    registro_id: str | None = Field(None, description="a EntradaRegistro da mudança (null quando nada mudou)")
+
+
+# --- orçamento por planilha ---
+
+class ColunaPlanilha(BaseModel):
+    indice: int
+    titulo: str
+
+
+class Mapeamento(Entrada):
+    """Qual coluna (0-based) é o quê. A tela recebe a sugestão, a pessoa corrige e devolve na importação."""
+    planilha: str = Field(max_length=120)
+    linha_cabecalho: int = Field(ge=1, le=10_000)
+    nome: int | None = Field(None, ge=0, le=500)
+    unidade: int | None = Field(None, ge=0, le=500)
+    quantidade: int | None = Field(None, ge=0, le=500)
+    valor_unitario: int | None = Field(None, ge=0, le=500)
+    valor_total: int | None = Field(None, ge=0, le=500)
+    saldo: int | None = Field(None, ge=0, le=500)
+    curva: int | None = Field(None, ge=0, le=500)
+
+
+class LeituraPlanilha(BaseModel):
+    planilhas: list[str]
+    planilha: str
+    linha_cabecalho: int
+    colunas: list[ColunaPlanilha]
+    amostra: list[list[str]]
+    sugestao: Mapeamento
+
+
+class LinhaOrcamento(BaseModel):
+    linhas: list[int] = Field(description="linhas da planilha que formam este insumo (mais de uma quando juntou)")
+    nome: str
+    unidade: str
+    quantidade: int
+    valor_unitario: int
+    total: int
+    curva: str
+    saldo: int
+    situacao: Literal["novo", "atualiza"]
+    precisa_antes: int | None = None
+    valor_antes: int | None = None
+
+
+class LinhaIgnorada(BaseModel):
+    linha: int
+    texto: str
+    motivo: str
+
+
 class LinhaImportada(BaseModel):
     linha: int
     nome: str
@@ -173,6 +289,17 @@ class Previa(BaseModel):
     aplicado: bool
     linhas: list[LinhaImportada]
     erros: list[ErroLinha]
+
+
+class PreviaOrcamento(BaseModel):
+    aplicado: bool
+    linhas: list[LinhaOrcamento]
+    ignoradas: list[LinhaIgnorada]
+    erros: list[ErroLinha]
+    total: int = Field(description="centavos")
+    novos: int
+    atualizados: int
+    juntadas: int = Field(description="linhas da planilha absorvidas em outra (mesmo insumo repetido)")
 
 
 class Soma(BaseModel):

@@ -1,5 +1,8 @@
 """Obras, almoxarifado (insumos com a Conta, movimentos, importação) e pedidos."""
-from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
+import json
+
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
+from pydantic import ValidationError
 
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
 from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento
@@ -10,16 +13,22 @@ from ..esquemas import (
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
+    LeituraPlanilha,
+    Mapeamento,
     MovimentoCorpo,
     MovimentoSaida,
+    ObraCorpo,
+    ObraEdicao,
+    ObraSaida,
     PedidoCorpo,
     PedidoSaida,
     Previa,
+    PreviaOrcamento,
     ResumoObra,
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, obra_do_tenant
-from ..servicos import estoque, importacao, pedidos, resumo
+from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -32,6 +41,74 @@ def _arm(request: Request):
 @r.get("/obras", response_model=list[Obra])
 async def listar_obras(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await arm.consultar(Consulta("obras", u.tenant_id, ordem=[("nome", "asc")]))
+
+
+@r.post("/obras", response_model=ObraSaida, status_code=status.HTTP_201_CREATED,
+        responses={200: {"description": "repetição da mesma chave: devolve a obra já criada"}})
+async def criar_obra(corpo: ObraCorpo, response: Response, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    try:
+        o, criada = await obras.criar_obra(arm, u, corpo)
+    except ConflitoDeId:
+        # duas requisições com a mesma chave ao mesmo tempo: a outra gravou primeiro
+        o, criada = await obras.criar_obra(arm, u, corpo)
+    if not criada:
+        response.status_code = status.HTTP_200_OK
+    return o
+
+
+@r.patch("/obras/{obra_id}", response_model=ObraSaida)
+async def editar_obra(obra_id: str, corpo: ObraEdicao, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    campos = corpo.model_dump(exclude_unset=True)
+    if campos.get("nome", "") is None:
+        raise ErroNegocio("O nome da obra não pode ficar vazio.")
+
+    async def tx_corpo(tx):
+        op = await obras.preparar_editar(tx, u, obra_id, campos)
+        if op is None:
+            return {**await obra_do_tenant(tx, u.tenant_id, obra_id), "registro_id": None}
+        o, entrada = executar_e_registrar(tx, u, op)
+        return {**o, "registro_id": entrada["id"]}
+
+    return await arm.em_transacao(tx_corpo)
+
+
+@r.post("/obras/{obra_id}/orcamento/ler", response_model=LeituraPlanilha, tags=["orçamento"])
+async def ler_planilha(obra_id: str, arquivo: UploadFile = File(...), planilha: str | None = Form(None),
+                       u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    return await orcamento.ler(arm, u, obra_id, await _ler_arquivo(arquivo), arquivo.filename or "", planilha)
+
+
+@r.post("/obras/{obra_id}/orcamento/importar", response_model=PreviaOrcamento, tags=["orçamento"])
+async def importar_orcamento(obra_id: str, arquivo: UploadFile = File(...), mapeamento: str = Form(...),
+                             aplicar: bool = Form(False), u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    try:
+        m = Mapeamento.model_validate(json.loads(mapeamento))
+    except (ValueError, ValidationError):
+        raise ErroNegocio("Mapeamento de colunas inválido.") from None
+    conteudo = await _ler_arquivo(arquivo)
+    try:
+        return await orcamento.importar(arm, u, obra_id, conteudo, arquivo.filename or "", m, aplicar)
+    except ConflitoDeId:
+        raise Conflito("Alguém cadastrou um destes insumos agora há pouco; envie a planilha de novo.") from None
+
+
+@r.post("/obras/{obra_id}/orcamento/aprovar", response_model=ObraSaida, tags=["orçamento"])
+async def aprovar_orcamento(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    insumos = await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
+
+    async def tx_corpo(tx):
+        o, entrada = executar_e_registrar(tx, u, await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos))
+        return {**o, "registro_id": entrada["id"]}
+
+    return await arm.em_transacao(tx_corpo)
+
+
+async def _ler_arquivo(arquivo: UploadFile) -> bytes:
+    conteudo = await arquivo.read(5 * 1024 * 1024 + 1)
+    if len(conteudo) > 5 * 1024 * 1024:
+        raise ErroNegocio("Arquivo maior que 5 MB.")
+    return conteudo
 
 
 @r.get("/obras/resumo", response_model=list[ResumoObra])

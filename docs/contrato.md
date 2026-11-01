@@ -38,7 +38,18 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 
 ## Obras e almoxarifado
 
-- `GET /obras` → `[Obra]`
+- `GET /obras` → `[Obra]`. `Obra` = `{id, nome, cidade, cep, uf, endereco, verba, status, tipologia, area_construida,
+  pavimentos, padrao, regime, cliente, inicio, prazo_meses}`; `status` ∈ `em_orcamento | em_andamento | concluida`.
+  `tipologia` ∈ `casa | sobrado | predio | galpao | reforma | comercial | outro` · `padrao` ∈ `baixo | normal | alto` ·
+  `regime` ∈ `empreitada | administracao` (os três podem ser `null`) · `area_construida` em milésimos de m² ·
+  `inicio` `"AAAA-MM-DD"` ou `null` · `pavimentos`/`prazo_meses` 0 = não informado · `verba` em centavos.
+- `POST /obras` (admin) `{nome, chave_idempotencia, …os campos acima, todos opcionais}` → `Obra + registro_id`. Nasce
+  `em_orcamento`. ID derivado da chave: a repetição devolve a mesma obra (201 na 1ª, 200 nas repetidas); a mesma chave
+  com outro nome → 409. Registro "Criou a obra X", **sem desfazer** (a porta de armazenamento não apaga).
+- `PATCH /obras/{obra_id}` (admin) `{…qualquer campo da obra}` → `Obra + registro_id`. Só os campos enviados contam, e
+  os que já têm aquele valor são ignorados; se nada muda, `registro_id: null` e nenhum registro. Registro "Atualizou a
+  obra X: área, padrão" com `desfazer` `restaurar_obra`, que volta os valores antigos e é recusado (409) se algum
+  daqueles campos mudou de novo depois. `nome: null` → 422.
 - `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, falta_comprar, pedidos_abertos,
   valor_pedidos_abertos, nf_para_conferir, ultima_atividade}]` (por nome da obra), para a página inicial.
   `pendencias` = propostas pendentes · `falta_comprar` = insumos com `Conta.comprar > 0` (a mesma Conta de
@@ -49,7 +60,8 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta}]`, onde
   `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar}` calculada por `regras.conta_de_falta`
   (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
-- `POST /obras/{obra_id}/insumos` `{nome, unidade, curva?="C", precisa_ate_o_fim?=0}` → `Insumo` + `registro_id`
+- `Insumo.valor_unitario` (centavos, 0 = sem preço) é o preço unitário do orçamento.
+- `POST /obras/{obra_id}/insumos` `{nome, unidade, curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
   (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
   maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Sem desfazer.
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50` → `[Movimento]` (mais novos primeiro)
@@ -64,7 +76,45 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   `nome;unidade;saldo;precisa_ate_o_fim;curva`. Cria insumos e um movimento de AJUSTE inicial. Responde a prévia
   (`?aplicar=false`) ou aplica (`?aplicar=true`). Número ambíguo ("2.760") volta como erro da linha.
   Resposta sempre `{aplicado, linhas:[{linha, nome, unidade, saldo, precisa_ate_o_fim, curva}], erros:[{linha, campo, mensagem}]}`;
-  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra é erro da linha.
+  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra é erro da linha. É a importação
+  antiga, no nosso formato de colunas; a do orçamento (abaixo) lê a planilha que a construtora já tem.
+
+## Orçamento por planilha
+
+Em dois passos, sem estado no servidor: a tela manda o arquivo para `ler`, mostra a sugestão de colunas, e manda o
+mesmo arquivo de novo com o mapeamento confirmado para `importar`. Aceita `.xlsx` e `.csv` (até 5 MB); `.xls` → 422
+pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
+
+- `POST /obras/{obra_id}/orcamento/ler` (multipart `arquivo`, form `planilha?` = nome da aba) →
+  `{planilhas: [str], planilha, linha_cabecalho, colunas: [{indice, titulo}], amostra: [[str]], sugestao: Mapeamento}`.
+  O cabeçalho é a 1ª das 30 primeiras linhas com pelo menos dois títulos conhecidos (pula título e dados da obra);
+  `linha_cabecalho` é 1-based e os índices de coluna são 0-based. `amostra` = até 8 linhas de dados como texto
+  (`37,9`, datas `dd/mm/aaaa`). CSV tem uma aba só, `"CSV"`.
+- `Mapeamento` = `{planilha, linha_cabecalho, nome, unidade, quantidade, valor_unitario, valor_total, saldo, curva}`
+  (cada coluna é índice ou `null`). Sinônimos da sugestão: descrição/discriminação/insumo/material/serviço · un/und/
+  unid/unidade · quant/qtd/qtde · "unit" (preço unitário) · total · saldo/estoque · curva/abc.
+- `POST /obras/{obra_id}/orcamento/importar` (multipart `arquivo`, `mapeamento` = JSON, `aplicar` = bool) →
+  `PreviaOrcamento` = `{aplicado, linhas: [LinhaOrcamento], ignoradas: [{linha, texto, motivo}],
+  erros: [{linha, campo, mensagem}], total, novos, atualizados, juntadas}`.
+  - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
+  - **Ignorada** (não é erro): sem descrição, sem unidade (título de etapa ou subtotal) ou quantidade vazia/zero.
+  - **Erro da linha**: número inválido ou ambíguo ("2.760"), negativo, curva fora de A/B/C, descrição > 120 ou unidade
+    > 12 caracteres, o mesmo nome com outra unidade na planilha, ou unidade diferente da do insumo já cadastrado.
+    Com qualquer erro nada é gravado.
+  - `valor_unitario` vem da coluna unitária; sem ela, de `total / quantidade`; sem as duas, 0. Aceita "R$".
+  - O mesmo insumo em várias linhas (nome sem diferenciar maiúsculas e espaços, mesma unidade) vira uma linha só:
+    quantidades somadas e preço médio ponderado. `juntadas` conta as linhas absorvidas.
+  - `curva`: a da coluna, se mapeada; senão ABC pelo valor (A até 80% do total, o item que cruza os 80% incluído;
+    B até 95%; resto C; sem preço = C). Planilha sem preço nenhum → B.
+  - `LinhaOrcamento` = `{linhas: [int], nome, unidade, quantidade, valor_unitario, total, curva, saldo,
+    situacao: "novo" | "atualiza", precisa_antes, valor_antes}`. **atualiza** = já existe insumo com esse nome na obra:
+    troca `precisa_ate_o_fim`, `valor_unitario` e `curva` (o saldo da planilha só vale para insumo novo).
+  - Gravação em lotes de 100 por transação; insumo novo tem o mesmo ID do cadastro pela tela (nome repetido depois
+    colide em vez de duplicar) e saldo > 0 vira um AJUSTE inicial. Registro "Importou o orçamento: N novos, M
+    atualizados (R$ X)" por lote, **sem desfazer**: a prévia é a rede de segurança, e corrigir é reimportar.
+- `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + registro_id`. Tira a obra de `em_orcamento` para `em_andamento`.
+  Já aprovado → 409; nenhum insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o orçamento de X (N insumos,
+  R$ total)" com `desfazer` `reabrir_orcamento` (volta para `em_orcamento`; 409 se a obra já não está em andamento).
 
 ## Pedidos
 

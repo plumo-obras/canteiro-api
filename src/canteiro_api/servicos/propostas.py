@@ -26,6 +26,7 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
+from . import obras
 from .estoque import id_derivado, preparar_estorno, preparar_movimento
 from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
 
@@ -190,6 +191,8 @@ _DESFAZER = {
     "estornar_movimento": lambda tx, u, r: preparar_estorno(tx, u, r["movimento_id"]),
     "voltar_pedido": preparar_voltar,
     "cancelar_pedido": preparar_cancelar_criado,
+    "restaurar_obra": obras.preparar_restaurar,
+    "reabrir_orcamento": obras.preparar_reabrir,
 }
 
 

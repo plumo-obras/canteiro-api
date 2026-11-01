@@ -30,6 +30,17 @@ class Obra(Documento):
     cep: str = ""
     verba: Centavos = 0
     status: str = "em_andamento"          # em_andamento | em_orcamento | concluida
+    # Dados do onboarding: todos opcionais, porque a obra nasce com o nome e o resto chega quando a pessoa souber.
+    endereco: str = ""
+    uf: str = ""
+    tipologia: str | None = None           # casa | sobrado | predio | galpao | reforma | comercial | outro
+    area_construida: Milesimos = 0         # m² em milésimos (142,5 m² = 142500); 0 = não informada
+    pavimentos: int = 0                    # 0 = não informado
+    padrao: str | None = None              # baixo | normal | alto
+    regime: str | None = None              # empreitada | administracao
+    cliente: str = ""
+    inicio: str | None = None              # "AAAA-MM-DD"
+    prazo_meses: int = 0                   # 0 = não informado
 
 
 class CurvaABC(StrEnum):
@@ -44,6 +55,7 @@ class Insumo(Documento):
     unidade: str                           # un, sc, kg, m³…
     precisa_ate_o_fim: Milesimos = 0       # quanto a obra ainda vai consumir (orçamento/planejamento)
     curva: CurvaABC = CurvaABC.B           # curva A exige destino na baixa
+    valor_unitario: Centavos = 0           # preço unitário do orçamento; 0 = sem preço
 
 
 class TipoMovimento(StrEnum):
