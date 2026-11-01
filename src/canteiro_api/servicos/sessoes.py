@@ -4,6 +4,7 @@ A mensagem tem ID = `{sessao_id}-{seq:06d}`: ordena pelo ID, e reenviar o mesmo 
 (idempotente sem índice único). A sessão guarda `total_mensagens`, que é a próxima sequência esperada.
 """
 import json
+from datetime import datetime
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import agora
@@ -12,7 +13,7 @@ from canteiro_dominio.tipos import novo_id
 from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
 from ..esquemas import MensagensCorpo, SessaoAlteracao, SessaoCorpo
-from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, obra_do_tenant
+from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, listar_pagina, obra_do_tenant
 
 # O Firestore limita o documento a 1 MiB; sobra margem para os outros campos.
 MAX_BYTES_MENSAGEM = 800_000
@@ -50,11 +51,14 @@ async def criar(arm, u: UsuarioAtual, corpo: SessaoCorpo) -> tuple[dict, bool]:
     return await arm.em_transacao(tx_corpo)
 
 
-async def listar(arm, u: UsuarioAtual, obra_id: str | None, limite: int) -> list[dict]:
+async def listar(arm, u: UsuarioAtual, obra_id: str | None, limite: int,
+                 antes_de: datetime | None = None) -> list[dict]:
+    # a lista anda pela última atividade, então a página seguinte também: antes_de compara com atualizado_em
     filtros = [Filtro("dono", "==", u.id)]
     if obra_id:
         filtros.append(Filtro("obra_id", "==", obra_id))
-    return await arm.consultar(Consulta("sessoes", u.tenant_id, filtros, [("atualizado_em", "desc")], limite=limite))
+    consulta = Consulta("sessoes", u.tenant_id, filtros, [("atualizado_em", "desc")], limite=limite)
+    return await listar_pagina(arm, consulta, "atualizado_em", antes_de)
 
 
 async def obter(arm, u: UsuarioAtual, sessao_id: str) -> dict:

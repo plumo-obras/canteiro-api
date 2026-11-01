@@ -1,5 +1,5 @@
 """Propostas, aprovação, registro, consumo de IA e créditos."""
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -19,7 +19,7 @@ from ..esquemas import (
     RelatorioUso,
 )
 from ..modelos import Papel
-from ..nucleo import ErroNegocio
+from ..nucleo import ErroNegocio, listar_pagina
 from ..servicos import propostas, uso
 
 r = APIRouter()
@@ -38,13 +38,15 @@ async def criar(corpo: PropostaCorpo, u: UsuarioAtual = Depends(usuario_atual), 
 
 @r.get("/propostas", response_model=list[PropostaSaida], tags=["propostas"])
 async def listar(status_: StatusProposta | None = Query(None, alias="status"), obra_id: str | None = None,
-                 limite: int = Query(100, ge=1, le=500), u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+                 limite: int = Query(100, ge=1, le=500), antes_de: datetime | None = None,
+                 u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     filtros = []
     if status_:
         filtros.append(Filtro("status", "==", status_.value))
     if obra_id:
         filtros.append(Filtro("obra_id", "==", obra_id))
-    return await arm.consultar(Consulta("propostas", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite))
+    return await listar_pagina(arm, Consulta("propostas", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
+                               "criado_em", antes_de)
 
 
 @r.post("/propostas/{proposta_id}/aprovar", response_model=Aprovacao, tags=["propostas"])
@@ -61,10 +63,11 @@ async def recusar(proposta_id: str, corpo: RecusarCorpo, u: UsuarioAtual = Depen
 
 
 @r.get("/registro", response_model=list[RegistroSaida], tags=["registro"])
-async def registro(obra_id: str | None = None, limite: int = Query(50, ge=1, le=200),
+async def registro(obra_id: str | None = None, limite: int = Query(50, ge=1, le=200), antes_de: datetime | None = None,
                    u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     filtros = [Filtro("obra_id", "==", obra_id)] if obra_id else []
-    return await arm.consultar(Consulta("registro", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite))
+    return await listar_pagina(arm, Consulta("registro", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
+                               "criado_em", antes_de)
 
 
 @r.post("/registro/{entrada_id}/desfazer", response_model=RegistroSaida, tags=["registro"])

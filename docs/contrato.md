@@ -64,7 +64,8 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `POST /obras/{obra_id}/insumos` `{nome, unidade, curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
   (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
   maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Sem desfazer.
-- `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50` → `[Movimento]` (mais novos primeiro)
+- `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50&antes_de=…` → `[Movimento]` (mais novos primeiro;
+  paginação em "Listagens paginadas")
 - `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, origem_doc?, chave_idempotencia}` →
   `Movimento + registro_id` (o ID da `EntradaRegistro` criada: é o que o Desfazer usa logo depois da ação; derivado
   do movimento, então a repetição da chave devolve o mesmo `registro_id`). Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
@@ -116,9 +117,23 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   Já aprovado → 409; nenhum insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o orçamento de X (N insumos,
   R$ total)" com `desfazer` `reabrir_orcamento` (volta para `em_orcamento`; 409 se a obra já não está em andamento).
 
+## Listagens paginadas
+
+Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mais antigo e paginam por `antes_de`:
+- a página seguinte se pede com `antes_de` = o campo de data do ÚLTIMO item recebido (`criado_em`; nas sessões,
+  `atualizado_em`), sem mexer nos outros filtros;
+- o cursor é **exclusivo** (`< antes_de`) e a página **nunca parte um empate**: se o item seguinte tem o mesmo instante
+  do último, todos os daquele instante vêm nesta página, que pode passar um pouco do `limite`. Assim nada se repete
+  entre páginas e nada some na virada (com `<=` um empate do tamanho da página voltaria para sempre);
+- acabou quando a página vier com **menos** itens que o `limite`;
+- `antes_de` em ISO 8601 **com fuso** (`2026-11-01T13:00:00.123Z` ou `-03:00`); sem fuso → 422. A API compara no
+  milissegundo, como grava.
+
 ## Pedidos
 
-- `GET /obras/{obra_id}/pedidos?status=…` → `[Pedido]`
+- `GET /obras/{obra_id}/pedidos?status=…&limite=100&antes_de=…` → `[Pedido]` (mais novos primeiro). `status` pode
+  repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". O quadro pede as colunas abertas
+  e o recolhido pede `conferido` + `cancelado`, paginado. `limite` até 500.
 - `Pedido` tem também `quantidade_recebida` (milésimos) e `nf`, ambos `null` até a conferência.
 - `POST /obras/{obra_id}/pedidos` `{insumo_id, quantidade, fornecedor, valor, previsao?, aprovado?}` →
   `Pedido + registro_id` (201; número PED-NNNN por tenant). `aprovado` (padrão `false`): `false` → status
@@ -144,7 +159,7 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, previsao?}` (o corpo do POST de
   pedido **sem** `aprovado`) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
   `POST …/avancar`) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
-- `GET /propostas?status=pendente&obra_id=…` → `[Proposta]`
+- `GET /propostas?status=pendente&obra_id=…&limite=100&antes_de=…` → `[Proposta]` (mais novas primeiro)
 - `POST /propostas/{id}/aprovar` `{ajustes?}` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o
   Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro` com `desfazer`
   preenchido. `POST /propostas/{id}/recusar` `{motivo}`.
@@ -165,7 +180,7 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 - Respostas de escrita que já trazem o ID do registro, para a tela oferecer **Desfazer** logo depois: `POST
   /obras/{id}/movimentos`, `POST /obras/{id}/pedidos` e `POST /pedidos/{id}/avancar` (campo `registro_id`) e `POST
   /propostas/{id}/aprovar` (`registro.id`).
-- `GET /registro?obra_id=…&limite=50` → `[EntradaRegistro]` · `POST /registro/{id}/desfazer` → aplica a operação inversa
+- `GET /registro?obra_id=…&limite=50&antes_de=…` → `[EntradaRegistro]` (mais novas primeiro) · `POST /registro/{id}/desfazer` → aplica a operação inversa
   (estorno de movimento, volta de status do pedido) e registra o desfazer.
 
 ## Consumo de IA
@@ -203,7 +218,8 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
 - `POST /sessoes` `{id?, obra_id?, titulo?, abas?}` → `Sessao` (201; mesmo `id` do mesmo dono → 200).
   `Sessao = {id, tenant_id, dono, obra_id, titulo, abas:[obj] (≤ 20), total_mensagens, criado_em, atualizado_em}`.
-- `GET /sessoes?obra_id=&limite=30` → `[Sessao]` (mais recentes primeiro) · `GET /sessoes/{id}` →
+- `GET /sessoes?obra_id=&limite=30&antes_de=…` → `[Sessao]` (mais recentes primeiro; aqui `antes_de` compara com
+  `atualizado_em`, a ordem da lista) · `GET /sessoes/{id}` →
   `Sessao` · `PATCH /sessoes/{id}` `{titulo?, obra_id?, abas?}`.
 - `GET /sessoes/{id}/mensagens?depois_de=-1&limite=200` → `[{id, sessao_id, seq, papel, conteudo, criado_em}]` (por seq).
 - `POST /sessoes/{id}/mensagens` `{seq_inicial, mensagens:[{papel: user|assistant, conteudo: texto | [blocos]}]}`

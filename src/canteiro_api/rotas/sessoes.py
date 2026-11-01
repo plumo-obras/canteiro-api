@@ -1,4 +1,6 @@
 """Sessões de conversa (histórico do agente) e chave própria da Anthropic."""
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 
 from canteiro_dominio.modelos import agora
@@ -39,8 +41,8 @@ async def criar_sessao(corpo: SessaoCorpo, response: Response, u: UsuarioAtual =
 
 @r.get("/sessoes", response_model=list[SessaoConversa], tags=["sessões"])
 async def listar_sessoes(obra_id: str | None = None, limite: int = Query(30, ge=1, le=100),
-                         u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
-    return await sessoes.listar(arm, u, obra_id, limite)
+                         antes_de: datetime | None = None, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await sessoes.listar(arm, u, obra_id, limite, antes_de)
 
 
 @r.get("/sessoes/{sessao_id}", response_model=SessaoConversa, tags=["sessões"])

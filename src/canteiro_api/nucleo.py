@@ -4,11 +4,14 @@ Toda operação segue o formato da transação portável: `preparar_*` só LÊ e
 ESCREVE. Assim dá para compor várias (aprovar proposta = operação + proposta + registro) sem ler depois de escrever.
 """
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
+from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import EntradaRegistro
 
+from .armazenamento.base import normalizar
 from .auth import UsuarioAtual
 from .modelos import EventoOutbox, doc
 
@@ -76,3 +79,34 @@ async def insumo_da_obra(leitor, tenant_id: str, obra_id: str, insumo_id: str) -
     if not i or i["obra_id"] != obra_id:
         raise NaoEncontrado("Insumo não encontrado nesta obra.")
     return i
+
+
+
+LIMITE_GRUPO = 500
+
+
+async def listar_pagina(leitor, consulta: Consulta, campo: str, antes_de: datetime | None) -> list[dict]:
+    """Uma página de listagem por `campo` desc; a seguinte se pede com `antes_de` = o `campo` do último item.
+
+    O cursor é EXCLUSIVO (`campo < antes_de`), e a página nunca termina no meio de um empate: se o item seguinte tem
+    o mesmo instante do último, o grupo inteiro daquele instante entra nesta página (por isso ela pode passar um
+    pouco do `limite`). Inclusivo devolveria os mesmos itens para sempre quando o empate é do tamanho da página;
+    exclusivo sem completar o grupo pularia o resto dele. Só igualdade além da desigualdade: portável ao Firestore.
+    Data sem fuso é recusada: adivinhar o fuso pularia registros.
+    """
+    filtros = list(consulta.filtros)
+    if antes_de is not None:
+        if antes_de.tzinfo is None:
+            raise ErroNegocio("antes_de precisa de fuso (ex.: 2026-11-01T13:00:00Z).")
+        filtros.append(Filtro(campo, "<", normalizar(antes_de)))
+    limite = consulta.limite
+    achados = await leitor.consultar(replace(consulta, filtros=filtros, limite=None if limite is None else limite + 1))
+    if limite is None or len(achados) <= limite:
+        return achados
+    pagina, proximo = achados[:limite], achados[limite]
+    fronteira = pagina[-1][campo]
+    if proximo[campo] != fronteira:
+        return pagina
+    grupo = await leitor.consultar(replace(consulta, filtros=[*consulta.filtros, Filtro(campo, "==", fronteira)],
+                                           ordem=[(campo, "desc")], limite=LIMITE_GRUPO))
+    return [x for x in pagina if x[campo] != fronteira] + grupo

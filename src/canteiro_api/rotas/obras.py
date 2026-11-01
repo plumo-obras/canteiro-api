@@ -1,5 +1,6 @@
 """Obras, almoxarifado (insumos com a Conta, movimentos, importação) e pedidos."""
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from pydantic import ValidationError
@@ -27,7 +28,7 @@ from ..esquemas import (
     ResumoObra,
 )
 from ..modelos import Papel
-from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, obra_do_tenant
+from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, listar_pagina, obra_do_tenant
 from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo
 
 r = APIRouter(tags=["obras e almoxarifado"])
@@ -132,11 +133,11 @@ async def criar_insumo(obra_id: str, corpo: InsumoCorpo, u: UsuarioAtual = Depen
 
 @r.get("/obras/{obra_id}/insumos/{insumo_id}/movimentos", response_model=list[Movimento])
 async def movimentos(obra_id: str, insumo_id: str, limite: int = Query(50, ge=1, le=200),
-                     u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+                     antes_de: datetime | None = None, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     await obra_do_tenant(arm, u.tenant_id, obra_id)
-    return await arm.consultar(Consulta("movimentos", u.tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                    Filtro("insumo_id", "==", insumo_id)],
-                                        [("criado_em", "desc")], limite=limite))
+    filtros = [Filtro("obra_id", "==", obra_id), Filtro("insumo_id", "==", insumo_id)]
+    consulta = Consulta("movimentos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite)
+    return await listar_pagina(arm, consulta, "criado_em", antes_de)
 
 
 @r.post("/obras/{obra_id}/movimentos", response_model=MovimentoSaida, status_code=status.HTTP_201_CREATED,
@@ -182,14 +183,19 @@ async def importar(obra_id: str, arquivo: UploadFile = File(...), aplicar: bool 
 # --- pedidos ---
 
 @r.get("/obras/{obra_id}/pedidos", response_model=list[Pedido], tags=["pedidos"])
-async def listar_pedidos(obra_id: str, status_: StatusPedido | None = Query(None, alias="status"),
-                         limite: int = Query(100, ge=1, le=500),
+async def listar_pedidos(obra_id: str, status_: list[StatusPedido] | None = Query(None, alias="status"),
+                         limite: int = Query(100, ge=1, le=500), antes_de: datetime | None = None,
                          u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     filtros = [Filtro("obra_id", "==", obra_id)]
-    if status_:
-        filtros.append(Filtro("status", "==", status_.value))
-    return await arm.consultar(Consulta("pedidos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite))
+    # status repetido (?status=a&status=b) vira "in": o quadro pede só as colunas abertas, o recolhido só as fechadas
+    sts = list(dict.fromkeys(st.value for st in status_ or []))
+    if len(sts) == 1:
+        filtros.append(Filtro("status", "==", sts[0]))
+    elif sts:
+        filtros.append(Filtro("status", "in", sts))
+    return await listar_pagina(arm, Consulta("pedidos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
+                               "criado_em", antes_de)
 
 
 @r.post("/obras/{obra_id}/pedidos", response_model=PedidoSaida, status_code=status.HTTP_201_CREATED,
