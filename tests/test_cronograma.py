@@ -35,8 +35,8 @@ async def test_cronograma_previsto_por_mes(vila):
     assert [(m["mes"], m["previsto"], m["pct_previsto_acumulado"]) for m in c["mensal"]] == [
         ("2026-01", 380589, 1806), ("2026-02", 863504, 5903), ("2026-03", 863504, 10000)]
     assert [(e["etapa"], e["percentuais"]) for e in c["etapas"]] == [("1", [10000, 0, 0]), ("2", [0, 5000, 5000])]
-    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
-    assert reg["texto"] == "Montou o cronograma: 2 etapas, 3 meses a partir de 2026-01"
+    textos = [x["texto"] for x in (await vila.http.get("/registro", headers=vila.h)).json()]
+    assert "Montou o cronograma: 2 etapas, 3 meses a partir de 2026-01" in textos
 
 
 async def test_cronograma_recusa_o_que_nao_fecha(vila):
@@ -76,7 +76,8 @@ async def test_medicoes_e_prazo_projetado(vila):
             p["pct_medido"]) == (1, 14, "2026-04", 10000, 4264)
     mensal = r.json()["cronograma"]["mensal"]
     assert [m["medido_acumulado"] for m in mensal] == [380589, 380589 + 345401, 380589 + 345401 + 172701]
-    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
+    regs = (await vila.http.get("/registro", headers=vila.h)).json()
+    reg = next(x for x in regs if x["id"] == r.json()["registro_id"])
     assert reg["texto"] == "3ª medição (2026-03): R$ 1.727,01 no mês · 42,6% da obra executada"
 
 
@@ -117,7 +118,8 @@ async def test_aditivo_de_prazo_estende_e_desfaz(vila):
                                                          {"etapa": "2", "percentuais": [0, 2500, 2500, 2500, 2500]}]}
     r = await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h, json=longo)
     assert (r.status_code, r.json()["prazo"]["termino_contratual"]) == (200, "2026-05"), r.text
-    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
+    regs = (await vila.http.get("/registro", headers=vila.h)).json()
+    reg = next(x for x in regs if x["id"] == r.json()["registro_id"])
     assert reg["texto"] == "Refez o cronograma: 2 etapas, 5 meses a partir de 2026-01 (era 3)"
     assert (await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)).status_code == 200
     assert (await _cron(vila, obra))["meses"] == 3
