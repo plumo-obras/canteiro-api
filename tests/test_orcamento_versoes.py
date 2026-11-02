@@ -223,3 +223,40 @@ async def test_aprovar_soma_os_aditivos_vigentes(vila):
     r = await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)
     reg = await registro(vila, r.json()["registro_id"])
     assert reg["texto"] == f"Aprovou o orçamento de {o['nome']} (8 itens, R$ 40.192,78)"
+
+
+ADITIVO_A1 = xlsx(
+    ["Aditivo 01"],
+    CABECALHO,
+    ["A1", None, None, "ACRÉSCIMOS", None, None, None, None],
+    ["A1.1", "93382", "SINAPI", "Aterro apiloado", "m³", 100, 20.48, 2048],
+    ["A1.2", "74209/1", "SINAPI", "Placa de obra (mais)", "m²", 2, 238.91, 477.82],
+    ["A1.3", "92915", "SINAPI", "Armação CA-60 5,0mm", "kg", 10, 11.15, 111.5],
+)
+
+
+async def test_aditivo_cai_nas_etapas_do_contrato_pelo_codigo_ou_pela_escolha(vila):
+    o = await nova_obra(vila)
+    assert (await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)).status_code == 201
+    m = mapa(linha_cabecalho=2)
+    r = await versao(vila, o["id"], ADITIVO_A1, m, tipo="aditivo", descricao="Aditivo 01", data="2026-11-20")
+    assert r.status_code == 200, r.text
+    itens = [x for x in r.json()["itens"] if x["tipo"] == "item"]
+    assert [(x["numero"], x["etapa"], x["etapa_origem"], x["etapa_planilha"]) for x in itens] == [
+        ("A1.1", "A1", "planilha", "A1"), ("A1.2", "1", "codigo", "A1"), ("A1.3", "2", "codigo", "A1")]
+    # o aterro não tem código no contrato: a pessoa aponta a etapa 2 (fundações) na prévia
+    aterro = itens[0]["ordem"]
+    r = await versao(vila, o["id"], ADITIVO_A1, m, tipo="aditivo", descricao="Aditivo 01", data="2026-11-20",
+                     aplicar=True, etapas_itens=json.dumps({str(aterro): "2"}))
+    assert r.status_code == 201, r.text
+    assert [(e["etapa"], e["descricao"], e["total"]) for e in r.json()["etapas"]] == [
+        ("2", "FUNDAÇÕES", 204800 + 11150), ("1", "SERVIÇOS PRELIMINARES", 47782)]
+    assert not any(x["tipo"] == "etapa" for x in r.json()["itens"])        # o título "A1" ficou sem item
+    orc = await orcamento(vila, o["id"])
+    por = {e["etapa"]: e["aditivos"] for e in orc["etapas"]}
+    assert (por["1"], por["2"], "A1" in por) == (47782, 215950, False)
+    etapas = (await vila.http.get(f"/obras/{o['id']}/etapas", headers=vila.h)).json()
+    assert [e["etapa"] for e in etapas] == ["1", "2"]
+    ruim = await versao(vila, o["id"], ADITIVO_A1, m, tipo="aditivo", descricao="x", data="2026-11-20",
+                        etapas_itens=json.dumps({str(aterro): "9"}))
+    assert ruim.status_code == 422

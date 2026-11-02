@@ -235,6 +235,10 @@ class Cronograma(Documento):
     meses: int
     etapas: list[dict[str, Any]] = Field(default_factory=list)   # [{etapa, percentuais: [int]}]
     versao: int = 1                        # sobe a cada edição: o desfazer de uma edição velha é recusado
+    # Linha de base: o cronograma como foi assinado ({inicio, meses, etapas}). Reprogramar (aditivo de prazo) muda o
+    # vigente e mantém a base, senão o atraso some no dia em que se reprograma. Só troca se a pessoa pedir.
+    base: dict[str, Any] | None = None
+    revisoes: int = 0                      # reprogramações desde a linha de base
     medicoes: int = 0
     ultima_medicao: str | None = None      # "AAAA-MM"
     acumulado: dict[str, int] = Field(default_factory=dict)      # etapa → % executado acumulado

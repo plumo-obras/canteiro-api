@@ -116,15 +116,22 @@ async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile 
                           data: str | None = Form(None, pattern=r"^(\d{4}-\d{2}-\d{2})?$"),
                           aplicar: bool = Form(False),
                           chave_idempotencia: str | None = Form(None, min_length=8, max_length=64),
+                          etapas_itens: str | None = Form(None, max_length=20000),
                           u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     try:
         m = Mapeamento.model_validate(json.loads(mapeamento))
     except (ValueError, ValidationError):
         raise ErroNegocio("Mapeamento de colunas inválido.") from None
+    try:
+        # aditivo: {"ordem do item na prévia": "etapa do contrato"}, para o que a sugestão pelo código não acertou
+        escolhidas = {int(k): str(v) for k, v in json.loads(etapas_itens).items()} if etapas_itens else {}
+    except (ValueError, AttributeError):
+        raise ErroNegocio("etapas_itens inválido: use {\"ordem\": \"etapa\"}.") from None
     conteudo = await _ler_arquivo(arquivo)
     try:
         previa, criada = await versoes.importar(arm, u, obra_id, conteudo, arquivo.filename or "", m, tipo,
-                                                descricao, data or None, aplicar, chave_idempotencia)
+                                                descricao, data or None, aplicar, chave_idempotencia,
+                                                escolhidas)
     except ConflitoDeId:
         raise Conflito("Esta importação já foi gravada agora há pouco; recarregue o orçamento.") from None
     if criada:

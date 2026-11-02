@@ -130,3 +130,64 @@ async def test_atraso_no_primeiro_mes_nao_fica_em_dia(vila):
     r = await _medir(vila, obra, "2026-01", {"1": 1000})        # 1,8% medido contra 18,1% previsto
     p = r.json()["cronograma"]["prazo"]
     assert (p["atraso_decimos"], p["atraso_meses"], p["termino_projetado"]) == (9, 1, "2026-04")
+
+
+async def test_reprogramar_mantem_a_linha_de_base(vila):
+    obra = await _obra(vila)
+    await _medir(vila, obra, "2026-01", {"1": 10000})
+    await _medir(vila, obra, "2026-03", {"2": 3000})                    # 42,6%: 1,4 mês atrás do plano
+    novo = {"inicio": "2026-01", "meses": 5, "atualizar_prazo_da_obra": True,
+            "etapas": [{"etapa": "1", "percentuais": [10000, 0, 0, 0, 0]},
+                       {"etapa": "2", "percentuais": [0, 1500, 1500, 3500, 3500]}]}
+    r = await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h, json=novo)
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert (c["base"], c["revisoes"], c["prazo"]["termino_contratual"]) == (
+        {"inicio": "2026-01", "meses": 3}, 1, "2026-05")
+    p = c["prazo"]
+    # contra o vigente (reprogramado para o ritmo real) está em dia; contra a base o atraso continua lá
+    assert (p["termino_base"], p["atraso_base_decimos"], p["atraso_base_meses"]) == ("2026-03", 14, 1)
+    assert p["atraso_decimos"] == 0
+    assert [m["pct_base_acumulado"] for m in c["mensal"]] == [1806, 5903, 10000, 10000, 10000]
+    obra_doc = next(o for o in (await vila.http.get("/obras", headers=vila.h)).json() if o["id"] == obra)
+    assert obra_doc["prazo_meses"] == 5
+    reg = next(x for x in (await vila.http.get("/registro", headers=vila.h)).json() if x["id"] == c["registro_id"])
+    assert reg["texto"].endswith("(era 3) · prazo da obra — → 5 meses")
+    # desfazer volta o cronograma e o prazo da obra juntos
+    assert (await vila.http.post(f"/registro/{c['registro_id']}/desfazer", headers=vila.h)).status_code == 200
+    c = await _cron(vila, obra)
+    obra_doc = next(o for o in (await vila.http.get("/obras", headers=vila.h)).json() if o["id"] == obra)
+    assert (c["meses"], c["revisoes"], obra_doc["prazo_meses"]) == (3, 0, 0)
+
+
+async def test_nova_linha_base_so_quando_pedida(vila):
+    obra = await _obra(vila)
+    longo = {**PLANO, "meses": 4, "etapas": [{"etapa": "1", "percentuais": [10000, 0, 0, 0]},
+                                             {"etapa": "2", "percentuais": [0, 5000, 2500, 2500]}]}
+    c = (await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h, json=longo)).json()
+    assert (c["base"]["meses"], c["revisoes"]) == (3, 1)
+    c = (await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h,
+                             json={**longo, "nova_linha_base": True})).json()
+    assert (c["base"]["meses"], c["revisoes"], c["prazo"]["termino_base"]) == (4, 0, "2026-04")
+
+
+async def test_cronograma_de_antes_da_linha_de_base(vila, arm):
+    from canteiro_api.servicos.cronograma import id_cronograma
+    obra = await _obra(vila)
+
+    async def antigo(tx):
+        # como ficou gravado antes da linha de base existir: sem `base` nem `revisoes`
+        tx.atualizar("cronogramas", vila.tenant_id, id_cronograma(vila.tenant_id, obra),
+                     {"base": None, "revisoes": None})
+
+    await arm.em_transacao(antigo)
+    assert (await vila.http.get(f"/obras/{obra}/cronograma", headers=vila.h)).status_code == 200
+    longo = {**PLANO, "meses": 4, "atualizar_prazo_da_obra": True,
+             "etapas": [{"etapa": "1", "percentuais": [10000, 0, 0, 0]},
+                        {"etapa": "2", "percentuais": [0, 5000, 2500, 2500]}]}
+    c = (await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h, json=longo)).json()
+    # o anterior vira a base: reprogramar não apaga o atraso nem na obra antiga
+    assert (c["base"], c["revisoes"]) == ({"inicio": "2026-01", "meses": 3}, 1)
+    assert (await vila.http.post(f"/registro/{c['registro_id']}/desfazer", headers=vila.h)).status_code == 200
+    r = await vila.http.get(f"/obras/{obra}/cronograma", headers=vila.h)
+    assert (r.status_code, r.json()["meses"], r.json()["revisoes"]) == (200, 3, 0), r.text

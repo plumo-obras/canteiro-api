@@ -176,6 +176,11 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   contrato primeiro e aditivos pela ordem do número, cada um pela `ordem`. `curva` (A/B/C) dos itens pelo `total` da
   linha, na régua do 80/95%, só entre itens com total > 0 (etapas: `null`). `etapas` soma por `etapa` (descrição da
   linha de etapa do contrato; a do aditivo se a etapa só existe nele). Sem nenhuma versão: listas vazias e totais 0.
+- **Aditivo nas etapas do contrato:** no `tipo=aditivo`, cada item vai para a etapa do contrato onde o mesmo
+  `fonte|codigo` aparece (`etapa_origem: "codigo"`); o resto fica na etapa da planilha (`"planilha"`). O campo
+  `etapas_itens` (JSON `{"ordem": "etapa"}`) aponta a etapa de itens específicos (`"escolhida"`; etapa que não existe
+  no contrato nem no aditivo → 422). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
+  sem item some da versão.
 - **Previsto × realizado** (Fase 3): cada etapa e os totais trazem também `cotando`, `comprometido` e `realizado`
   (centavos), somados das linhas dos pedidos da obra pela `etapa` de cada linha. `cotando` = pedidos em cotação ·
   `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
@@ -254,7 +259,7 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 Percentual em centésimos de ponto (12,5% = 1250; 100% = 10000), mês `"AAAA-MM"`. O % da obra é ponderado pelo orçado
 atual de cada etapa (contrato + aditivos vigentes).
 
-- `GET /obras/{obra_id}/cronograma` → `{inicio, meses, etapas, mensal, medicoes, prazo}`. Sem cronograma: `inicio`
+- `GET /obras/{obra_id}/cronograma` → `{inicio, meses, base, revisoes, etapas, mensal, medicoes, prazo}`. Sem cronograma: `inicio`
   `null`, `meses` 0, as etapas do orçamento com `percentuais: []` e `prazo.termino_contratual` pelo `inicio` +
   `prazo_meses` da obra (ou `null`).
   - `etapas`: `[{etapa, descricao, atual, percentuais, medido_acumulado}]`, todas as do orçamento vigente.
@@ -269,8 +274,13 @@ atual de cada etapa (contrato + aditivos vigentes).
   + `registro_id`. Substitui o cronograma inteiro. Cada etapa soma exatamente 10000 ou é toda zero (fica fora);
   `percentuais` com `meses` posições; etapa fora do orçamento, repetida ou obra sem orçamento → 422. Com medição já
   lançada, o novo cronograma tem de cobrir o mês dela (→ 422). Registro "Montou/Refez o cronograma: N etapas, M meses a
-  partir de AAAA-MM (era K)", desfazer `restaurar_cronograma` (409 se editado de novo depois). Aditivo de prazo =
-  `PATCH /obras/{id}` com `prazo_meses` + um PUT com mais meses.
+  partir de AAAA-MM (era K)", desfazer `restaurar_cronograma` (409 se editado de novo depois).
+  - **Linha de base:** o primeiro cronograma vira a base (`base: {inicio, meses}`); os PUTs seguintes são
+    reprogramações (`revisoes` conta) e mantêm a base, a menos que venha `nova_linha_base: true`. `mensal[].
+    pct_base_acumulado` e `prazo.{termino_base, atraso_base_decimos, atraso_base_meses}` medem contra a base: é o
+    atraso que reprogramar não apaga.
+  - **Aditivo de prazo:** `atualizar_prazo_da_obra: true` grava `meses` em `obra.prazo_meses` na mesma transação; o
+    desfazer volta o cronograma **e** o prazo (409 se o prazo mudou de novo depois).
 - `POST /obras/{obra_id}/medicoes` (admin) `{mes, etapas: [{etapa, pct_acumulado}], observacao?, chave_idempotencia}` →
   `{medicao, cronograma, registro_id}` (201; a mesma chave devolve a mesma medição com 200; com outro conteúdo → 409).
   Exige cronograma (→ 422). `mes` depois da última medição e entre o início e 12 meses após o término; acumulado entre

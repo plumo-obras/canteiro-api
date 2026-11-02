@@ -182,13 +182,14 @@ def _preco(v, campo: str, n: int, erros: list[ErroLinha]) -> int | None:
     return x
 
 
-def _totais_por_etapa(itens) -> list[TotalEtapa]:
-    descricoes: dict[str, str] = {}
+def _totais_por_etapa(itens, descricoes_contrato: dict[str, str] | None = None) -> list[TotalEtapa]:
+    descricoes: dict[str, str] = dict(descricoes_contrato or {})
     somas: dict[str, int] = {}
     for x in itens:
         if x.tipo == "etapa" and x.nivel == 1:
             descricoes.setdefault(x.etapa, x.descricao)
-            somas.setdefault(x.etapa, 0)
+            if not descricoes_contrato:
+                somas.setdefault(x.etapa, 0)
         elif x.tipo == "item":
             somas[x.etapa] = somas.get(x.etapa, 0) + x.total
     return [TotalEtapa(etapa=e, descricao=descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), total=t)
@@ -208,9 +209,43 @@ def id_versao(tenant_id: str, obra_id: str, chave: str) -> str:
     return id_derivado(tenant_id, "versao", obra_id, chave)
 
 
+async def _apropriar_aditivo(arm, tenant_id: str, vigente: dict, itens: list[ItemPrevia],
+                             escolhidas: dict[int, str]) -> dict[str, str]:
+    """Põe cada item do aditivo na etapa do contrato onde ele conta. A planilha de aditivo costuma vir numa etapa só
+    ("A1 ACRÉSCIMOS"), e somar o tapume e o aço numa etapa à parte esconderia o estouro da fundação no previsto ×
+    realizado. Sugestão pelo código (o mesmo serviço do contrato está naquela etapa); a pessoa pode apontar outra.
+    Devolve {etapa: descrição} do contrato, para os totais."""
+    contrato = await arm.consultar(Consulta("itens_orcamento", tenant_id, [Filtro("versao_id", "==", vigente["id"])]))
+    descricoes = {e["etapa"]: e["descricao"] for e in vigente.get("lista_etapas", [])}
+    for x in contrato:
+        if x["tipo"] == "etapa" and x["nivel"] == 1:
+            descricoes.setdefault(x["etapa"], x["descricao"])
+    etapa_do_codigo: dict[str, str] = {}
+    for x in sorted(contrato, key=lambda x: x["ordem"]):
+        if x["tipo"] == "item" and x.get("codigo") and any(c.isdigit() for c in x["codigo"]):
+            etapa_do_codigo.setdefault(f"{x.get('fonte', '').casefold()}|{x['codigo'].casefold()}", x["etapa"])
+    proprias = {x.etapa for x in itens if x.tipo == "etapa"}
+    for x in itens:
+        if x.tipo != "item":
+            continue
+        x.etapa_planilha = x.etapa
+        if x.ordem in escolhidas:
+            alvo = escolhidas[x.ordem]
+            if alvo not in descricoes and alvo not in proprias:
+                raise ErroNegocio(f"A etapa {alvo} não existe no contrato nem no aditivo.")
+            x.etapa, x.etapa_origem = alvo, "escolhida"
+        elif x.etapa not in descricoes and (e := etapa_do_codigo.get(f"{x.fonte.casefold()}|{x.codigo.casefold()}")):
+            x.etapa, x.etapa_origem = e, "codigo"
+    # título de etapa do aditivo que ficou sem item (todos foram para etapas do contrato) não vira etapa vazia
+    com_item = {x.etapa for x in itens if x.tipo == "item"}
+    # a `ordem` fica a da leitura (com buracos): é a chave da escolha na prévia e do ID do item gravado
+    itens[:] = [x for x in itens if x.tipo == "item" or x.etapa in com_item or x.nivel > 1]
+    return descricoes
+
+
 async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo: str, m: Mapeamento,
                    tipo: TipoVersao, descricao: str, data: str | None, aplicar: bool,
-                   chave: str | None) -> tuple[PreviaVersao, bool]:
+                   chave: str | None, escolhidas: dict[int, str] | None = None) -> tuple[PreviaVersao, bool]:
     """Devolve (prévia ou versão gravada, criada agora?)."""
     o = await obra_do_tenant(arm, u.tenant_id, obra_id)
     faltando = [r for c, r in (("nome", "descrição"), ("unidade", "unidade"), ("quantidade", "quantidade"))
@@ -219,7 +254,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         raise ErroNegocio(f"Diga qual coluna é a {', '.join(faltando)}.")
     if aplicar and not chave:
         raise ErroNegocio("Falta a chave de idempotência.")
-    assinatura = hashlib.sha256(conteudo + f"|{tipo.value}|{m.model_dump_json()}".encode()).hexdigest()
+    escolhidas = escolhidas or {}
+    assinatura = hashlib.sha256(conteudo + f"|{tipo.value}|{m.model_dump_json()}|{sorted(escolhidas.items())}"
+                                .encode()).hexdigest()
     id_ = id_versao(u.tenant_id, obra_id, chave) if chave else None
     if aplicar:
         ja = await arm.obter("versoes_orcamento", u.tenant_id, id_)
@@ -232,11 +269,15 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     itens, ignoradas, erros, avisos = _ler(grade, m, tipo)
     versoes = await versoes_da_obra(arm, u.tenant_id, obra_id)
     vigente = _contrato_vigente(versoes)
+    descricoes_contrato = None
+    if tipo == TipoVersao.ADITIVO and vigente:
+        descricoes_contrato = await _apropriar_aditivo(arm, u.tenant_id, vigente, itens, escolhidas)
     so_itens = [x for x in itens if x.tipo == "item"]
     previa = PreviaVersao(
         aplicado=False, tipo=tipo, itens=itens, ignoradas=ignoradas, erros=erros, avisos=avisos,
         total=sum(x.total for x in so_itens), n_itens=len(so_itens),
-        n_etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in itens), etapas=_totais_por_etapa(itens),
+        n_etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in itens),
+        etapas=_totais_por_etapa(itens, descricoes_contrato),
         substitui=(Substituida(versao_id=vigente["id"], total=vigente["total"], itens=vigente["itens"])
                    if vigente and tipo == TipoVersao.CONTRATO else None))
     if tipo == TipoVersao.ADITIVO and not vigente:

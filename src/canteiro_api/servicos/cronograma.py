@@ -11,7 +11,15 @@ from canteiro_dominio.regras import RegraViolada
 from canteiro_dominio.tipos import fmt_reais
 
 from ..auth import UsuarioAtual
-from ..esquemas import CronogramaCorpo, CronogramaObra, EtapaCronograma, MedicaoCorpo, MesCronograma, Prazo
+from ..esquemas import (
+    CronogramaCorpo,
+    CronogramaObra,
+    EtapaCronograma,
+    LinhaBase,
+    MedicaoCorpo,
+    MesCronograma,
+    Prazo,
+)
 from ..modelos import doc
 from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant
 from .estoque import id_derivado
@@ -82,15 +90,27 @@ async def salvar(arm, u: UsuarioAtual, obra_id: str, corpo: CronogramaCorpo) -> 
 
     async def corpo_tx(tx):
         atual = await tx.obter("cronogramas", u.tenant_id, id_)
+        obra = await obra_do_tenant(tx, u.tenant_id, obra_id) if corpo.atualizar_prazo_da_obra else None
         if atual and atual.get("ultima_medicao"):
             fim = _mes_idx(corpo.inicio) + corpo.meses - 1 + MESES_DEPOIS_DO_FIM
             if _mes_idx(corpo.inicio) > _mes_idx(atual["ultima_medicao"]) or fim < _mes_idx(atual["ultima_medicao"]):
                 raise ErroNegocio(f"Já há medição em {atual['ultima_medicao']}: o cronograma tem de cobrir esse mês.")
-        campos = {"inicio": corpo.inicio, "meses": corpo.meses, "etapas": etapas,
-                  "versao": (atual["versao"] + 1) if atual else 1}
-        antes = {k: atual[k] for k in ("inicio", "meses", "etapas")} if atual else None
+        vigente = {"inicio": corpo.inicio, "meses": corpo.meses, "etapas": etapas}
+        # cronograma de antes da linha de base (sem `base`): a base passa a ser o anterior, não este, senão a
+        # primeira reprogramação já apagaria o atraso
+        if atual and not atual.get("base"):
+            atual = {**atual, "base": {k: atual[k] for k in ("inicio", "meses", "etapas")}}
+        nova_base = not atual or corpo.nova_linha_base
+        campos = {**vigente, "versao": (atual["versao"] + 1) if atual else 1,
+                  "base": vigente if nova_base else atual["base"],
+                  "revisoes": 0 if nova_base else (atual.get("revisoes") or 0) + 1}
+        antes = ({"inicio": atual["inicio"], "meses": atual["meses"], "etapas": atual["etapas"],
+                  "base": atual["base"], "revisoes": atual.get("revisoes") or 0} if atual else None)
+        prazo_antes = obra.get("prazo_meses", 0) if obra else None
 
         def aplicar():
+            if obra is not None:
+                tx.atualizar("obras", u.tenant_id, obra_id, {"prazo_meses": corpo.meses})
             if atual:
                 tx.atualizar("cronogramas", u.tenant_id, id_, campos)
                 return {**atual, **campos}
@@ -103,11 +123,15 @@ async def salvar(arm, u: UsuarioAtual, obra_id: str, corpo: CronogramaCorpo) -> 
             prazo = f"{corpo.meses} meses a partir de {corpo.inicio}"
             if atual and atual["meses"] != corpo.meses:
                 prazo += f" (era {atual['meses']})"
-            return f"{verbo} o cronograma: {len(etapas)} etapas, {prazo}"
+            if obra is not None and prazo_antes != corpo.meses:
+                prazo += f" · prazo da obra {prazo_antes or '—'} → {corpo.meses} meses"
+            base = " · nova linha de base" if atual and nova_base else ""
+            return f"{verbo} o cronograma: {len(etapas)} etapas, {prazo}{base}"
 
         op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=texto,
                       desfazer=lambda d: {"op": "restaurar_cronograma", "cronograma_id": id_, "antes": antes,
-                                          "versao": campos["versao"]})
+                                          "versao": campos["versao"], "obra_id": obra_id,
+                                          "prazo_antes": prazo_antes, "prazo_depois": corpo.meses if obra else None})
         _, reg = executar_e_registrar(tx, u, op)
         evento(tx, u.tenant_id, "cronograma.salvo", obra_id, {"versao": campos["versao"]})
         return reg["id"]
@@ -123,17 +147,33 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
     antes = receita["antes"]
     if antes is None and c.get("medicoes"):
         raise Conflito("Já há medição neste cronograma; desfaça as medições antes.")
+    if antes and c.get("ultima_medicao"):
+        m, ini = _mes_idx(c["ultima_medicao"]), _mes_idx(antes["inicio"])
+        if not ini <= m <= ini + antes["meses"] - 1 + MESES_DEPOIS_DO_FIM:
+            raise Conflito(f"A medição de {c['ultima_medicao']} fica fora do cronograma anterior; desfaça-a antes.")
+    obra = None
+    if receita.get("prazo_depois") is not None:
+        # o aditivo de prazo mudou a obra junto: o desfazer volta os dois, ou nenhum
+        obra = await obra_do_tenant(tx, u.tenant_id, receita["obra_id"])
+        if obra.get("prazo_meses") != receita["prazo_depois"]:
+            raise Conflito("O prazo da obra mudou de novo depois; não dá para desfazer esta reprogramação.")
 
     def aplicar():
         # sem versão anterior, "desfazer" deixa o cronograma vazio (a porta de armazenamento não apaga)
-        campos = antes or {"etapas": [], "meses": 0}
+        campos = antes or {"etapas": [], "meses": 0, "base": None, "revisoes": 0}
         campos = {**campos, "versao": c["versao"] + 1}
         tx.atualizar("cronogramas", u.tenant_id, c["id"], campos)
+        if obra is not None:
+            tx.atualizar("obras", u.tenant_id, obra["id"], {"prazo_meses": receita["prazo_antes"]})
         return {**c, **campos}
 
-    return Operacao(obra_id=c["obra_id"], aplicar=aplicar,
-                    texto=lambda d: "Desfeito: o cronograma voltou à versão anterior" if antes
-                    else "Desfeito: o cronograma foi retirado", desfazer=lambda d: None)
+    def texto(d):
+        t = "Desfeito: o cronograma voltou à versão anterior" if antes else "Desfeito: o cronograma foi retirado"
+        if obra is not None:
+            t += f" e o prazo da obra voltou a {receita['prazo_antes'] or '—'} meses"
+        return t
+
+    return Operacao(obra_id=c["obra_id"], aplicar=aplicar, texto=texto, desfazer=lambda d: None)
 
 
 async def medir(arm, u: UsuarioAtual, obra_id: str, corpo: MedicaoCorpo) -> tuple[dict, bool, str]:
@@ -258,31 +298,54 @@ async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObr
             linha.pct_medido_acumulado = m["pct_obra_acumulado"] if m else (
                 mensal[-1].pct_medido_acumulado if mensal else 0)
         mensal.append(linha)
+    base = c.get("base") or {"inicio": c["inicio"], "meses": c["meses"], "etapas": c["etapas"]}
+    b_ini = _mes_idx(base["inicio"])
+    serie_base = _serie({e["etapa"]: e["percentuais"] for e in base["etapas"]}, orcadas, base["meses"])
+    for k, linha in enumerate(mensal):
+        j = ini + k - b_ini
+        linha.pct_base_acumulado = 0 if j < 0 else serie_base[min(j, len(serie_base) - 1)]
     termino = ini + c["meses"] - 1
-    prazo = Prazo(termino_contratual=_mes(termino))
+    termino_base = b_ini + base["meses"] - 1
+    prazo = Prazo(termino_contratual=_mes(termino), termino_base=_mes(termino_base))
     if ref is not None:
         medido = meds[-1]["pct_obra_acumulado"]
-        decimos = round((ref - _mes_equivalente(mensal, medido)) * 10)
-        # meio mês arredonda para cima: atraso de 0,5 já empurra o término
-        atraso = (decimos + 5) // 10 if decimos >= 0 else -((-decimos + 5) // 10)
+        decimos = round((ref - _mes_equivalente([x.pct_previsto_acumulado for x in mensal], medido)) * 10)
+        decimos_base = round((ini + ref - b_ini - _mes_equivalente(serie_base, medido)) * 10)
+        atraso, atraso_base = _arredonda_meio(decimos), _arredonda_meio(decimos_base)
         prazo = Prazo(termino_contratual=_mes(termino), termino_projetado=_mes(termino + atraso),
                       atraso_meses=atraso, atraso_decimos=decimos,
                       pct_previsto_na_medicao=mensal[ref].pct_previsto_acumulado, pct_medido=medido,
-                      mes_referencia=meds[-1]["mes"])
+                      mes_referencia=meds[-1]["mes"], termino_base=_mes(termino_base),
+                      atraso_base_meses=atraso_base, atraso_base_decimos=decimos_base)
     return CronogramaObra(inicio=c["inicio"], meses=c["meses"], etapas=etapas, mensal=mensal, medicoes=meds,
-                          prazo=prazo)
+                          prazo=prazo, base=LinhaBase(inicio=base["inicio"], meses=base["meses"]),
+                          revisoes=c.get("revisoes") or 0)
 
 
-def _mes_equivalente(mensal: list[MesCronograma], medido: int) -> float:
-    """Em que ponto do cronograma o previsto acumulado vale o % medido, em meses com fração (fim do mês k = k;
-    antes do 1º mês = -1). Interpolar dentro do mês evita dizer "em dia" para 1,5% medido contra 9,2% previsto, que é o
-    que a conta em meses inteiros fazia no primeiro mês."""
+def _arredonda_meio(decimos: int) -> int:
+    # meio mês arredonda para longe do zero: atraso de 0,5 já empurra o término
+    return (decimos + 5) // 10 if decimos >= 0 else -((-decimos + 5) // 10)
+
+
+def _serie(plano: dict[str, list[int]], orcadas: dict[str, tuple[str, int]], meses: int) -> list[int]:
+    """% acumulado previsto da obra, mês a mês, pelo plano e pelos pesos de hoje (orçado atual de cada etapa)."""
+    total = sum(v for _, v in orcadas.values())
+    acum, saida = 0, []
+    for k in range(meses):
+        acum += sum(orcadas.get(e, ("", 0))[1] * p[k] for e, p in plano.items() if k < len(p))
+        saida.append(_pct(acum, total * CEM) if total else 0)
+    return saida
+
+
+def _mes_equivalente(serie: list[int], medido: int) -> float:
+    """Em que ponto da série o % previsto acumulado vale o % medido, em meses com fração (fim do mês k = k; antes do
+    1º mês = -1). Interpolar dentro do mês evita dizer "em dia" para 1,5% medido contra 9,2% previsto, que é o que a
+    conta em meses inteiros fazia no primeiro mês."""
     anterior = 0
-    for k, x in enumerate(mensal):
-        atual = x.pct_previsto_acumulado
+    for k, atual in enumerate(serie):
         if medido == 0 and atual > 0:
             return k - 1
         if medido > 0 and atual >= medido:
             return k - 1 + (medido - anterior) / (atual - anterior)
         anterior = atual
-    return len(mensal) - 1
+    return len(serie) - 1

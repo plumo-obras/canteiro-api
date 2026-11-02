@@ -429,6 +429,10 @@ class ItemPrevia(BaseModel):
     valor_unitario: int
     total: int
     linha: int
+    # só no aditivo: de onde veio a etapa do item. "planilha" = como veio; "codigo" = o mesmo código está nesta etapa
+    # do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).
+    etapa_origem: Literal["planilha", "codigo", "escolhida"] = "planilha"
+    etapa_planilha: str = ""
 
 
 class Aviso(BaseModel):
@@ -721,6 +725,10 @@ class CronogramaCorpo(Entrada):
     inicio: str = Field(pattern=_MES)
     meses: int = Field(ge=1, le=60)
     etapas: list[EtapaCronogramaCorpo] = Field(max_length=200)
+    atualizar_prazo_da_obra: bool = Field(False, description="aditivo de prazo: grava `meses` no prazo da obra na "
+                                                             "mesma transação (e o desfazer volta os dois)")
+    nova_linha_base: bool = Field(False, description="troca a linha de base por este cronograma (o atraso passa a "
+                                                     "ser medido contra ele)")
 
 
 class EtapaMedicaoCorpo(Entrada):
@@ -751,6 +759,7 @@ class MesCronograma(BaseModel):
     medido: int | None = None
     medido_acumulado: int | None = None
     pct_medido_acumulado: int | None = None
+    pct_base_acumulado: int = 0
 
 
 class Prazo(BaseModel):
@@ -761,11 +770,22 @@ class Prazo(BaseModel):
     pct_previsto_na_medicao: int | None = None
     pct_medido: int | None = None
     mes_referencia: str | None = None
+    # contra a linha de base (o cronograma assinado): é o atraso que a reprogramação não apaga
+    termino_base: str | None = None
+    atraso_base_meses: int | None = None
+    atraso_base_decimos: int | None = None
+
+
+class LinhaBase(BaseModel):
+    inicio: str
+    meses: int
 
 
 class CronogramaObra(BaseModel):
     inicio: str | None = None
     meses: int = 0
+    base: LinhaBase | None = None
+    revisoes: int = 0
     etapas: list[EtapaCronograma] = Field(default_factory=list)
     mensal: list[MesCronograma] = Field(default_factory=list)
     medicoes: list[Medicao] = Field(default_factory=list)
