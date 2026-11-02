@@ -323,10 +323,11 @@ async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObr
     ultimo = max([c["meses"] - 1] + [_mes_idx(m["mes"]) - ini for m in meds])
     por_mes = {_mes_idx(m["mes"]) - ini: m for m in meds}
     ref = _mes_idx(meds[-1]["mes"]) - ini if meds else None
+    valores = [valores_mes(e.atual, e.percentuais) for e in etapas]
     mensal: list[MesCronograma] = []
     prev_acum = med_acum = 0
     for k in range(ultimo + 1):
-        previsto = sum((e.atual * e.percentuais[k] + CEM // 2) // CEM for e in etapas if k < len(e.percentuais))
+        previsto = sum(v[k] for v in valores if k < len(v))
         prev_acum += previsto
         linha = MesCronograma(mes=_mes(ini + k), previsto=previsto, previsto_acumulado=prev_acum,
                               pct_previsto_acumulado=_pct(prev_acum, total))
@@ -365,6 +366,18 @@ async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObr
 def _arredonda_meio(decimos: int) -> int:
     # meio mês arredonda para longe do zero: atraso de 0,5 já empurra o término
     return (decimos + 5) // 10 if decimos >= 0 else -((-decimos + 5) // 10)
+
+
+def valores_mes(atual: int, percentuais: list[int]) -> list[int]:
+    """R$ de cada mês da etapa. Arredonda o ACUMULADO e tira a diferença: arredondar célula por célula deixava a
+    soma da etapa (e da obra) alguns centavos fora do orçado."""
+    saida, acum, antes = [], 0, 0
+    for p in percentuais:
+        acum += p
+        agora = (atual * acum + CEM // 2) // CEM
+        saida.append(agora - antes)
+        antes = agora
+    return saida
 
 
 def _serie(plano: dict[str, list[int]], orcadas: dict[str, tuple[str, int]], meses: int) -> list[int]:

@@ -33,7 +33,7 @@ async def test_cronograma_previsto_por_mes(vila):
     c = await _cron(vila, obra)
     assert (c["inicio"], c["meses"], c["prazo"]["termino_contratual"]) == ("2026-01", 3, "2026-03")
     assert [(m["mes"], m["previsto"], m["pct_previsto_acumulado"]) for m in c["mensal"]] == [
-        ("2026-01", 380589, 1806), ("2026-02", 863504, 5903), ("2026-03", 863504, 10000)]
+        ("2026-01", 380589, 1806), ("2026-02", 863504, 5903), ("2026-03", 863503, 10000)]
     assert [(e["etapa"], e["percentuais"]) for e in c["etapas"]] == [("1", [10000, 0, 0]), ("2", [0, 5000, 5000])]
     textos = [x["texto"] for x in (await vila.http.get("/registro", headers=vila.h)).json()]
     assert "Montou o cronograma: 2 etapas, 3 meses a partir de 2026-01" in textos
@@ -272,3 +272,13 @@ async def test_resumo_traz_o_prazo_da_obra_com_cronograma(vila):
     res = {x["obra"]["id"]: x for x in (await vila.http.get("/obras/resumo", headers=vila.h)).json()}
     assert (res[com]["prazo"]["termino_contratual"], res[com]["prazo"]["atraso_meses"]) == ("2026-03", 1)
     assert res[sem]["prazo"] is None
+
+
+def test_valores_mes_fecham_no_centavo_do_orcado():
+    from canteiro_api.servicos.cronograma import valores_mes
+
+    # 3 × 33,33% + 0,01% de R$ 100,01: célula a célula daria 33,33 × 3 + 0,01 = 100,00
+    v = valores_mes(10001, [3333, 3333, 3333, 1])
+    assert sum(v) == 10001
+    assert v == [3333, 3334, 3333, 1]
+    assert valores_mes(4543363, [8500, 1500]) == [3861859, 681504]
