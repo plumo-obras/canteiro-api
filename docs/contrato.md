@@ -39,10 +39,13 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 ## Obras e almoxarifado
 
 - `GET /obras` → `[Obra]`. `Obra` = `{id, nome, cidade, cep, uf, endereco, verba, status, tipologia, area_construida,
-  pavimentos, padrao, regime, cliente, inicio, prazo_meses}`; `status` ∈ `em_orcamento | em_andamento | concluida`.
+  pavimentos, padrao, regime, cliente, inicio, prazo_meses, numero_contrato, bdi, data_base}`; `status` ∈ `em_orcamento | em_andamento | concluida`.
   `tipologia` ∈ `casa | sobrado | predio | galpao | reforma | comercial | outro` · `padrao` ∈ `baixo | normal | alto` ·
   `regime` ∈ `empreitada | administracao` (os três podem ser `null`) · `area_construida` em milésimos de m² ·
-  `inicio` `"AAAA-MM-DD"` ou `null` · `pavimentos`/`prazo_meses` 0 = não informado · `verba` em centavos.
+  `inicio` `"AAAA-MM-DD"` ou `null` · `pavimentos`/`prazo_meses` 0 = não informado · `verba` em centavos (é o
+  **valor do contrato** com o cliente; a tela não diz mais "verba do dono") · `numero_contrato` (≤ 40, `""`) · `bdi` em
+  centésimos de ponto percentual (22,91% = 2291; 0 = não informado; ≤ 10000) · `data_base` `"AAAA-MM"` ou `null` (mês
+  dos preços de referência).
 - `POST /obras` (admin) `{nome, chave_idempotencia, …os campos acima, todos opcionais}` → `Obra + registro_id`. Nasce
   `em_orcamento`. ID derivado da chave: a repetição devolve a mesma obra (201 na 1ª, 200 nas repetidas); a mesma chave
   com outro nome → 409. Registro "Criou a obra X", **sem desfazer** (a porta de armazenamento não apaga).
@@ -91,9 +94,16 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   O cabeçalho é a 1ª das 30 primeiras linhas com pelo menos dois títulos conhecidos (pula título e dados da obra);
   `linha_cabecalho` é 1-based e os índices de coluna são 0-based. `amostra` = até 8 linhas de dados como texto
   (`37,9`, datas `dd/mm/aaaa`). CSV tem uma aba só, `"CSV"`.
-- `Mapeamento` = `{planilha, linha_cabecalho, nome, unidade, quantidade, valor_unitario, valor_total, saldo, curva}`
-  (cada coluna é índice ou `null`). Sinônimos da sugestão: descrição/discriminação/insumo/material/serviço · un/und/
-  unid/unidade · quant/qtd/qtde · "unit" (preço unitário) · total · saldo/estoque · curva/abc.
+- `Mapeamento` = `{planilha, linha_cabecalho, item, codigo, fonte, nome, unidade, quantidade, valor_unitario,
+  valor_total, saldo, curva}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do item, "3.2.1")
+  · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço · un/und/unid/unidade ·
+  quant/qtd/qtde · "unit" (preço unitário) · total · saldo/estoque · curva/abc. `item`, `codigo`, `fonte` só valem no
+  orçamento (EAP); `saldo` e `curva`, só na lista de materiais.
+- A planilha é uma de duas coisas, e a tela pergunta antes de importar: o **orçamento da obra** (serviços por etapa,
+  `POST …/orcamento/versoes`, abaixo) ou uma **lista de materiais** (insumos para comprar e estocar, `…/importar`).
+
+### Lista de materiais
+
 - `POST /obras/{obra_id}/orcamento/importar` (multipart `arquivo`, `mapeamento` = JSON, `aplicar` = bool) →
   `PreviaOrcamento` = `{aplicado, linhas: [LinhaOrcamento], ignoradas: [{linha, texto, motivo}],
   erros: [{linha, campo, mensagem}], total, novos, atualizados, juntadas}`.
@@ -113,9 +123,59 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   - Gravação em lotes de 100 por transação; insumo novo tem o mesmo ID do cadastro pela tela (nome repetido depois
     colide em vez de duplicar) e saldo > 0 vira um AJUSTE inicial. Registro "Importou o orçamento: N novos, M
     atualizados (R$ X)" por lote, **sem desfazer**: a prévia é a rede de segurança, e corrigir é reimportar.
+
+### Orçamento da obra (EAP, em versões)
+
+O orçamento é etapa → item, como a planilha da construtora: cada linha vira um item, com o número, o código e a fonte
+dela, **sem juntar linhas repetidas** (o mesmo serviço em duas etapas são dois itens), e o total fecha no centavo com a
+planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; reimportar substitui a versão inteira) ou um
+**aditivo** (soma ao contrato, que fica intacto). As duas têm Desfazer. A importação do orçamento **não cria insumos**:
+material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do pedido.
+
+- `VersaoOrcamento` = `{id, obra_id, tipo: "contrato" | "aditivo", numero, descricao, data, arquivo, itens, etapas,
+  total, ativa, substitui, criado_em}`. `numero`: 0 no contrato, 1, 2… nos aditivos (o maior ativo + 1). `data`
+  `"AAAA-MM-DD"` ou `null`. `itens`/`etapas` = quantos de cada; `total` em centavos (soma dos itens). `ativa: false` =
+  desfeita ou substituída. `substitui` = a versão de contrato que esta tirou de vigência (ou `null`).
+- `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
+  descricao, unidade, quantidade, valor_unitario, total, linha}`. `ordem` = posição na versão (0, 1, 2…); `numero` =
+  o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);
+  `etapa` = a chave da etapa raiz: o que vem antes do 1º ponto ("2" para "2.1.1"); item sem ponto fica na última linha de
+  etapa; etapa sem número tem como chave o próprio nome normalizado (sem acento, minúsculo), e é assim que a "FUNDAÇÕES"
+  de um aditivo sem numeração soma na do contrato; `""` antes da 1ª etapa; `linha` = linha da planilha (1-based). Etapa tem unidade `""` e quantidade/valores 0.
+- `POST /obras/{obra_id}/orcamento/versoes` (multipart `arquivo`, `mapeamento` = JSON, `tipo` = `contrato` | `aditivo`,
+  `descricao?` (≤ 200), `data?`, `aplicar` = bool, `chave_idempotencia` (obrigatória com `aplicar`)) → `PreviaVersao` =
+  `{aplicado, tipo, itens: [ItemPrevia], ignoradas, erros, avisos: [{linha, mensagem}], total, n_itens, n_etapas,
+  etapas: [{etapa, descricao, total}], substitui: {versao_id, total, itens} | null, versao_id, registro_id}`
+  (`ItemPrevia` = `ItemOrcamento` sem `id/obra_id/versao_id`; `versao_id`/`registro_id` só depois de aplicar).
+  - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
+  - **Etapa**: linha com descrição, sem unidade e sem quantidade, que não é subtotal/total (descrição começando por
+    "subtotal", "total" ou "soma" → ignorada). **Item**: descrição + unidade + quantidade ≠ 0. Resto vazio → ignorado.
+  - `total` da linha = a coluna total, quando mapeada e preenchida (é o número do contrato); senão quantidade ×
+    unitário arredondado. `valor_unitario` = a coluna unitária; sem ela, total ÷ quantidade.
+  - **Erro da linha** (nada é gravado): número inválido/ambíguo, quantidade negativa no contrato (no aditivo, negativa
+    = supressão, vale), descrição > 300, unidade > 12, código/fonte/número > 40. Mais de 2000 linhas → erro.
+  - **Aviso** (grava mesmo assim): o mesmo código (e fonte) com unidades diferentes na planilha: "O código 92916 aparece em m² (linha
+    37) e em kg (linha 44): uma das duas unidades está errada." Um aviso por linha divergente.
+  - Contrato com outro contrato vigente → `substitui` diz qual sai (a tela avisa antes de aplicar). Aditivo sem
+    contrato vigente → 422.
+  - Aplicar: os itens são gravados primeiro, em lotes, ligados à versão ainda inexistente (invisíveis); a última
+    transação cria a versão, tira a anterior de vigência e grava o registro "Importou o contrato de X (N itens, R$ T)"
+    / "Importou o 1º aditivo de X: descrição (+R$ T)", com `desfazer` `desligar_versao`. A mesma chave devolve a
+    versão já gravada (200); a mesma chave com outro arquivo/tipo → 409.
+  - Desfazer (`desligar_versao`): a versão sai de vigência e a que ela substituiu volta. 409 se ela já não está
+    vigente (outra reimportação passou por cima) ou se, ao desfazer um contrato, há aditivo vigente criado depois dele.
+- `GET /obras/{obra_id}/orcamento` (qualquer papel) → `{versoes: [VersaoOrcamento], itens: [ItemOrcamento + {curva}],
+  etapas: [{etapa, descricao, contratado, aditivos, atual}], totais: {contratado, aditivos, atual, n_itens, n_etapas}}`.
+  `versoes`: todas, a mais nova primeiro (inclusive as desligadas, para o histórico), cada uma com o `registro_id` da
+  importação (o Desfazer dela). `itens`: só das versões vigentes,
+  contrato primeiro e aditivos pela ordem do número, cada um pela `ordem`. `curva` (A/B/C) dos itens pelo `total` da
+  linha, na régua do 80/95%, só entre itens com total > 0 (etapas: `null`). `etapas` soma por `etapa` (descrição da
+  linha de etapa do contrato; a do aditivo se a etapa só existe nele). Sem nenhuma versão: listas vazias e totais 0.
 - `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + registro_id`. Tira a obra de `em_orcamento` para `em_andamento`.
-  Já aprovado → 409; nenhum insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o orçamento de X (N insumos,
-  R$ total)" com `desfazer` `reabrir_orcamento` (volta para `em_orcamento`; 409 se a obra já não está em andamento).
+  Já aprovado → 409; sem contrato vigente **e** sem insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o
+  orçamento de X (N itens, R$ total)" com o orçado atual (contrato + aditivos vigentes; sem contrato, "N insumos" da
+  lista de materiais) com `desfazer` `reabrir_orcamento` (volta para
+  `em_orcamento`; 409 se a obra já não está em andamento). A tela confirma antes, mostrando total e nº de itens.
 
 ## Listagens paginadas
 

@@ -25,6 +25,8 @@ _OPS = {"==": "$eq", "in": "$in", "<": "$lt", "<=": "$lte", ">": "$gt", ">=": "$
 INDICES: dict[str, list[list[str]]] = {
     "obras": [["tenant_id", "nome"]],
     "insumos": [["tenant_id", "obra_id", "nome"]],
+    "versoes_orcamento": [["tenant_id", "obra_id"]],
+    "itens_orcamento": [["tenant_id", "versao_id"]],
     "saldos": [["tenant_id", "obra_id"]],
     "movimentos": [["tenant_id", "obra_id", "insumo_id", "criado_em"]],
     "pedidos": [["tenant_id", "obra_id", "status", "criado_em"], ["tenant_id", "obra_id", "criado_em"],

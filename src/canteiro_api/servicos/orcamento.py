@@ -41,6 +41,8 @@ LINHAS_POR_TRANSACAO = 100
 # Sinônimos por "contém", sobre o título sem acento e sem pontuação. A ordem importa: unidade e quantidade primeiro,
 # e o preço unitário antes do total ("preço unitário total" não existe, mas "valor total" contém "valor").
 SINONIMOS: list[tuple[str, tuple[str, ...]]] = [
+    ("codigo", ("codigo", "cod")),
+    ("fonte", ("fonte", "banco", "referencia")),
     ("unidade", ("unid", "und", "unidade")),
     ("quantidade", ("quant", "qtd", "qtde")),
     ("valor_unitario", ("unit",)),
@@ -48,7 +50,10 @@ SINONIMOS: list[tuple[str, tuple[str, ...]]] = [
     ("saldo", ("saldo", "estoque")),
     ("curva", ("curva", "abc")),
     ("nome", ("descricao", "discriminacao", "insumo", "material", "servico", "nome", "especificacao")),
+    ("item", ("item",)),
 ]
+# Títulos curtos que só valem sozinhos: "un" dentro de "unitário" não é unidade, "n" dentro de outra palavra não é item.
+EXATOS = {"un": "unidade", "n": "item", "no": "item", "n o": "item", "nr": "item", "ref": "item"}
 
 
 def _normal(t: str) -> str:
@@ -61,8 +66,10 @@ def _categoria(titulo: str) -> list[str]:
     if not n:
         return []
     achadas = [c for c, sins in SINONIMOS if any(s in n for s in sins)]
-    if n == "un":                       # "un" sozinho é unidade; dentro de outra palavra ("unitário") não
-        achadas.insert(0, "unidade")
+    if n in EXATOS:
+        achadas.insert(0, EXATOS[n])
+    if achadas[:1] == ["codigo"] and "item" in achadas:   # "código do item" é código
+        achadas.remove("item")
     if "valor_unitario" in achadas and "valor_total" in achadas:
         achadas.remove("valor_total")
     return achadas

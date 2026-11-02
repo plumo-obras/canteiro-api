@@ -41,6 +41,56 @@ class Obra(Documento):
     cliente: str = ""
     inicio: str | None = None              # "AAAA-MM-DD"
     prazo_meses: int = 0                   # 0 = não informado
+    # Dados do contrato com o cliente. `verba` é o valor do contrato (o nome ficou do MVP-0).
+    numero_contrato: str = ""
+    bdi: int = 0                           # centésimos de ponto percentual: 22,91% = 2291; 0 = não informado
+    data_base: str | None = None           # "AAAA-MM": mês dos preços de referência (SINAPI etc.)
+
+
+class TipoVersao(StrEnum):
+    CONTRATO = "contrato"
+    ADITIVO = "aditivo"
+
+
+class VersaoOrcamento(Documento):
+    """Uma importação do orçamento: o contrato (um vigente por obra) ou um aditivo, que soma ao contrato sem tocá-lo.
+
+    Os itens apontam para a versão e só valem enquanto ela está `ativa`. Desfazer é desligar a versão (e religar a que
+    ela substituiu), porque a porta de armazenamento não apaga: um documento por versão vira a chave de tudo.
+    """
+    obra_id: str
+    tipo: TipoVersao
+    numero: int = 0                        # 0 no contrato; 1, 2… nos aditivos
+    descricao: str = ""
+    data: str | None = None                # "AAAA-MM-DD"
+    arquivo: str = ""
+    itens: int = 0
+    etapas: int = 0
+    total: Centavos = 0
+    ativa: bool = True
+    substitui: str | None = None           # contrato que esta versão tirou de vigência
+    contrato_id: str | None = None         # no aditivo: o contrato vigente quando ele entrou
+    aditivos: int = 0                      # no contrato: aditivos vigentes feitos sobre ele (trava o desfazer)
+    assinatura: str = ""                   # hash do arquivo + tipo: a mesma chave com outro arquivo é conflito
+
+
+class ItemOrcamento(Documento):
+    """Uma linha da EAP como veio da planilha: etapa (título) ou item (serviço com quantidade e preço)."""
+    obra_id: str
+    versao_id: str
+    ordem: int                             # posição na versão
+    tipo: str                              # etapa | item
+    numero: str = ""                       # "3.2.1", como na coluna item
+    nivel: int = 1
+    etapa: str = ""                        # número da etapa raiz, para somar por etapa sem join
+    codigo: str = ""
+    fonte: str = ""
+    descricao: str
+    unidade: str = ""
+    quantidade: Milesimos = 0              # negativa só em aditivo (supressão)
+    valor_unitario: Centavos = 0
+    total: Centavos = 0                    # o total da linha na planilha, quando ela tem: é o número do contrato
+    linha: int = 0
 
 
 class CurvaABC(StrEnum):

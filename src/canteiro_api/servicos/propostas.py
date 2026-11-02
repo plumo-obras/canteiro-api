@@ -26,7 +26,7 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
-from . import obras
+from . import obras, versoes
 from .estoque import id_derivado, preparar_estorno, preparar_movimento
 from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
 
@@ -193,6 +193,7 @@ _DESFAZER = {
     "cancelar_pedido": preparar_cancelar_criado,
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,
+    "desligar_versao": versoes.preparar_desligar,
 }
 
 

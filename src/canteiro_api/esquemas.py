@@ -8,12 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from canteiro_dominio.modelos import (
     EntradaRegistro,
     Insumo,
+    ItemOrcamento,
     Movimento,
     Obra,
     Pedido,
     Proposta,
     StatusPedido,
     TipoProposta,
+    TipoVersao,
+    VersaoOrcamento,
 )
 
 
@@ -176,9 +179,12 @@ class _DadosObra(Entrada):
     cliente: str = Field("", max_length=120)
     inicio: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="AAAA-MM-DD")
     prazo_meses: int = Field(0, ge=0, le=240)
-    verba: int = Field(0, ge=0, description="centavos")
+    verba: int = Field(0, ge=0, description="valor do contrato, em centavos")
+    numero_contrato: str = Field("", max_length=40)
+    bdi: int = Field(0, ge=0, le=10_000, description="centésimos de ponto percentual (22,91% = 2291)")
+    data_base: str | None = Field(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="AAAA-MM")
 
-    @field_validator("cidade", "cep", "endereco", "cliente")
+    @field_validator("cidade", "cep", "endereco", "cliente", "numero_contrato")
     @classmethod
     def _aparar(cls, v: str) -> str:
         return " ".join(v.split())
@@ -232,6 +238,9 @@ class Mapeamento(Entrada):
     """Qual coluna (0-based) é o quê. A tela recebe a sugestão, a pessoa corrige e devolve na importação."""
     planilha: str = Field(max_length=120)
     linha_cabecalho: int = Field(ge=1, le=10_000)
+    item: int | None = Field(None, ge=0, le=500)
+    codigo: int | None = Field(None, ge=0, le=500)
+    fonte: int | None = Field(None, ge=0, le=500)
     nome: int | None = Field(None, ge=0, le=500)
     unidade: int | None = Field(None, ge=0, le=500)
     quantidade: int | None = Field(None, ge=0, le=500)
@@ -300,6 +309,86 @@ class PreviaOrcamento(BaseModel):
     novos: int
     atualizados: int
     juntadas: int = Field(description="linhas da planilha absorvidas em outra (mesmo insumo repetido)")
+
+
+class ItemPrevia(BaseModel):
+    ordem: int
+    tipo: Literal["etapa", "item"]
+    numero: str
+    nivel: int
+    etapa: str
+    codigo: str
+    fonte: str
+    descricao: str
+    unidade: str
+    quantidade: int
+    valor_unitario: int
+    total: int
+    linha: int
+
+
+class Aviso(BaseModel):
+    linha: int
+    mensagem: str
+
+
+class TotalEtapa(BaseModel):
+    etapa: str
+    descricao: str
+    total: int
+
+
+class Substituida(BaseModel):
+    versao_id: str
+    total: int
+    itens: int
+
+
+class PreviaVersao(BaseModel):
+    aplicado: bool
+    tipo: TipoVersao
+    itens: list[ItemPrevia]
+    ignoradas: list[LinhaIgnorada]
+    erros: list[ErroLinha]
+    avisos: list[Aviso]
+    total: int = Field(description="centavos")
+    n_itens: int
+    n_etapas: int
+    etapas: list[TotalEtapa]
+    substitui: Substituida | None = None
+    versao_id: str | None = None
+    registro_id: str | None = None
+
+
+class ItemComCurva(ItemOrcamento):
+    curva: str | None = None
+
+
+class EtapaOrcamento(BaseModel):
+    etapa: str
+    descricao: str
+    contratado: int
+    aditivos: int
+    atual: int
+
+
+class TotaisOrcamento(BaseModel):
+    contratado: int
+    aditivos: int
+    atual: int
+    n_itens: int
+    n_etapas: int
+
+
+class VersaoComRegistro(VersaoOrcamento):
+    registro_id: str = Field(description="a EntradaRegistro da importação: é o que o Desfazer da versão usa")
+
+
+class OrcamentoObra(BaseModel):
+    versoes: list[VersaoComRegistro]
+    itens: list[ItemComCurva]
+    etapas: list[EtapaOrcamento]
+    totais: TotaisOrcamento
 
 
 class Soma(BaseModel):

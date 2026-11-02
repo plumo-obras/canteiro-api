@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from pydantic import ValidationError
 
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
-from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento
+from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento, TipoVersao
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
@@ -21,15 +21,17 @@ from ..esquemas import (
     ObraCorpo,
     ObraEdicao,
     ObraSaida,
+    OrcamentoObra,
     PedidoCorpo,
     PedidoSaida,
     Previa,
     PreviaOrcamento,
+    PreviaVersao,
     ResumoObra,
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo
+from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -93,13 +95,44 @@ async def importar_orcamento(obra_id: str, arquivo: UploadFile = File(...), mape
         raise Conflito("Alguém cadastrou um destes insumos agora há pouco; envie a planilha de novo.") from None
 
 
+@r.get("/obras/{obra_id}/orcamento", response_model=OrcamentoObra, tags=["orçamento"])
+async def ver_orcamento(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await versoes.orcamento_da_obra(arm, u.tenant_id, obra_id)
+
+
+@r.post("/obras/{obra_id}/orcamento/versoes", response_model=PreviaVersao, tags=["orçamento"],
+        responses={201: {"description": "versão gravada"}, 200: {"description": "prévia, ou repetição da chave"}})
+async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile = File(...),
+                          mapeamento: str = Form(...), tipo: TipoVersao = Form(TipoVersao.CONTRATO),
+                          descricao: str = Form("", max_length=200),
+                          data: str | None = Form(None, pattern=r"^(\d{4}-\d{2}-\d{2})?$"),
+                          aplicar: bool = Form(False),
+                          chave_idempotencia: str | None = Form(None, min_length=8, max_length=64),
+                          u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    try:
+        m = Mapeamento.model_validate(json.loads(mapeamento))
+    except (ValueError, ValidationError):
+        raise ErroNegocio("Mapeamento de colunas inválido.") from None
+    conteudo = await _ler_arquivo(arquivo)
+    try:
+        previa, criada = await versoes.importar(arm, u, obra_id, conteudo, arquivo.filename or "", m, tipo,
+                                                descricao, data or None, aplicar, chave_idempotencia)
+    except ConflitoDeId:
+        raise Conflito("Esta importação já foi gravada agora há pouco; recarregue o orçamento.") from None
+    if criada:
+        response.status_code = status.HTTP_201_CREATED
+    return previa
+
+
 @r.post("/obras/{obra_id}/orcamento/aprovar", response_model=ObraSaida, tags=["orçamento"])
 async def aprovar_orcamento(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     insumos = await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
+    vigentes = [v for v in await versoes.versoes_da_obra(arm, u.tenant_id, obra_id) if v["ativa"]]
 
     async def tx_corpo(tx):
-        o, entrada = executar_e_registrar(tx, u, await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos))
+        op = await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos, vigentes)
+        o, entrada = executar_e_registrar(tx, u, op)
         return {**o, "registro_id": entrada["id"]}
 
     return await arm.em_transacao(tx_corpo)

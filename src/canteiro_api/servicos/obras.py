@@ -13,7 +13,8 @@ from .estoque import id_derivado
 ROTULOS = {
     "nome": "nome", "cidade": "cidade", "cep": "CEP", "uf": "UF", "endereco": "endereço", "tipologia": "tipo de obra",
     "area_construida": "área", "pavimentos": "pavimentos", "padrao": "padrão", "regime": "regime",
-    "cliente": "cliente", "inicio": "início", "prazo_meses": "prazo", "verba": "verba",
+    "cliente": "cliente", "inicio": "início", "prazo_meses": "prazo", "verba": "valor do contrato",
+    "numero_contrato": "nº do contrato", "bdi": "BDI", "data_base": "data-base",
 }
 
 
@@ -85,23 +86,38 @@ async def insumos_da_obra(arm, tenant_id: str, obra_id: str) -> list[dict]:
     return await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
 
 
-async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos: list[dict]) -> Operacao:
+async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos: list[dict],
+                                     vigentes: list[dict] | None = None) -> Operacao:
+    """Com contrato importado (EAP), aprova o orçado atual (contrato + aditivos vigentes), o mesmo número que a tela
+    confirma; sem contrato, a lista de materiais (o caminho do MVP-0)."""
     o = await obra_do_tenant(tx, u.tenant_id, obra_id)
     if o["status"] != "em_orcamento":
         raise Conflito("O orçamento já foi aprovado.")
-    orcados = [i for i in insumos if i.get("precisa_ate_o_fim", 0) > 0]
-    if not orcados:
-        raise ErroNegocio("Importe ou cadastre o orçamento antes de aprovar.")
-    total = sum(i["precisa_ate_o_fim"] * i.get("valor_unitario", 0) // 1000 for i in orcados)
+    lidas = [await tx.obter("versoes_orcamento", u.tenant_id, v["id"]) for v in vigentes or []]
+    # relidas na transação: se alguma importação ou desfazer mudou as versões nesse meio-tempo, o total seria outro
+    if any(not v or not v["ativa"] for v in lidas):
+        raise Conflito("O orçamento mudou agora há pouco; confira e aprove de novo.")
+    if any(v["tipo"] == "contrato" for v in lidas):
+        n, total, oque = sum(v["itens"] for v in lidas), sum(v["total"] for v in lidas), "item"
+    else:
+        lidas = []
+        orcados = [i for i in insumos if i.get("precisa_ate_o_fim", 0) > 0]
+        if not orcados:
+            raise ErroNegocio("Importe ou cadastre o orçamento antes de aprovar.")
+        n, oque = len(orcados), "insumo"
+        total = sum(i["precisa_ate_o_fim"] * i.get("valor_unitario", 0) // 1000 for i in orcados)
 
     def aplicar():
         tx.atualizar("obras", u.tenant_id, obra_id, {"status": "em_andamento"})
-        evento(tx, u.tenant_id, "orcamento.aprovado", obra_id, {"insumos": len(orcados), "total": total})
+        for v in lidas:
+            # o que a transação leu para decidir ela também grava (regra da porta: conflito igual no Mongo e Firestore)
+            tx.atualizar("versoes_orcamento", u.tenant_id, v["id"], {"aditivos": v.get("aditivos", 0)})
+        evento(tx, u.tenant_id, "orcamento.aprovado", obra_id, {oque + "s": n, "total": total})
         return {**o, "status": "em_andamento"}
 
-    qtd_insumos = f"{len(orcados)} insumo" + ("" if len(orcados) == 1 else "s")
+    qtd_itens = f"{n} " + (oque if n == 1 else {"item": "itens", "insumo": "insumos"}[oque])
     return Operacao(obra_id=obra_id, aplicar=aplicar,
-                    texto=lambda d: f"Aprovou o orçamento de {o['nome']} ({qtd_insumos}, {fmt_reais(total)})",
+                    texto=lambda d: f"Aprovou o orçamento de {o['nome']} ({qtd_itens}, {fmt_reais(total)})",
                     desfazer=lambda d: {"op": "reabrir_orcamento", "obra_id": obra_id})
 
 
