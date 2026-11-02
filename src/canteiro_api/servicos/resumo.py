@@ -4,7 +4,7 @@ from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import StatusPedido, StatusProposta
 
 from ..esquemas import ResumoObra
-from . import estoque
+from . import cronograma, estoque
 
 
 async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
@@ -16,6 +16,8 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
     pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
     pendentes = await arm.consultar(Consulta("propostas", tenant_id,
                                              [Filtro("status", "==", StatusProposta.PENDENTE.value)]))
+    # o prazo projetado depende do orçamento e das medições: só se calcula para a obra que tem cronograma montado
+    com_cronograma = {c["obra_id"] for c in await arm.consultar(Consulta("cronogramas", tenant_id)) if c.get("etapas")}
 
     def por_obra(docs: list[dict]) -> dict[str, list[dict]]:
         g: dict[str, list[dict]] = {}
@@ -38,5 +40,7 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
             pedidos_abertos=len(ped),
             valor_pedidos_abertos=sum(estoque.valor_em_aberto(p) for p in ped),
             nf_para_conferir=sum(1 for p in ped if p["status"] == StatusPedido.RECEBIDO.value),
-            ultima_atividade=ultima[0]["criado_em"] if ultima else None))
+            ultima_atividade=ultima[0]["criado_em"] if ultima else None,
+            prazo=(await cronograma.cronograma_da_obra(arm, tenant_id, o["id"])).prazo
+            if o["id"] in com_cronograma else None))
     return saida

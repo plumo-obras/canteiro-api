@@ -191,3 +191,84 @@ async def test_cronograma_de_antes_da_linha_de_base(vila, arm):
     assert (await vila.http.post(f"/registro/{c['registro_id']}/desfazer", headers=vila.h)).status_code == 200
     r = await vila.http.get(f"/obras/{obra}/cronograma", headers=vila.h)
     assert (r.status_code, r.json()["meses"], r.json()["revisoes"]) == (200, 3, 0), r.text
+
+
+async def _desfazer(vila, registro_id):
+    return await vila.http.post(f"/registro/{registro_id}/desfazer", headers=vila.h)
+
+
+async def test_refazer_medicao_desfeita(vila):
+    obra = await _obra(vila)
+    m = await _medir(vila, obra, "2026-01", {"1": 10000})
+    desfeito = (await _desfazer(vila, m.json()["registro_id"])).json()
+    # a entrada "Desfeito" traz a receita de refazer: o botão diz Refazer
+    assert (desfeito["texto"], desfeito["desfazer"]["refazer"]) == ("Desfeito: 1ª medição (2026-01) retirada", True)
+    r = await _desfazer(vila, desfeito["id"])
+    assert r.status_code == 200, r.text
+    assert r.json()["texto"].startswith("Refeito: 1ª medição (2026-01): R$")
+    assert not r.json()["desfazer"].get("refazer")
+    c = await _cron(vila, obra)
+    assert ([x["numero"] for x in c["medicoes"]], c["prazo"]["mes_referencia"]) == ([1], "2026-01")
+    assert {e["etapa"]: e["medido_acumulado"] for e in c["etapas"]} == {"1": 10000, "2": 0}
+    assert (await _desfazer(vila, desfeito["id"])).status_code == 409                 # não refaz duas vezes
+    # o refeito se desfaz de novo, como a medição original
+    assert (await _desfazer(vila, r.json()["id"])).status_code == 200
+    assert (await _cron(vila, obra))["medicoes"] == []
+
+
+async def test_refazer_medicao_recusa_se_o_cronograma_andou(vila):
+    obra = await _obra(vila)
+    m = await _medir(vila, obra, "2026-01", {"1": 10000})
+    desfeito = (await _desfazer(vila, m.json()["registro_id"])).json()
+    assert (await _medir(vila, obra, "2026-01", {"1": 5000})).status_code == 201     # relançou na mão
+    r = await _desfazer(vila, desfeito["id"])
+    assert r.status_code == 409 and "lance a medição de novo" in r.json()["detail"]
+    assert [x["numero"] for x in (await _cron(vila, obra))["medicoes"]] == [1]
+
+
+async def test_refazer_reprogramacao_volta_cronograma_e_prazo(vila):
+    obra = await _obra(vila)
+    novo = {"inicio": "2026-01", "meses": 5, "atualizar_prazo_da_obra": True,
+            "etapas": [{"etapa": "1", "percentuais": [10000, 0, 0, 0, 0]},
+                       {"etapa": "2", "percentuais": [0, 1500, 1500, 3500, 3500]}]}
+    c = (await vila.http.put(f"/obras/{obra}/cronograma", headers=vila.h, json=novo)).json()
+
+    async def estado():
+        cr = await _cron(vila, obra)
+        o = next(x for x in (await vila.http.get("/obras", headers=vila.h)).json() if x["id"] == obra)
+        return cr["meses"], o["prazo_meses"]
+
+    desfeito = (await _desfazer(vila, c["registro_id"])).json()
+    assert await estado() == (3, 0) and desfeito["desfazer"]["refazer"] is True
+    refeito = await _desfazer(vila, desfeito["id"])
+    assert refeito.status_code == 200, refeito.text
+    assert refeito.json()["texto"] == "Refeito: Refez o cronograma: 2 etapas, 5 meses a partir de 2026-01 (era 3) · " \
+        "prazo da obra — → 5 meses"
+    assert await estado() == (5, 5)
+    assert (await _desfazer(vila, refeito.json()["id"])).status_code == 200
+    assert await estado() == (3, 0)
+
+
+async def test_refazer_edicao_da_obra(vila):
+    obra = await _obra(vila, com_cronograma=False)
+    r = await vila.http.patch(f"/obras/{obra}", headers=vila.h, json={"bdi": 2500})
+    r_texto = next(x for x in (await vila.http.get("/registro", headers=vila.h)).json()
+                   if x["id"] == r.json()["registro_id"])["texto"]
+    desfeito = (await _desfazer(vila, r.json()["registro_id"])).json()
+    assert desfeito["desfazer"]["refazer"] is True
+    refeito = await _desfazer(vila, desfeito["id"])
+    assert (refeito.status_code, refeito.json()["texto"]) == (200, "Refeito: " + r_texto)
+    # desfazer o refeito e refazer de novo continua citando a ação original
+    de_novo = (await _desfazer(vila, refeito.json()["id"])).json()
+    assert (await _desfazer(vila, de_novo["id"])).json()["texto"] == "Refeito: " + r_texto
+    o = next(x for x in (await vila.http.get("/obras", headers=vila.h)).json() if x["id"] == obra)
+    assert o["bdi"] == 2500
+
+
+async def test_resumo_traz_o_prazo_da_obra_com_cronograma(vila):
+    com = await _obra(vila)
+    sem = await _obra(vila, com_cronograma=False)
+    await _medir(vila, com, "2026-01", {"1": 1000})
+    res = {x["obra"]["id"]: x for x in (await vila.http.get("/obras/resumo", headers=vila.h)).json()}
+    assert (res[com]["prazo"]["termino_contratual"], res[com]["prazo"]["atraso_meses"]) == ("2026-03", 1)
+    assert res[sem]["prazo"] is None

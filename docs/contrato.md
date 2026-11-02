@@ -54,7 +54,8 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   obra X: área, padrão" com `desfazer` `restaurar_obra`, que volta os valores antigos e é recusado (409) se algum
   daqueles campos mudou de novo depois. `nome: null` → 422.
 - `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, falta_comprar, pedidos_abertos,
-  valor_pedidos_abertos, nf_para_conferir, ultima_atividade}]` (por nome da obra), para a página inicial.
+  valor_pedidos_abertos, nf_para_conferir, ultima_atividade, prazo}]` (por nome da obra), para a página inicial.
+  `prazo` = o `Prazo` do `GET /obras/{id}/cronograma` (término contratual e projetado, atraso), `null` sem cronograma.
   `pendencias` = propostas pendentes · `falta_comprar` = insumos com `Conta.comprar > 0` (a mesma Conta de
   `GET …/insumos`) · `pedidos_abertos` = pedidos fora de `conferido`/`cancelado` e `valor_pedidos_abertos` o que eles
   ainda vão custar (centavos): o `valor` inteiro em cotação; depois, só a parte que falta entregar de cada linha · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
@@ -319,6 +320,12 @@ atual de cada etapa (contrato + aditivos vigentes).
   /propostas/{id}/aprovar` (`registro.id`).
 - `GET /registro?obra_id=…&limite=50&antes_de=…` → `[EntradaRegistro]` (mais novas primeiro) · `POST /registro/{id}/desfazer` → aplica a operação inversa
   (estorno de movimento, volta de status do pedido) e registra o desfazer.
+- **Refazer** é o mesmo `POST /registro/{id}/desfazer` aplicado à entrada "Desfeito: …": quando o desfazer tem
+  inverso (medição, cronograma, edição de obra/pedido/fornecedor), a entrada "Desfeito" vem com `desfazer.refazer:
+  true` e `desfazer.texto` = o texto da ação original; a nova entrada é "Refeito: <texto original>", com desfazer
+  normal. Refazer a medição só vale se o cronograma ficou como o desfazer deixou (senão 409 "lance a medição de
+  novo"); as edições, só se ninguém mexeu nos mesmos campos depois. Entradas "Desfeito" anteriores a esta regra não
+  têm receita.
 
 ## Consumo de IA
 

@@ -1,4 +1,6 @@
 """Propostas (o agente só propõe), aprovação que executa e o desfazer a partir do registro."""
+from dataclasses import replace
+
 from pydantic import ValidationError
 
 from canteiro_dominio.modelos import Proposta, StatusPedido, StatusProposta, TipoMovimento, TipoProposta, agora
@@ -226,11 +228,18 @@ _DESFAZER = {
     "editar_fornecedor": fornecedores.preparar_desfazer_edicao,
     "restaurar_cronograma": cronograma.preparar_restaurar,
     "desfazer_medicao": cronograma.preparar_desfazer_medicao,
+    "refazer_medicao": cronograma.preparar_refazer_medicao,
     "cancelar_pedido": preparar_cancelar_criado,
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,
     "desligar_versao": versoes.preparar_desligar,
 }
+
+
+def _com_texto(receita: dict | None, texto: str) -> dict | None:
+    if receita and receita.get("refazer"):
+        return {**receita, "texto": receita.get("texto") or texto.removeprefix("Refeito: ")}
+    return receita
 
 
 async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
@@ -243,7 +252,14 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
         if not e.get("desfazer"):
             raise ErroNegocio("Esta entrada não tem como ser desfeita.")
         prop = await tx.obter("propostas", u.tenant_id, e["proposta_id"]) if e.get("proposta_id") else None
-        op = await _DESFAZER[e["desfazer"]["op"]](tx, u, e["desfazer"])
+        receita = e["desfazer"]
+        op = await _DESFAZER[receita["op"]](tx, u, receita)
+        if receita.get("refazer") and receita.get("texto"):
+            op = replace(op, texto=lambda d: f"Refeito: {receita['texto']}")
+        # a receita de refazer guarda o texto da ação original: "Refeito: Atualizou a obra X: cliente" diz o que
+        # voltou a valer, e não repete o texto do desfeito
+        desfazer_op = op.desfazer
+        op = replace(op, desfazer=lambda d: _com_texto(desfazer_op(d), e["texto"]))
         _, nova = executar_e_registrar(tx, u, op, origem="tela")
         tx.atualizar("registro", u.tenant_id, entrada_id, {"desfeito": True})
         if prop and prop["status"] == StatusProposta.APROVADA.value:

@@ -595,6 +595,7 @@ class ResumoObra(BaseModel):
     valor_pedidos_abertos: int = Field(description="centavos")
     nf_para_conferir: int = Field(description="pedidos recebidos esperando conferência")
     ultima_atividade: datetime | None = Field(None, description="última entrada do registro da obra")
+    prazo: Prazo | None = Field(None, description="o mesmo do GET /obras/{id}/cronograma; null sem cronograma")
 
 
 # --- sessões de conversa ---

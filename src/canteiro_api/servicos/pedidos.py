@@ -18,7 +18,16 @@ from canteiro_dominio.tipos import fmt_qtd, fmt_reais, novo_id
 from ..auth import UsuarioAtual
 from ..esquemas import PedidoDados
 from ..modelos import doc
-from ..nucleo import Conflito, NaoEncontrado, Operacao, evento, insumo_da_obra, obra_do_tenant
+from ..nucleo import (
+    Conflito,
+    NaoEncontrado,
+    Operacao,
+    evento,
+    insumo_da_obra,
+    obra_do_tenant,
+    receita_inversa,
+    verbo_desfazer,
+)
 from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
 
 
@@ -309,4 +318,6 @@ async def preparar_desfazer_edicao(tx, u: UsuarioAtual, receita: dict) -> Operac
         return {**p, **receita["antes"]}
 
     return Operacao(obra_id=p["obra_id"], aplicar=aplicar,
-                    texto=lambda d: f"Desfeito: {p['numero']} voltou à edição anterior", desfazer=lambda d: None)
+                    texto=lambda d: f"{verbo_desfazer(receita)}: {p['numero']} voltou à edição "
+                                    f"{'desfeita' if receita.get('refazer') else 'anterior'}",
+                    desfazer=lambda d: receita_inversa(receita))

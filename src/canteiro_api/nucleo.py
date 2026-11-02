@@ -67,6 +67,16 @@ def executar_e_registrar(tx, u: UsuarioAtual, op: Operacao, *, origem: str = "te
     return resultado, entrada
 
 
+def receita_inversa(receita: dict) -> dict:
+    """Refazer é desfazer o desfazer: a receita das edições (antes/depois) se inverte trocando os dois. `refazer`
+    alterna, para o texto e o botão dizerem Refazer ou Desfazer."""
+    return {**receita, "antes": receita["depois"], "depois": receita["antes"], "refazer": not receita.get("refazer")}
+
+
+def verbo_desfazer(receita: dict) -> str:
+    return "Refeito" if receita.get("refazer") else "Desfeito"
+
+
 async def obra_do_tenant(leitor, tenant_id: str, obra_id: str) -> dict:
     o = await leitor.obter("obras", tenant_id, obra_id)
     if not o:

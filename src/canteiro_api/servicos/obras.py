@@ -6,7 +6,17 @@ from canteiro_dominio.tipos import fmt_reais
 from ..auth import UsuarioAtual
 from ..esquemas import ObraCorpo
 from ..modelos import doc
-from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, Operacao, evento, obra_do_tenant, registrar
+from ..nucleo import (
+    Conflito,
+    ErroNegocio,
+    NaoEncontrado,
+    Operacao,
+    evento,
+    obra_do_tenant,
+    receita_inversa,
+    registrar,
+    verbo_desfazer,
+)
 from .estoque import id_derivado
 
 # Como cada campo aparece no texto do registro ("Atualizou a obra X: área, padrão").
@@ -78,7 +88,8 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
         return {**o, **antes}
 
     return Operacao(obra_id=o["id"], aplicar=aplicar,
-                    texto=lambda d: f"Desfeito: dados da obra {d['nome']} restaurados", desfazer=lambda d: None)
+                    texto=lambda d: f"{verbo_desfazer(receita)}: dados da obra {d['nome']} restaurados",
+                    desfazer=lambda d: receita_inversa(receita))
 
 
 async def insumos_da_obra(arm, tenant_id: str, obra_id: str) -> list[dict]:

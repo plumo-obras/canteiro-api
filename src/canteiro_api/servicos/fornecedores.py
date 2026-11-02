@@ -9,7 +9,15 @@ from canteiro_dominio.regras import cnpj_valido
 from ..auth import UsuarioAtual
 from ..esquemas import FornecedorCorpo, FornecedorEdicao
 from ..modelos import doc
-from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, Operacao, executar_e_registrar
+from ..nucleo import (
+    Conflito,
+    ErroNegocio,
+    NaoEncontrado,
+    Operacao,
+    executar_e_registrar,
+    receita_inversa,
+    verbo_desfazer,
+)
 from .estoque import id_derivado
 
 _ROTULOS = {"nome": "nome", "cnpj": "CNPJ", "contato": "contato", "telefone": "telefone", "email": "e-mail"}
@@ -113,5 +121,6 @@ async def preparar_desfazer_edicao(tx, u: UsuarioAtual, receita: dict) -> Operac
         tx.atualizar("fornecedores", u.tenant_id, f["id"], receita["antes"])
         return {**f, **receita["antes"]}
 
-    return Operacao(obra_id=None, aplicar=aplicar, texto=lambda r: f"Desfeito: edição do fornecedor {r['nome']}",
-                    desfazer=lambda r: None)
+    return Operacao(obra_id=None, aplicar=aplicar,
+                    texto=lambda r: f"{verbo_desfazer(receita)}: edição do fornecedor {r['nome']}",
+                    desfazer=lambda r: receita_inversa(receita))

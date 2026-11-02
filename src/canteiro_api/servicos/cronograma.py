@@ -21,7 +21,7 @@ from ..esquemas import (
     Prazo,
 )
 from ..modelos import doc
-from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant
+from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant, verbo_desfazer
 from .estoque import id_derivado
 from .versoes import orcamento_da_obra
 
@@ -152,7 +152,8 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
         if not ini <= m <= ini + antes["meses"] - 1 + MESES_DEPOIS_DO_FIM:
             raise Conflito(f"A medição de {c['ultima_medicao']} fica fora do cronograma anterior; desfaça-a antes.")
     obra = None
-    if receita.get("prazo_depois") is not None:
+    muda_prazo = receita.get("muda_prazo", receita.get("prazo_depois") is not None)
+    if muda_prazo:
         # o aditivo de prazo mudou a obra junto: o desfazer volta os dois, ou nenhum
         obra = await obra_do_tenant(tx, u.tenant_id, receita["obra_id"])
         if obra.get("prazo_meses") != receita["prazo_depois"]:
@@ -167,13 +168,25 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
             tx.atualizar("obras", u.tenant_id, obra["id"], {"prazo_meses": receita["prazo_antes"]})
         return {**c, **campos}
 
+    verbo = verbo_desfazer(receita)
+
     def texto(d):
-        t = "Desfeito: o cronograma voltou à versão anterior" if antes else "Desfeito: o cronograma foi retirado"
+        if receita.get("refazer"):
+            t = "Refeito: o cronograma voltou à versão desfeita"
+        else:
+            t = "Desfeito: o cronograma voltou à versão anterior" if antes else "Desfeito: o cronograma foi retirado"
         if obra is not None:
-            t += f" e o prazo da obra voltou a {receita['prazo_antes'] or '—'} meses"
+            verbo_prazo = "foi" if receita.get("refazer") else "voltou"
+            t += f" e o prazo da obra {verbo_prazo} a {receita['prazo_antes'] or '—'} meses"
         return t
 
-    return Operacao(obra_id=c["obra_id"], aplicar=aplicar, texto=texto, desfazer=lambda d: None)
+    # o refazer é a mesma restauração, com o estado de agora como "antes": aplicá-la desfaz este desfazer
+    agora = {"inicio": c.get("inicio"), "meses": c.get("meses", 0), "etapas": c.get("etapas", []),
+             "base": c.get("base"), "revisoes": c.get("revisoes") or 0} if c.get("etapas") else None
+    inversa = {"op": "restaurar_cronograma", "cronograma_id": c["id"], "antes": agora, "versao": c["versao"] + 1,
+               "obra_id": receita.get("obra_id"), "prazo_antes": receita.get("prazo_depois"),
+               "prazo_depois": receita.get("prazo_antes"), "muda_prazo": muda_prazo, "refazer": verbo == "Desfeito"}
+    return Operacao(obra_id=c["obra_id"], aplicar=aplicar, texto=texto, desfazer=lambda d: inversa)
 
 
 async def medir(arm, u: UsuarioAtual, obra_id: str, corpo: MedicaoCorpo) -> tuple[dict, bool, str]:
@@ -259,7 +272,34 @@ async def preparar_desfazer_medicao(tx, u: UsuarioAtual, receita: dict) -> Opera
 
     return Operacao(obra_id=med["obra_id"], aplicar=aplicar,
                     texto=lambda d: f"Desfeito: {med['numero']}ª medição ({med['mes']}) retirada",
-                    desfazer=lambda d: None)
+                    desfazer=lambda d: {"op": "refazer_medicao", "medicao_id": med["id"], "refazer": True})
+
+
+async def preparar_refazer_medicao(tx, u: UsuarioAtual, receita: dict) -> Operacao:
+    """Põe de volta a medição desfeita, tal qual: só se o cronograma ainda está como o desfazer deixou (nenhuma
+    medição lançada nem cronograma refeito no meio); senão a medição se lança de novo pela tela."""
+    med = await tx.obter("medicoes", u.tenant_id, receita["medicao_id"])
+    if not med or not med.get("desfeito"):
+        raise Conflito("Esta medição já está valendo.")
+    c = await tx.obter("cronogramas", u.tenant_id, id_cronograma(u.tenant_id, med["obra_id"]))
+    if (not c or not c.get("etapas") or c.get("medicoes", 0) != med["numero"] - 1
+            or c.get("ultima_medicao") != med["mes_anterior"] or dict(c.get("acumulado", {})) != med["anterior"]):
+        raise Conflito("O cronograma mudou depois que esta medição foi desfeita; lance a medição de novo.")
+    ini, m = _mes_idx(c["inicio"]), _mes_idx(med["mes"])
+    if not ini <= m <= ini + c["meses"] - 1 + MESES_DEPOIS_DO_FIM:
+        raise Conflito(f"{med['mes']} ficou fora do cronograma; lance a medição de novo.")
+    acumulado = {**med["anterior"], **{e["etapa"]: e["pct_acumulado"] for e in med["etapas"]}}
+
+    def aplicar():
+        tx.atualizar("cronogramas", u.tenant_id, c["id"], {"medicoes": med["numero"], "ultima_medicao": med["mes"],
+                                                          "acumulado": acumulado})
+        tx.atualizar("medicoes", u.tenant_id, med["id"], {"desfeito": False})
+        return {**med, "desfeito": False}
+
+    return Operacao(obra_id=med["obra_id"], aplicar=aplicar,
+                    texto=lambda d: f"Refeito: {med['numero']}ª medição ({med['mes']}): {fmt_reais(med['valor'])} "
+                                    f"no mês · {_fmt_pct(med['pct_obra_acumulado'])} da obra executada",
+                    desfazer=lambda d: {"op": "desfazer_medicao", "medicao_id": med["id"]})
 
 
 async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObra:
