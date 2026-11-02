@@ -36,7 +36,7 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
             pendencias=len(pendentes_de.get(o["id"], [])),
             falta_comprar=sum(1 for c in contas if c["conta"]["comprar"] > 0),
             pedidos_abertos=len(ped),
-            valor_pedidos_abertos=sum(p["valor"] for p in ped),
+            valor_pedidos_abertos=sum(estoque.valor_em_aberto(p) for p in ped),
             nf_para_conferir=sum(1 for p in ped if p["status"] == StatusPedido.RECEBIDO.value),
             ultima_atividade=ultima[0]["criado_em"] if ultima else None))
     return saida

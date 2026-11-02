@@ -56,24 +56,29 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, falta_comprar, pedidos_abertos,
   valor_pedidos_abertos, nf_para_conferir, ultima_atividade}]` (por nome da obra), para a página inicial.
   `pendencias` = propostas pendentes · `falta_comprar` = insumos com `Conta.comprar > 0` (a mesma Conta de
-  `GET …/insumos`) · `pedidos_abertos` = pedidos fora de `conferido`/`cancelado` e `valor_pedidos_abertos` a soma do
-  `valor` deles (centavos) · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
+  `GET …/insumos`) · `pedidos_abertos` = pedidos fora de `conferido`/`cancelado` e `valor_pedidos_abertos` o que eles
+  ainda vão custar (centavos): o `valor` inteiro em cotação; depois, só a parte que falta entregar de cada linha · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
   nova do registro da obra, ou `null`. Somado na API: uma consulta por coleção para o tenant inteiro (sem agregação no
   banco) e uma leitura de 1 documento do registro por obra.
 - `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta}]`, onde
   `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar}` calculada por `regras.conta_de_falta`
   (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
 - `Insumo.valor_unitario` (centavos, 0 = sem preço) é o preço unitário do orçamento.
-- `POST /obras/{obra_id}/insumos` `{nome, unidade, curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
+- `Insumo.tipo` ∈ `material | servico` (padrão `material`). Serviço (terraplanagem, aterro, empreiteiro) não tem
+  estoque: movimento de entrada/saída/ajuste nele → 422, saldo sempre 0, e "a caminho" na Conta é o contratado ainda
+  não medido.
+- `POST /obras/{obra_id}/insumos` `{nome, unidade, tipo?="material", curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
   (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
   maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Sem desfazer.
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50&antes_de=…` → `[Movimento]` (mais novos primeiro;
   paginação em "Listagens paginadas")
-- `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, origem_doc?, chave_idempotencia}` →
+- `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, etapa?, origem_doc?, chave_idempotencia}` →
   `Movimento + registro_id` (o ID da `EntradaRegistro` criada: é o que o Desfazer usa logo depois da ação; derivado
   do movimento, então a repetição da chave devolve o mesmo `registro_id`). Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
   `tipo` ∈ `entrada | saida | ajuste` (transferência fica para depois); mesma chave com outro conteúdo → 409.
-  Saída de curva A sem `destino` → 422. Papel `admin`+. Gera `EntradaRegistro` com `desfazer` (estorno).
+  Saída de curva A sem `destino` → 422. `etapa` é a apropriação do consumo (uma chave de `GET …/etapas`): obrigatória
+  em **saída** quando a obra tem orçamento importado; etapa que não existe → 422; obra sem orçamento → deixe em branco.
+  Papel `admin`+. Gera `EntradaRegistro` com `desfazer` (estorno).
 - `Movimento.quem` é o **nome** de quem lançou (o que a tela mostra); o ID do usuário vem em `usuario_id` (`null` em
   movimento semeado). Vale para movimento da tela, da conferência de pedido, de proposta aprovada e da importação.
 - `POST /obras/{obra_id}/importar` (multipart, CSV `;` ou `,`, UTF-8 ou Windows-1252): colunas
@@ -171,6 +176,13 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   contrato primeiro e aditivos pela ordem do número, cada um pela `ordem`. `curva` (A/B/C) dos itens pelo `total` da
   linha, na régua do 80/95%, só entre itens com total > 0 (etapas: `null`). `etapas` soma por `etapa` (descrição da
   linha de etapa do contrato; a do aditivo se a etapa só existe nele). Sem nenhuma versão: listas vazias e totais 0.
+- **Previsto × realizado** (Fase 3): cada etapa e os totais trazem também `cotando`, `comprometido` e `realizado`
+  (centavos), somados das linhas dos pedidos da obra pela `etapa` de cada linha. `cotando` = pedidos em cotação ·
+  `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
+  encerrado com sobra compromete só o que chegou) · `realizado` = o que já foi entregue ou medido, pelo preço do pedido.
+  Cancelado não conta. `totais.sem_etapa` = o gasto sem etapa ou em etapa que não está nas versões vigentes (já somado
+  nos totais). Saldo da etapa = `atual − comprometido`. Atenção: `atual` é preço de contrato (com BDI e mão de obra);
+  comprometido e realizado são custo de compra.
 - `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + registro_id`. Tira a obra de `em_orcamento` para `em_andamento`.
   Já aprovado → 409; sem contrato vigente **e** sem insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o
   orçamento de X (N itens, R$ total)" com o orçado atual (contrato + aditivos vigentes; sem contrato, "N insumos" da
@@ -189,28 +201,53 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 - `antes_de` em ISO 8601 **com fuso** (`2026-11-01T13:00:00.123Z` ou `-03:00`); sem fuso → 422. A API compara no
   milissegundo, como grava.
 
-## Pedidos
+## Suprimentos: pedidos, entregas e fornecedores
 
+- `GET /obras/{obra_id}/etapas` → `[{etapa, descricao}]`: as etapas das versões vigentes do orçamento (contrato
+  primeiro, depois as que nasceram em aditivo). Lista vazia = obra sem orçamento; aí a etapa é opcional em tudo.
 - `GET /obras/{obra_id}/pedidos?status=…&limite=100&antes_de=…` → `[Pedido]` (mais novos primeiro). `status` pode
-  repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". O quadro pede as colunas abertas
-  e o recolhido pede `conferido` + `cancelado`, paginado. `limite` até 500.
-- `Pedido` tem também `quantidade_recebida` (milésimos) e `nf`, ambos `null` até a conferência.
-- `POST /obras/{obra_id}/pedidos` `{insumo_id, quantidade, fornecedor, valor, previsao?, aprovado?}` →
-  `Pedido + registro_id` (201; número PED-NNNN por tenant). `aprovado` (padrão `false`): `false` → status
-  `em_cotacao`; `true` → nasce `aprovado` (compra já decidida). O desfazer (`cancelar_pedido`) guarda o status de
-  nascimento em `status_criado` e só cancela se o pedido ainda estiver nele; se já andou → 409.
+  repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". `limite` até 500.
+- `Pedido` = `{id, numero, obra_id, fornecedor, fornecedor_id, previsao, observacao, status, valor, recebimentos,
+  criado_em, linhas: [{insumo_id, nome, unidade, tipo, etapa, quantidade, valor_unitario, total, recebida}]}`. Nome,
+  unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`; `recebida` soma as entregas;
+  `recebimentos` = quantas entregas valem. Pedido gravado antes das linhas sai no mesmo formato, com uma linha.
+- Status: `em_cotacao → aprovado → enviado → em_transito → (recebido) → parcial → conferido`, e `cancelado` até antes
+  de receber. `parcial` = recebeu parte, o resto continua "a caminho". A tela chama `conferido` de **Recebido**.
+  Conta: `cotando` soma as linhas dos pedidos em cotação; `a_caminho` soma o que **falta entregar** em cada linha
+  (`quantidade − recebida`, nunca negativo) dos pedidos de aprovado a parcial.
+- `POST /obras/{obra_id}/pedidos` (admin) `{fornecedor, fornecedor_id?, previsao?, observacao?, aprovado?, linhas:
+  [{insumo_id, quantidade, valor_unitario?, total?, etapa?}]}` → `Pedido + registro_id` (201; PED-NNNN por tenant).
+  1 a 50 linhas; o mesmo insumo duas vezes → 422. `total` padrão = quantidade × unitário arredondado ao centavo
+  (informe quando o total combinado não fecha). Com orçamento importado, toda linha exige `etapa` válida. `aprovado`
+  `true` → nasce `aprovado`. O formato antigo de um insumo só (`{insumo_id, quantidade, fornecedor, valor}`) ainda é
+  aceito e vira uma linha com `total = valor`. Registro: `"PED-0168 criado: 2 itens (Cimento e Brita 1) com X (R$ …)"`;
+  desfazer `cancelar_pedido` só enquanto o pedido estiver no status de nascimento.
+- `PATCH /pedidos/{pedido_id}` (admin) `{previsao?, observacao?}` → `Pedido + registro_id`. Registro "PED-0168:
+  previsão 2026-11-10 → 2026-11-24", desfazer `editar_pedido` (409 se editado de novo depois).
+- `POST /pedidos/{pedido_id}/recebimentos` (admin) `{nf_numero?, nf_data?, nf_valor?, linhas: [{indice, quantidade}],
+  chave_idempotencia}` → `{recebimento, pedido, registro_id}` (201; a mesma chave devolve a mesma entrega com 200, e
+  com outras quantidades → 409). Vale de `aprovado` a `parcial`. Linha de material dá ENTRADA no almoxarifado na
+  mesma transação (`origem_doc` "PED-0168 · NF 1187", `etapa` da linha); linha de serviço só soma o medido. Entregar a
+  mais é aceito. Tudo entregue → `conferido`; senão → `parcial`. Registro: `"PED-0168 · 1ª entrega (NF 1187): 120 sc
+  de Cimento; 18 de 25 m³ de Brita 1 · faltam 7 m³ de Brita 1"` ("medição" quando só há serviço). Desfazer
+  `desfazer_recebimento` estorna as entradas e volta as quantidades e o status, **só para a última entrega** (409 se
+  houver outra depois ou se o pedido foi encerrado).
+- `Recebimento` = `{id, pedido_id, pedido_numero, numero, nf_numero, nf_data, nf_valor, valor, criado_em, quem,
+  linhas: [{indice, insumo_id, nome, unidade, tipo, etapa, quantidade, valor}], movimentos}`. `valor` = as linhas pelo
+  preço do pedido; a tela compara com `nf_valor`. `GET /pedidos/{pedido_id}/recebimentos` → as que valem, em ordem.
 - `POST /pedidos/{pedido_id}/avancar` `{para, quantidade_recebida?, nf?}` → `Pedido + registro_id`. Valida em
-  `regras.validar_transicao`. Para `conferido`: cria o movimento de ENTRADA na mesma transação e grava no pedido
-  `quantidade_recebida` e `nf`.
-  - `quantidade_recebida` (milésimos, > 0; padrão = `quantidade` do pedido) é o que entra no almoxarifado. Menos que o
-    pedido é aceito e o pedido fecha mesmo assim: a diferença deixa de estar "a caminho" e volta como falta na Conta.
-    Mais que o pedido também é aceito.
-  - `nf` (até 60 caracteres; em branco = não informada): o `origem_doc` da entrada vira `"PED-0157 · NF 4471"`
-    (sem NF, só o número).
-  - Os dois só valem com `para = conferido`; com outro destino → 422.
-  - Registro: `"PED-0157: recebido → conferido · chegaram 36 de 40 m³ (NF 4471)"` (o trecho "chegaram…" só aparece
-    quando há divergência; "(NF …)" só com NF).
-  - Desfazer a conferência estorna exatamente o que entrou e volta `quantidade_recebida` e `nf` para `null`.
+  `regras.validar_transicao`. `para = conferido` tem dois sentidos: de `parcial`, **encerra** o resto (o fornecedor
+  não manda; sai do "a caminho"; registro "PED-0157 encerrado: o resto não vem (4 m³ de Areia média)", desfazer
+  `voltar_pedido`); de `recebido`, recebe tudo o que falta numa entrega só (o caminho que o agente usa), com
+  `quantidade_recebida` (só em pedido de uma linha) e `nf` — vira um `Recebimento` igual ao de cima.
+  `quantidade_recebida`/`nf` com outro destino → 422.
+- `GET /fornecedores` → `[Fornecedor]` por nome; `Fornecedor` = `{id, nome, cnpj, contato, telefone, email}` (cnpj só
+  dígitos ou `""`). São do tenant, valem para todas as obras.
+- `POST /fornecedores` (admin) `{nome, cnpj?, contato?, telefone?, email?}` → `Fornecedor + registro_id` (201). CNPJ
+  com ou sem pontuação, dígitos verificadores conferidos (inválido → 422); CNPJ repetido, ou o mesmo nome sem CNPJ →
+  409 "Já cadastrado: X". Sem desfazer.
+- `PATCH /fornecedores/{id}` (admin) com os mesmos campos, parciais → `Fornecedor + registro_id`, desfazer
+  `editar_fornecedor`.
 
 ## Propostas, aprovação e registro
 
@@ -226,7 +263,7 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 - Aprovar `criar_pedido` cria o pedido já **`aprovado`** (não `em_cotacao`): a aprovação da proposta é a aprovação da
   compra. O texto do registro termina em `· aprovado`.
 - **Ajustar e aprovar**: `ajustes` corrige campos de `dados` antes de executar. Chaves aceitas por tipo:
-  `criar_pedido` → `quantidade, fornecedor, valor, previsao` · `avancar_pedido` → `quantidade_recebida, nf` (só se
+  `criar_pedido` → `quantidade, fornecedor, valor, previsao` (só em proposta de uma linha) · `avancar_pedido` → `quantidade_recebida, nf` (só se
   `dados.para = conferido`, senão 422) · `ajuste_estoque` → `quantidade, motivo`. Chave fora da lista → 422. Os dados
   mesclados são revalidados com as regras da criação (ex.: ajuste de zero → 422); erro deixa a proposta pendente.
   Na mesma transação a proposta grava `dados` (o que foi executado), `dados_originais` (o que o agente propôs) e

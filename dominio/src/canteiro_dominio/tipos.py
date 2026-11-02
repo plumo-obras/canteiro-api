@@ -3,9 +3,9 @@
 O Firestore não tem decimal nem índice único, então: dinheiro em centavos e quantidade em milésimos (inteiros), e IDs
 gerados por nós (UUIDv7 ordena no tempo, o que mantém listagens por criação baratas nos dois bancos).
 """
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Annotated
 import uuid
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Annotated
 
 from pydantic import Field
 

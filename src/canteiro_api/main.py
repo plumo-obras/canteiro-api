@@ -13,7 +13,7 @@ from .armazenamento import criar_armazenamento
 from .cofre import criar_cofre
 from .config import Config
 from .nucleo import ErroNegocio
-from .rotas import auth, lista_espera, obras, propostas, sessoes
+from .rotas import auth, fornecedores, lista_espera, obras, propostas, sessoes
 
 
 def create_app(config: Config | None = None, arm=None) -> FastAPI:
@@ -56,6 +56,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
 
     app.include_router(auth.r)
     app.include_router(obras.r)
+    app.include_router(fornecedores.r)
     app.include_router(propostas.r)
     app.include_router(sessoes.r)
     app.include_router(lista_espera.r)

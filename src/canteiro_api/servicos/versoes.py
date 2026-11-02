@@ -14,7 +14,8 @@ import re
 from decimal import Decimal
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import ItemOrcamento, TipoVersao, VersaoOrcamento
+from canteiro_dominio.modelos import ItemOrcamento, StatusPedido, TipoVersao, VersaoOrcamento
+from canteiro_dominio.regras import EM_COTACAO
 from canteiro_dominio.tipos import fmt_reais, qtd, reais
 
 from ..auth import UsuarioAtual
@@ -22,6 +23,7 @@ from ..esquemas import (
     Aviso,
     ErroLinha,
     EtapaOrcamento,
+    EtapaRef,
     ItemPrevia,
     LinhaIgnorada,
     Mapeamento,
@@ -33,7 +35,7 @@ from ..esquemas import (
 )
 from ..modelos import doc
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, Operacao, evento, executar_e_registrar, obra_do_tenant
-from .estoque import id_derivado
+from .estoque import id_derivado, linhas_de
 from .orcamento import MAX_LINHAS, _arredonda, _grade, _normal, _numero, _texto, _vazio
 
 # Itens por transação: uma escrita cada, folgado nas 500 da transação portável.
@@ -146,7 +148,9 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
             total = _arredonda(Decimal(quantidade) * unit / 1000)
         else:
             unit, total = 0, 0
-        if codigo:
+        # "CPU", "MERCADO", "COMPOSIÇÃO": código genérico (sem número) não identifica um serviço, e comparar as
+        # unidades deles só gera aviso falso
+        if codigo and any(c.isdigit() for c in codigo):
             chave = f"{fonte.casefold()}|{codigo.casefold()}"
             vista = unidade_do_codigo.get(chave)
             if vista is None:
@@ -249,7 +253,8 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         id=id_, tenant_id=u.tenant_id, obra_id=obra_id, tipo=tipo, numero=numero, descricao=descricao.strip(),
         data=data, arquivo=(nome_arquivo or "")[:200], itens=previa.n_itens, etapas=previa.n_etapas,
         total=previa.total, substitui=previa.substitui.versao_id if previa.substitui else None,
-        contrato_id=vigente["id"] if tipo == TipoVersao.ADITIVO else None, assinatura=assinatura)
+        contrato_id=vigente["id"] if tipo == TipoVersao.ADITIVO else None, assinatura=assinatura,
+        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao} for e in previa.etapas if e.etapa])
     # Itens primeiro, ligados a uma versão que ainda não existe: ninguém os enxerga até a última transação criar a
     # versão. Se o processo cair no meio, sobram itens órfãos invisíveis, e a mesma chave regrava os mesmos IDs.
     docs = [doc(ItemOrcamento(id=id_derivado(u.tenant_id, "item-orc", id_, str(x.ordem)), tenant_id=u.tenant_id,
@@ -367,8 +372,12 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         elif x["tipo"] == "item":
             s = somas.setdefault(x["etapa"], [0, 0])
             s[0 if x["versao_id"] in contrato_ids else 1] += x["total"]
+    gasto = await andamento_por_etapa(arm, tenant_id, obra_id)
     etapas = [EtapaOrcamento(etapa=e, descricao=descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"),
-                             contratado=c, aditivos=a, atual=c + a) for e, (c, a) in somas.items()]
+                             contratado=c, aditivos=a, atual=c + a, **gasto.pop(e, {}))
+              for e, (c, a) in somas.items()]
+    # gasto numa etapa que não está no orçamento (pedido de antes da importação, ou etapa de versão desfeita)
+    sem = {k: sum(g[k] for g in gasto.values()) for k in ("cotando", "comprometido", "realizado")}
     contratado = sum(e.contratado for e in etapas)
     aditivos = sum(e.aditivos for e in etapas)
     return OrcamentoObra(
@@ -376,7 +385,66 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
                                n_itens=sum(x["tipo"] == "item" for x in itens),
-                               n_etapas=len(descricoes)))
+                               n_etapas=len(descricoes), sem_etapa=sem,
+                               **{k: sum(getattr(e, k) for e in etapas) + sem[k]
+                                  for k in ("cotando", "comprometido", "realizado")}))
+
+
+async def andamento_por_etapa(leitor, tenant_id: str, obra_id: str) -> dict[str, dict[str, int]]:
+    """Cotando, comprometido e realizado por etapa, somados das linhas dos pedidos da obra (centavos).
+
+    Realizado sai do que cada linha já recebeu, pelo preço do pedido: é a mesma soma das entregas, sem ler cada
+    uma. Comprometido é o maior entre o pedido e o entregue (entrega a mais também custa), exceto no pedido
+    encerrado com sobra, que só compromete o que chegou.
+    """
+    pedidos = await leitor.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    soma: dict[str, dict[str, int]] = {}
+    for p in pedidos:
+        st = StatusPedido(p["status"])
+        if st == StatusPedido.CANCELADO:
+            continue
+        for x in linhas_de(p):
+            g = soma.setdefault(x.get("etapa") or "", {"cotando": 0, "comprometido": 0, "realizado": 0})
+            total = x.get("total", 0)
+            if st in EM_COTACAO:
+                g["cotando"] += total
+                continue
+            q, recebida = x["quantidade"], x.get("recebida", 0)
+            recebido = (recebida * total + q // 2) // q if q else 0
+            g["realizado"] += recebido
+            encerrado_com_sobra = st == StatusPedido.CONFERIDO and recebida < q
+            g["comprometido"] += recebido if encerrado_com_sobra else max(total, recebido)
+    return soma
+
+
+async def etapas_da_obra(leitor, tenant_id: str, obra_id: str) -> list[EtapaRef]:
+    """As etapas que podem receber um gasto: as das versões vigentes, contrato primeiro, sem repetir. Lista vazia = obra
+    sem orçamento importado (aí a apropriação é opcional)."""
+    ativas = [v for v in await versoes_da_obra(leitor, tenant_id, obra_id) if v["ativa"]]
+    if any("lista_etapas" not in v for v in ativas):
+        # versão gravada antes da lista: monta pelos itens (uma vez por leitura, só em obra antiga)
+        o = await orcamento_da_obra(leitor, tenant_id, obra_id)
+        return [EtapaRef(etapa=e.etapa, descricao=e.descricao) for e in o.etapas if e.etapa]
+    ativas.sort(key=lambda v: (v["tipo"] != TipoVersao.CONTRATO, v["numero"]))
+    vistas: dict[str, str] = {}
+    for v in ativas:
+        for e in v["lista_etapas"]:
+            vistas.setdefault(e["etapa"], e["descricao"])
+    return [EtapaRef(etapa=k, descricao=d) for k, d in vistas.items()]
+
+
+async def validar_etapa(leitor, tenant_id: str, obra_id: str, etapas: list[str | None],
+                        exigir: bool = True) -> dict[str, str]:
+    """Confere as etapas informadas contra o orçamento da obra; devolve {chave: descrição} para os textos."""
+    validas = {e.etapa: e.descricao for e in await etapas_da_obra(leitor, tenant_id, obra_id)}
+    for e in etapas:
+        if e and validas and e not in validas:
+            raise ErroNegocio(f"A etapa {e} não existe no orçamento desta obra.")
+        if not e and validas and exigir:
+            raise ErroNegocio("Diga de qual etapa do orçamento é este gasto.")
+        if e and not validas:
+            raise ErroNegocio("Esta obra ainda não tem orçamento importado; deixe a etapa em branco.")
+    return validas
 
 
 def _curvas(itens: list[dict]) -> dict[str, str]:

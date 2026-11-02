@@ -5,11 +5,11 @@ Regras de portabilidade (Mongo agora, Firestore depois):
 - referências por ID (string), sem joins: quem precisa de dado de outra coleção busca pelo ID ou lê uma projeção;
 - datas em UTC com fuso (datetime aware).
 """
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .tipos import Centavos, Milesimos, novo_id
 
@@ -72,6 +72,8 @@ class VersaoOrcamento(Documento):
     contrato_id: str | None = None         # no aditivo: o contrato vigente quando ele entrou
     aditivos: int = 0                      # no contrato: aditivos vigentes feitos sobre ele (trava o desfazer)
     assinatura: str = ""                   # hash do arquivo + tipo: a mesma chave com outro arquivo é conflito
+    # [{etapa, descricao}] das etapas desta versão: os selects de apropriação leem só as versões, sem os 500 itens
+    lista_etapas: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ItemOrcamento(Documento):
@@ -99,9 +101,15 @@ class CurvaABC(StrEnum):
     C = "C"
 
 
+class TipoInsumo(StrEnum):
+    MATERIAL = "material"                  # tem estoque: entra, sai, conta
+    SERVICO = "servico"                    # terraplanagem, empreiteiro: contratado e medido, sem estoque
+
+
 class Insumo(Documento):
     obra_id: str
     nome: str
+    tipo: TipoInsumo = TipoInsumo.MATERIAL
     unidade: str                           # un, sc, kg, m³…
     precisa_ate_o_fim: Milesimos = 0       # quanto a obra ainda vai consumir (orçamento/planejamento)
     curva: CurvaABC = CurvaABC.B           # curva A exige destino na baixa
@@ -123,6 +131,7 @@ class Movimento(Documento):
     tipo: TipoMovimento
     quantidade: Milesimos                  # sempre positiva, exceto em AJUSTE
     destino: str | None = None             # frente de serviço (obrigatório em saída de curva A)
+    etapa: str | None = None               # etapa do orçamento que consumiu (apropriação da saída)
     origem_doc: str | None = None          # PED-…, TRF-…, NF…
     quem: str                              # nome legível de quem lançou (a tela mostra direto, sem buscar usuário)
     usuario_id: str | None = None          # o ID fica à parte, para auditoria (None em dado semeado/importado antigo)
@@ -145,27 +154,76 @@ class StatusPedido(StrEnum):
     ENVIADO = "enviado"
     EM_TRANSITO = "em_transito"
     RECEBIDO = "recebido"                  # chegou, falta conferir
-    CONFERIDO = "conferido"                # deu entrada no almoxarifado
+    PARCIAL = "parcial"                    # recebeu parte: o resto continua a caminho
+    CONFERIDO = "conferido"                # tudo entregue (ou o resto encerrado); a tela chama de "Recebido"
     CANCELADO = "cancelado"
+
+
+class Fornecedor(Documento):
+    """Do tenant, vale para todas as obras. O ID sai do CNPJ (ou do nome, sem CNPJ): cadastro repetido colide."""
+    nome: str
+    cnpj: str = ""                         # só dígitos; "" = não informado
+    contato: str = ""
+    telefone: str = ""
+    email: str = ""
+
+
+class LinhaPedido(BaseModel):
+    """Uma linha do pedido. Nome, unidade e tipo são cópia do insumo na hora do pedido: a folha impressa e a lista de
+    entregas não precisam buscar o insumo, e renomear o insumo depois não reescreve o pedido já enviado."""
+    insumo_id: str
+    nome: str = ""
+    unidade: str = ""
+    tipo: TipoInsumo = TipoInsumo.MATERIAL
+    etapa: str | None = None               # apropriação: etapa do orçamento que paga esta linha
+    quantidade: Milesimos
+    valor_unitario: Centavos = 0
+    total: Centavos = 0
+    recebida: Milesimos = 0                # somada a cada entrega; o resto (quantidade − recebida) está a caminho
 
 
 class Pedido(Documento):
     numero: str                            # PED-0168 (legível; único por tenant via documento de contador)
     obra_id: str
-    insumo_id: str
-    quantidade: Milesimos
     fornecedor: str
-    valor: Centavos
+    fornecedor_id: str | None = None
+    linhas: list[LinhaPedido]              # até 50 (limite do corpo): a lista não cresce depois de criado
+    valor: Centavos                        # soma dos totais das linhas
     status: StatusPedido = StatusPedido.EM_COTACAO
     previsao: str | None = None
+    observacao: str = ""
     rastreio: str | None = None
-    # Preenchidos ao conferir: o que chegou de fato pode diferir do pedido (entrega parcial ou a mais) e a NF amarra a
-    # entrada ao documento do fornecedor. O desfazer da conferência limpa os dois.
-    quantidade_recebida: Milesimos | None = None
-    nf: str | None = None
-    # Quantas vezes já foi conferido: entra no ID da entrada no almoxarifado. Conferir, desfazer e conferir de novo é
-    # uma segunda entrada (a primeira foi estornada), não a repetição da mesma gravação.
-    conferencias: int = 0
+    # Quantas entregas já entraram: numera a próxima e trava o desfazer (só a última entrega pode ser desfeita).
+    recebimentos: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _linha_unica_antiga(cls, d: Any) -> Any:
+        # pedido gravado antes das linhas (MVP-0): um insumo só, com quantidade e valor no próprio pedido
+        if isinstance(d, dict) and "linhas" not in d and d.get("insumo_id"):
+            recebida = d.get("quantidade_recebida") or (d["quantidade"] if d.get("status") == "conferido" else 0)
+            d = {**d, "linhas": [{"insumo_id": d["insumo_id"], "quantidade": d["quantidade"], "total": d["valor"],
+                                  "valor_unitario": round(d["valor"] * 1000 / d["quantidade"]) if d["quantidade"]
+                                  else 0, "recebida": recebida}]}
+        return d
+
+
+class Recebimento(Documento):
+    """Uma entrega (material) ou medição (serviço) de um pedido, com a nota. As entradas no almoxarifado têm ID
+    derivado deste documento e são estornadas juntas no desfazer."""
+    obra_id: str
+    pedido_id: str
+    pedido_numero: str
+    numero: int                            # 1ª, 2ª… entrega do pedido
+    nf_numero: str = ""
+    nf_data: str | None = None             # "AAAA-MM-DD"
+    nf_valor: Centavos | None = None       # o que a nota diz; a tela compara com `valor`
+    valor: Centavos = 0                    # as linhas pelo preço do pedido
+    linhas: list[dict[str, Any]]           # {indice, insumo_id, nome, unidade, tipo, etapa, quantidade, valor}
+    movimentos: list[str] = Field(default_factory=list)
+    quem: str = ""
+    usuario_id: str | None = None
+    desfeito: bool = False
 
 
 class StatusProposta(StrEnum):

@@ -26,8 +26,8 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
-from . import obras, versoes
-from .estoque import id_derivado, preparar_estorno, preparar_movimento
+from . import fornecedores, obras, pedidos, versoes
+from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
 from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
 
 
@@ -53,7 +53,12 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> dict:
     _regras_dos_dados(dados)
     await obra_do_tenant(arm, u.tenant_id, corpo.obra_id)
     match dados:
-        case PedidoDados() | AjusteEstoqueDados():
+        case PedidoDados():
+            for x in dados.linhas:
+                await insumo_da_obra(arm, u.tenant_id, corpo.obra_id, x.insumo_id)
+            await versoes.validar_etapa(arm, u.tenant_id, corpo.obra_id, [x.etapa for x in dados.linhas],
+                                        exigir=False)
+        case AjusteEstoqueDados():
             await insumo_da_obra(arm, u.tenant_id, corpo.obra_id, dados.insumo_id)
         case AvancarPedidoDados():
             p = await arm.obter("pedidos", u.tenant_id, dados.pedido_id)
@@ -62,7 +67,7 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> dict:
             validar_transicao(StatusPedido(p["status"]), dados.para)
     p = Proposta(tenant_id=u.tenant_id, obra_id=corpo.obra_id, tipo=corpo.tipo, titulo=corpo.titulo,
                  conta=corpo.conta, justificativa=corpo.justificativa, fonte=corpo.fonte,
-                 dados=dados.model_dump(mode="json"))
+                 dados=_guardado(corpo.tipo, dados.model_dump(mode="json")))
     d = doc(p)
 
     async def corpo_tx(tx):
@@ -112,20 +117,46 @@ def _mesclar_ajustes(prop: dict, ajustes: dict) -> tuple[dict, dict]:
     if desconhecidas:
         raise ErroNegocio(f"Não dá para ajustar {', '.join(desconhecidas)} numa proposta '{tipo.value}' "
                           f"(ajustáveis: {', '.join(sorted(AJUSTAVEIS[tipo]))}).")
-    dados = _dados(tipo, {**prop["dados"], **ajustes})
+    base = prop["dados"]
+    if tipo == TipoProposta.CRIAR_PEDIDO:
+        base = _pedido_plano(base)
+    dados = _dados(tipo, {**base, **ajustes})
     _regras_dos_dados(dados)
-    mesclados = dados.model_dump(mode="json")
-    mudou = {k: (prop["dados"].get(k), mesclados[k]) for k in ajustes if prop["dados"].get(k) != mesclados[k]}
+    mesclados = _guardado(tipo, dados.model_dump(mode="json"))
+    mudou = {k: (base.get(k), mesclados[k]) for k in ajustes if base.get(k) != mesclados[k]}
     return mesclados, mudou
+
+
+def _guardado(tipo: TipoProposta, dados: dict) -> dict:
+    """Como a proposta fica gravada: a de pedido com uma linha só fica no formato plano (insumo, quantidade, valor),
+    que é o que o cartão de aprovação mostra e o que o ajuste edita."""
+    if tipo == TipoProposta.CRIAR_PEDIDO and len(dados.get("linhas", [])) == 1:
+        return _pedido_plano(dados)
+    return dados
+
+
+def _pedido_plano(dados: dict) -> dict:
+    """A proposta de pedido do agente tem uma linha só: o ajuste fala de quantidade e valor como antes das linhas."""
+    if "linhas" not in dados:
+        return dados
+    if len(dados["linhas"]) != 1:
+        raise ErroNegocio("Esta proposta tem várias linhas; recuse e peça outra em vez de ajustar.")
+    x = dados["linhas"][0]
+    resto = {k: v for k, v in dados.items() if k != "linhas"}
+    total = x.get("total")
+    if total is None:
+        total = (x["quantidade"] * x.get("valor_unitario", 0) + 500) // 1000
+    return {**resto, "insumo_id": x["insumo_id"], "quantidade": x["quantidade"], "valor": total,
+            "etapa": x.get("etapa")}
 
 
 async def _unidade(tx, u: UsuarioAtual, prop: dict) -> str:
     """Só para escrever o ajuste no registro com a unidade ("34 → 30 sc")."""
     dados = prop["dados"]
-    insumo_id = dados.get("insumo_id")
+    insumo_id = dados.get("insumo_id") or (dados.get("linhas") or [{}])[0].get("insumo_id")
     if not insumo_id and dados.get("pedido_id"):
         p = await tx.obter("pedidos", u.tenant_id, dados["pedido_id"])
-        insumo_id = p and p["insumo_id"]
+        insumo_id = p and linhas_de(p)[0]["insumo_id"]
     i = await tx.obter("insumos", u.tenant_id, insumo_id) if insumo_id else None
     return i["unidade"] if i else ""
 
@@ -190,6 +221,9 @@ async def recusar(arm, u: UsuarioAtual, proposta_id: str, motivo: str) -> dict:
 _DESFAZER = {
     "estornar_movimento": lambda tx, u, r: preparar_estorno(tx, u, r["movimento_id"]),
     "voltar_pedido": preparar_voltar,
+    "desfazer_recebimento": pedidos.preparar_desfazer_recebimento,
+    "editar_pedido": pedidos.preparar_desfazer_edicao,
+    "editar_fornecedor": fornecedores.preparar_desfazer_edicao,
     "cancelar_pedido": preparar_cancelar_criado,
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,

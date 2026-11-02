@@ -3,16 +3,18 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from canteiro_dominio.modelos import (
     EntradaRegistro,
+    Fornecedor,
     Insumo,
     ItemOrcamento,
     Movimento,
     Obra,
     Pedido,
     Proposta,
+    Recebimento,
     StatusPedido,
     TipoProposta,
     TipoVersao,
@@ -65,6 +67,7 @@ class InsumoCorpo(Entrada):
     """Insumo cadastrado pela tela: o que chegou ou foi comprado sem estar na planilha do orçamento."""
     nome: str = Field(min_length=1, max_length=120)
     unidade: str = Field(min_length=1, max_length=12)
+    tipo: Literal["material", "servico"] = "material"
     curva: Literal["A", "B", "C"] = "C"
     precisa_ate_o_fim: int = Field(0, ge=0,
                                    description="milésimos; 0 = fora do orçamento (não entra na conta de falta)")
@@ -81,22 +84,122 @@ class MovimentoCorpo(Entrada):
     tipo: Literal["entrada", "saida", "ajuste"]
     quantidade: int = Field(description="milésimos; positiva, exceto em ajuste (que carrega o sinal)")
     destino: str | None = Field(None, max_length=200)
+    etapa: str | None = Field(None, max_length=60, description="etapa do orçamento (obrigatória em saída quando a obra "
+                                                              "tem orçamento)")
     origem_doc: str | None = Field(None, max_length=100)
     chave_idempotencia: str = Field(min_length=8, max_length=200)
+
+
+_DATA = r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"
+
+
+class LinhaPedidoCorpo(Entrada):
+    insumo_id: str
+    quantidade: int = Field(gt=0, description="milésimos")
+    valor_unitario: int = Field(0, ge=0, description="centavos por unidade")
+    total: int | None = Field(None, ge=0, description="centavos; padrão = quantidade × unitário. Informe quando o "
+                                                      "total combinado não fecha com o unitário arredondado")
+    etapa: str | None = Field(None, max_length=60)
 
 
 class PedidoDados(Entrada):
     """O pedido em si. É também o `dados` da proposta `criar_pedido`, que não aceita `aprovado`: aprovar a proposta já
     é a aprovação."""
-    insumo_id: str
-    quantidade: int = Field(gt=0, description="milésimos")
     fornecedor: str = Field(min_length=1, max_length=200)
-    valor: int = Field(ge=0, description="centavos")
+    fornecedor_id: str | None = None
+    linhas: list[LinhaPedidoCorpo] = Field(min_length=1, max_length=50)
     previsao: str | None = Field(None, max_length=50)
+    observacao: str = Field("", max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _linha_unica(cls, d: Any) -> Any:
+        # o formato de um insumo só (agente e propostas antigas): vira um pedido de uma linha com o total combinado
+        if isinstance(d, dict) and "linhas" not in d and "insumo_id" in d:
+            d = dict(d)
+            d["linhas"] = [{"insumo_id": d.pop("insumo_id"), "quantidade": d.pop("quantidade", 0),
+                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None)}]
+        return d
+
+    @field_validator("linhas")
+    @classmethod
+    def _sem_repetir(cls, v: list[LinhaPedidoCorpo]) -> list[LinhaPedidoCorpo]:
+        # duas linhas do mesmo insumo gravariam o mesmo saldo duas vezes na mesma transação da entrega
+        vistos = [x.insumo_id for x in v]
+        if len(vistos) != len(set(vistos)):
+            raise ValueError("o mesmo insumo aparece em duas linhas; junte as quantidades numa linha só")
+        return v
 
 
 class PedidoCorpo(PedidoDados):
     aprovado: bool = Field(False, description="true: nasce aprovado (compra já decidida); false: em cotação")
+
+
+class PedidoEdicao(Entrada):
+    previsao: str | None = Field(None, max_length=50)
+    observacao: str | None = Field(None, max_length=500)
+
+
+class LinhaEntrega(Entrada):
+    indice: int = Field(ge=0, description="posição da linha no pedido")
+    quantidade: int = Field(gt=0, description="milésimos")
+
+
+class RecebimentoCorpo(Entrada):
+    nf_numero: str | None = Field("", max_length=60)
+    nf_data: str | None = Field(None, pattern=_DATA)
+    nf_valor: int | None = Field(None, ge=0, description="centavos, como está na nota")
+    linhas: list[LinhaEntrega] = Field(min_length=1, max_length=50)
+    chave_idempotencia: str = Field(min_length=8, max_length=200)
+
+    @field_validator("nf_numero")
+    @classmethod
+    def _nf(cls, v: str | None) -> str:
+        # null e em branco = entrega sem nota (o formulário manda o campo vazio como null)
+        return (v or "").strip()
+
+    @field_validator("linhas")
+    @classmethod
+    def _uma_vez(cls, v: list[LinhaEntrega]) -> list[LinhaEntrega]:
+        if len({x.indice for x in v}) != len(v):
+            raise ValueError("a mesma linha do pedido aparece duas vezes na entrega")
+        return v
+
+
+class RecebimentoSaida(BaseModel):
+    recebimento: Recebimento
+    pedido: Pedido
+    registro_id: str | None = None
+
+
+class _DadosFornecedor(Entrada):
+    contato: str | None = Field(None, max_length=120)
+    telefone: str | None = Field(None, max_length=30)
+    email: str | None = Field(None, max_length=254)
+
+    @field_validator("contato", "telefone", "email")
+    @classmethod
+    def _aparar(cls, v: str | None) -> str | None:
+        return v.strip() if v is not None else None
+
+
+class FornecedorCorpo(_DadosFornecedor):
+    nome: str = Field(min_length=1, max_length=200)
+    cnpj: str = Field("", max_length=20, description="com ou sem pontuação; vazio = não informado")
+
+
+class FornecedorEdicao(_DadosFornecedor):
+    nome: str | None = Field(None, min_length=1, max_length=200)
+    cnpj: str | None = Field(None, max_length=20)
+
+
+class FornecedorSaida(Fornecedor):
+    registro_id: str | None = None
+
+
+class EtapaRef(BaseModel):
+    etapa: str
+    descricao: str
 
 
 class Conferencia(Entrada):
@@ -364,7 +467,16 @@ class ItemComCurva(ItemOrcamento):
     curva: str | None = None
 
 
-class EtapaOrcamento(BaseModel):
+class _Andamento(BaseModel):
+    """Previsto × realizado, em centavos. Cotando = pedidos em cotação; comprometido = o que já foi contratado com
+    fornecedor (pedido aprovado em diante; o encerrado conta só o que foi entregue); realizado = entregas e medições
+    lançadas, pelo preço do pedido."""
+    cotando: int = 0
+    comprometido: int = 0
+    realizado: int = 0
+
+
+class EtapaOrcamento(_Andamento):
     etapa: str
     descricao: str
     contratado: int
@@ -372,10 +484,12 @@ class EtapaOrcamento(BaseModel):
     atual: int
 
 
-class TotaisOrcamento(BaseModel):
+class TotaisOrcamento(_Andamento):
     contratado: int
     aditivos: int
     atual: int
+    # gasto sem etapa (obra sem orçamento na hora do pedido); já está somado nos três campos acima
+    sem_etapa: _Andamento = Field(default_factory=_Andamento)
     n_itens: int
     n_etapas: int
 

@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from pydantic import ValidationError
 
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
-from canteiro_dominio.modelos import Movimento, Obra, Pedido, StatusPedido, TipoMovimento, TipoVersao
+from canteiro_dominio.modelos import Movimento, Obra, Pedido, Recebimento, StatusPedido, TipoMovimento, TipoVersao
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
     AvancarCorpo,
+    EtapaRef,
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
@@ -23,14 +24,17 @@ from ..esquemas import (
     ObraSaida,
     OrcamentoObra,
     PedidoCorpo,
+    PedidoEdicao,
     PedidoSaida,
     Previa,
     PreviaOrcamento,
     PreviaVersao,
+    RecebimentoCorpo,
+    RecebimentoSaida,
     ResumoObra,
 )
 from ..modelos import Papel
-from ..nucleo import Conflito, ErroNegocio, executar_e_registrar, listar_pagina, obra_do_tenant
+from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
 from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
@@ -177,6 +181,8 @@ async def movimentos(obra_id: str, insumo_id: str, limite: int = Query(50, ge=1,
         responses={200: {"description": "repetição da mesma chave: devolve o movimento já gravado"}})
 async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Response,
                            u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    # apropriação: a saída diz qual etapa consumiu (obrigatória quando a obra tem orçamento); entrada e ajuste não
+    await versoes.validar_etapa(arm, u.tenant_id, obra_id, [corpo.etapa], exigir=corpo.tipo == "saida")
     id_ = estoque.id_movimento(u.tenant_id, corpo.chave_idempotencia)
     # derivado do movimento: a repetição da chave devolve o mesmo `registro_id` sem precisar procurar o registro
     id_registro = estoque.id_derivado(u.tenant_id, "registro", id_)
@@ -188,7 +194,8 @@ async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Respon
         await obra_do_tenant(tx, u.tenant_id, obra_id)
         op = await estoque.preparar_movimento(
             tx, u, obra_id=obra_id, insumo_id=corpo.insumo_id, tipo=TipoMovimento(corpo.tipo),
-            quantidade=corpo.quantidade, id=id_, destino=corpo.destino, origem_doc=corpo.origem_doc)
+            quantidade=corpo.quantidade, id=id_, destino=corpo.destino, etapa=corpo.etapa or None,
+            origem_doc=corpo.origem_doc)
         mov, _ = executar_e_registrar(tx, u, op, registro_id=id_registro)
         return mov, True
 
@@ -234,6 +241,9 @@ async def listar_pedidos(obra_id: str, status_: list[StatusPedido] | None = Quer
 @r.post("/obras/{obra_id}/pedidos", response_model=PedidoSaida, status_code=status.HTTP_201_CREATED,
         tags=["pedidos"])
 async def criar_pedido(obra_id: str, corpo: PedidoCorpo, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    await versoes.validar_etapa(arm, u.tenant_id, obra_id, [x.etapa for x in corpo.linhas])
+
     async def tx_corpo(tx):
         op = await pedidos.preparar_criar_pedido(
             tx, u, obra_id, corpo, status=StatusPedido.APROVADO if corpo.aprovado else StatusPedido.EM_COTACAO)
@@ -252,3 +262,63 @@ async def avancar(pedido_id: str, corpo: AvancarCorpo, u: UsuarioAtual = Depends
         return {**pedido, "registro_id": entrada["id"]}
 
     return await arm.em_transacao(tx_corpo)
+
+
+@r.patch("/pedidos/{pedido_id}", response_model=PedidoSaida, tags=["pedidos"])
+async def editar_pedido(pedido_id: str, corpo: PedidoEdicao, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    mudancas = corpo.model_dump(exclude_unset=True)
+    if not mudancas:
+        raise ErroNegocio("Nada para mudar.")
+    if "observacao" in mudancas:
+        mudancas["observacao"] = (mudancas["observacao"] or "").strip()
+
+    async def tx_corpo(tx):
+        op = await pedidos.preparar_editar(tx, u, pedido_id, mudancas)
+        pedido, entrada = executar_e_registrar(tx, u, op)
+        return {**pedido, "registro_id": entrada["id"]}
+
+    return await arm.em_transacao(tx_corpo)
+
+
+@r.post("/pedidos/{pedido_id}/recebimentos", response_model=RecebimentoSaida, status_code=status.HTTP_201_CREATED,
+        tags=["pedidos"], responses={200: {"description": "repetição da mesma chave: devolve a entrega já gravada"}})
+async def receber(pedido_id: str, corpo: RecebimentoCorpo, response: Response, u: UsuarioAtual = Depends(admin),
+                  arm=Depends(_arm)):
+    id_ = pedidos.id_recebimento(u.tenant_id, pedido_id, corpo.chave_idempotencia)
+    id_registro = estoque.id_derivado(u.tenant_id, "registro", id_)
+
+    async def tx_corpo(tx):
+        ja = await tx.obter("recebimentos", u.tenant_id, id_)
+        if ja:
+            return ja, await tx.obter("pedidos", u.tenant_id, pedido_id), False
+        op = await pedidos.preparar_receber(
+            tx, u, pedido_id, [(x.indice, x.quantidade) for x in corpo.linhas], recebimento_id=id_,
+            nf_numero=corpo.nf_numero, nf_data=corpo.nf_data, nf_valor=corpo.nf_valor)
+        r_, _ = executar_e_registrar(tx, u, op, registro_id=id_registro)
+        return r_["recebimento"], r_["pedido"], True
+
+    try:
+        rec, pedido, criado = await arm.em_transacao(tx_corpo)
+    except ConflitoDeId:
+        rec, criado = await arm.obter("recebimentos", u.tenant_id, id_), False
+        pedido = await arm.obter("pedidos", u.tenant_id, pedido_id)
+    if not criado:
+        if [(x["indice"], x["quantidade"]) for x in rec["linhas"]] != [(x.indice, x.quantidade) for x in corpo.linhas]:
+            raise Conflito("Esta chave de idempotência já foi usada para outra entrega.")
+        response.status_code = status.HTTP_200_OK
+    return {"recebimento": rec, "pedido": pedido, "registro_id": id_registro}
+
+
+@r.get("/pedidos/{pedido_id}/recebimentos", response_model=list[Recebimento], tags=["pedidos"])
+async def recebimentos(pedido_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    p = await arm.obter("pedidos", u.tenant_id, pedido_id)
+    if not p:
+        raise NaoEncontrado("Pedido não encontrado.")
+    rs = await arm.consultar(Consulta("recebimentos", u.tenant_id, [Filtro("pedido_id", "==", pedido_id)]))
+    return sorted((x for x in rs if not x.get("desfeito")), key=lambda x: x["numero"])
+
+
+@r.get("/obras/{obra_id}/etapas", response_model=list[EtapaRef])
+async def etapas(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    return await versoes.etapas_da_obra(arm, u.tenant_id, obra_id)

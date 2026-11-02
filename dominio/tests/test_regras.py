@@ -156,7 +156,23 @@ def test_quantidade_recebida_tem_de_ser_positiva():
 
 def test_campos_novos_tem_padrao_compativel_com_documento_antigo():
     p = Pedido(tenant_id="t1", numero="PED-0001", obra_id="o1", insumo_id="i1", quantidade=1, fornecedor="f", valor=0)
-    assert (p.quantidade_recebida, p.nf) == (None, None)
+    # pedido de antes das linhas vira um pedido de uma linha, sem nada recebido
+    assert ([(x.insumo_id, x.quantidade, x.recebida) for x in p.linhas], p.recebimentos) == ([("i1", 1, 0)], 0)
     pr = Proposta(tenant_id="t1", obra_id="o1", tipo=TipoProposta.CRIAR_PEDIDO, titulo="x", dados={})
     assert (pr.ajustada, pr.dados_originais) == (False, None)
     assert mov(TipoMovimento.ENTRADA, 1).usuario_id is None
+
+
+def test_cnpj_confere_os_dois_digitos():
+    from canteiro_dominio.regras import cnpj_valido
+    assert cnpj_valido("11222333000181")
+    assert not cnpj_valido("11222333000182")
+    assert not cnpj_valido("11111111111111")       # passa na conta, mas é sequência
+    assert not cnpj_valido("1122233300018")
+
+
+def test_falta_na_linha_nao_fica_negativa():
+    from canteiro_dominio.regras import falta_na_linha
+    assert falta_na_linha({"quantidade": 25, "recebida": 18}) == 7
+    assert falta_na_linha({"quantidade": 25, "recebida": 30}) == 0
+    assert falta_na_linha({"quantidade": 25}) == 25

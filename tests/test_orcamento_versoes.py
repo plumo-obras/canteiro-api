@@ -132,8 +132,8 @@ async def test_contrato_aditivo_e_desfazer(vila):
     assert reg_a["texto"] == f"Importou o 1º aditivo de {o['nome']}: tapume e aço (+R$ 19.116,82)"
 
     orc = await orcamento(vila, o["id"])
-    assert orc["totais"] == {"contratado": 2107596, "aditivos": 1911682, "atual": 4019278, "n_itens": 8,
-                             "n_etapas": 2}
+    assert {k: orc["totais"][k] for k in ("contratado", "aditivos", "atual", "n_itens", "n_etapas")} == {
+        "contratado": 2107596, "aditivos": 1911682, "atual": 4019278, "n_itens": 8, "n_etapas": 2}
     assert [(e["etapa"], e["contratado"], e["aditivos"]) for e in orc["etapas"]] == [
         ("1", 380589, 1972028), ("2", 1727007, -60346)]
     adit = next(v for v in orc["versoes"] if v["tipo"] == "aditivo")

@@ -3,8 +3,16 @@ import uuid
 from dataclasses import asdict
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import Insumo, Movimento, Saldo, StatusPedido, TipoMovimento, agora
-from canteiro_dominio.regras import A_CAMINHO, EM_COTACAO, RegraViolada, conta_de_falta, efeito_no_saldo, validar_saida
+from canteiro_dominio.modelos import Insumo, Movimento, Pedido, Saldo, StatusPedido, TipoInsumo, TipoMovimento, agora
+from canteiro_dominio.regras import (
+    A_CAMINHO,
+    EM_COTACAO,
+    RegraViolada,
+    conta_de_falta,
+    efeito_no_saldo,
+    falta_na_linha,
+    validar_saida,
+)
 from canteiro_dominio.tipos import fmt_qtd
 
 from ..auth import UsuarioAtual
@@ -32,13 +40,17 @@ _INVERSO = {
 
 
 async def preparar_movimento(tx, u: UsuarioAtual, *, obra_id: str, insumo_id: str, tipo: TipoMovimento,
-                             quantidade: int, id: str, destino: str | None = None, origem_doc: str | None = None,
+                             quantidade: int, id: str, destino: str | None = None, etapa: str | None = None,
+                             origem_doc: str | None = None,
                              origem: str = "tela", desfaz: str | None = None, conferir_curva: bool = True,
                              insumo: dict | None = None) -> Operacao:
     insumo = insumo or await insumo_da_obra(tx, u.tenant_id, obra_id, insumo_id)
+    if insumo.get("tipo") == TipoInsumo.SERVICO.value:
+        raise RegraViolada(f"{insumo['nome']} é serviço: não tem estoque para entrar, sair ou ajustar.")
     saldo = await tx.obter("saldos", u.tenant_id, insumo_id)
     m = Movimento(id=id, tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=insumo_id, tipo=tipo,
-                  quantidade=quantidade, destino=destino, origem_doc=origem_doc, quem=u.nome, usuario_id=u.id,
+                  quantidade=quantidade, destino=destino, etapa=etapa, origem_doc=origem_doc, quem=u.nome,
+                  usuario_id=u.id,
                   origem=origem, desfaz=desfaz)
     if tipo == TipoMovimento.AJUSTE and quantidade == 0:
         raise RegraViolada("Ajuste de zero não muda nada.")
@@ -83,7 +95,7 @@ async def preparar_estorno(tx, u: UsuarioAtual, movimento_id: str, origem: str =
     else:
         novo_tipo, q = _INVERSO[tipo], m["quantidade"]
     return await preparar_movimento(tx, u, obra_id=m["obra_id"], insumo_id=m["insumo_id"], tipo=novo_tipo,
-                                    quantidade=q, id=id_estorno, destino=m.get("destino"),
+                                    quantidade=q, id=id_estorno, destino=m.get("destino"), etapa=m.get("etapa"),
                                     origem_doc=m.get("origem_doc"), origem=origem, desfaz=movimento_id,
                                     conferir_curva=False)
 
@@ -96,14 +108,34 @@ def mesmo_movimento(existente: dict, corpo) -> bool:
 PEDIDOS_ABERTOS = [s.value for s in A_CAMINHO | EM_COTACAO]
 
 
+def linhas_de(p: dict) -> list[dict]:
+    """As linhas do pedido; o gravado antes delas (um insumo só) ganha a linha montada pelo modelo."""
+    if "linhas" in p:
+        return p["linhas"]
+    return [x.model_dump(mode="json") for x in Pedido.model_validate(p).linhas]
+
+
+def valor_em_aberto(p: dict) -> int:
+    """O que o pedido ainda vai custar: em cotação, tudo; depois, só o que falta entregar (a parte entregue já virou
+    nota). Pelo preço do pedido, proporcional à falta de cada linha."""
+    if StatusPedido(p["status"]) in EM_COTACAO:
+        return p["valor"]
+    return sum((falta_na_linha(x) * x.get("total", 0) + x["quantidade"] // 2) // x["quantidade"]
+               for x in linhas_de(p) if x["quantidade"])
+
+
 def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) -> list[dict]:
     """Junta insumos, saldos e pedidos abertos já lidos. Separado da leitura para o resumo de obras reaproveitar a
-    mesma conta lendo o tenant inteiro de uma vez."""
+    mesma conta lendo o tenant inteiro de uma vez. A caminho é o que falta entregar em cada linha: a parte que já
+    chegou está no saldo, e contá-la de novo esconderia uma falta."""
     a_caminho: dict[str, int] = {}
     cotando: dict[str, int] = {}
     for p in pedidos:
-        alvo = cotando if StatusPedido(p["status"]) in EM_COTACAO else a_caminho
-        alvo[p["insumo_id"]] = alvo.get(p["insumo_id"], 0) + p["quantidade"]
+        cotacao = StatusPedido(p["status"]) in EM_COTACAO
+        alvo = cotando if cotacao else a_caminho
+        for x in linhas_de(p):
+            q = x["quantidade"] if cotacao else falta_na_linha(x)
+            alvo[x["insumo_id"]] = alvo.get(x["insumo_id"], 0) + q
     return [{"insumo": i, "conta": asdict(conta_de_falta(
         precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0), a_caminho=a_caminho.get(i["id"], 0),
         cotando=cotando.get(i["id"], 0), transferencia=0))} for i in insumos]
@@ -124,7 +156,7 @@ def _nome_chave(nome: str) -> str:
 
 
 async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade: str, curva: str,
-                       precisa_ate_o_fim: int, valor_unitario: int = 0) -> dict:
+                       precisa_ate_o_fim: int, valor_unitario: int = 0, tipo: str = "material") -> dict:
     """Cadastra um insumo na obra. O nome é a chave: "Areia  média" e "areia média" são o mesmo insumo.
 
     A checagem contra os que já existem (inclusive os importados, de ID aleatório) é uma consulta antes da transação;
@@ -136,7 +168,8 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
     ins = Insumo(id=id_derivado(u.tenant_id, "insumo", obra_id, _nome_chave(nome)), tenant_id=u.tenant_id,
-                 obra_id=obra_id, nome=nome, unidade=unidade.strip(), curva=curva, precisa_ate_o_fim=precisa_ate_o_fim,
+                 obra_id=obra_id, nome=nome, tipo=tipo, unidade=unidade.strip(), curva=curva,
+                 precisa_ate_o_fim=precisa_ate_o_fim,
                  valor_unitario=valor_unitario)
     d = doc(ins)
 
@@ -144,7 +177,8 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
         tx.criar("insumos", d)
         tx.criar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=0)))
         reg = registrar(tx, u, obra_id=obra_id, origem="tela",
-                        texto=f"Cadastrou o insumo {nome} ({ins.unidade}, curva {curva})")
+                        texto=f"Cadastrou o {'serviço' if tipo == 'servico' else 'insumo'} {nome} "
+                              f"({ins.unidade}, curva {curva})")
         evento(tx, u.tenant_id, "estoque.insumo_criado", obra_id, {"insumo_id": ins.id})
         return {**d, "registro_id": reg["id"]}
 

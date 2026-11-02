@@ -54,7 +54,7 @@ async def test_conferido_da_entrada_na_mesma_transacao(vila):
 async def test_desfazer_conferido_volta_status_e_estorna(vila):
     await vila.http.post(f"/pedidos/{vila.pedido['PED-0157']}/avancar", headers=vila.h, json={"para": "conferido"})
     entrada = (await vila.http.get("/registro", headers=vila.h)).json()[0]
-    assert entrada["desfazer"]["op"] == "voltar_pedido"
+    assert entrada["desfazer"]["op"] == "desfazer_recebimento"
     r = await vila.http.post(f"/registro/{entrada['id']}/desfazer", headers=vila.h)
     assert r.status_code == 200, r.text
     pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos?status=recebido", headers=vila.h)).json()
@@ -208,38 +208,48 @@ async def _movs_areia(vila):
                                 headers=vila.h)).json()
 
 
-async def test_conferir_com_menos_que_o_pedido_e_a_falta_volta(vila):
+async def test_conferir_com_menos_que_o_pedido_deixa_o_resto_a_caminho(vila):
     assert (await vila.conta("areia"))["falta"] == qtd(8)          # 60 − 12 − 40 a caminho
     r = await _conferir(vila, quantidade_recebida=qtd(36), nf=" 4471 ")
     assert r.status_code == 200, r.text
     ped = r.json()
-    assert (ped["status"], ped["quantidade"], ped["quantidade_recebida"], ped["nf"]) == (
-        "conferido", qtd(40), qtd(36), "4471")
-    # o pedido fecha: os 4 m³ que não vieram não ficam "a caminho", voltam como falta
+    linha = ped["linhas"][0]
+    assert (ped["status"], linha["quantidade"], linha["recebida"], ped["recebimentos"]) == (
+        "parcial", qtd(40), qtd(36), 1)
+    # entrega parcial: os 4 m³ que não vieram continuam a caminho (a falta não muda)
     areia = await vila.conta("areia")
-    assert (areia["saldo"], areia["a_caminho"], areia["falta"]) == (qtd(48), 0, qtd(12))
+    assert (areia["saldo"], areia["a_caminho"], areia["falta"]) == (qtd(48), qtd(4), qtd(8))
+    # e encerrar o resto (o fornecedor não manda) tira os 4 m³ do caminho: voltam como falta
+    r = await vila.http.post(f"/pedidos/{vila.pedido['PED-0157']}/avancar", headers=vila.h,
+                             json={"para": "conferido"})
+    assert (r.status_code, r.json()["status"]) == (200, "conferido"), r.text
+    areia = await vila.conta("areia")
+    assert (areia["a_caminho"], areia["falta"]) == (0, qtd(12))
+    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
+    assert reg["texto"] == "PED-0157 encerrado: o resto não vem (4 m³ de Areia média)"
+    assert (await vila.http.post(f"/registro/{reg['id']}/desfazer", headers=vila.h)).status_code == 200
+    assert (await vila.conta("areia"))["a_caminho"] == qtd(4)
     m = (await _movs_areia(vila))[0]
     assert (m["tipo"], m["quantidade"], m["origem_doc"]) == ("entrada", qtd(36), "PED-0157 · NF 4471")
     assert (m["quem"], m["usuario_id"]) == ("Admin da Vila Nova", vila.sessao["usuario"]["id"])
-    reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
-    assert ped["registro_id"] == reg["id"]
-    assert reg["texto"] == "PED-0157: recebido → conferido · chegaram 36 de 40 m³ (NF 4471)"
+    reg = next(x for x in (await vila.http.get("/registro", headers=vila.h)).json() if x["id"] == ped["registro_id"])
+    assert reg["texto"] == "PED-0157 · 1ª entrega (NF 4471): 36 de 40 m³ de Areia média · faltam 4 m³ de Areia média"
 
 
 async def test_conferir_com_mais_que_o_pedido(vila):
     ped = (await _conferir(vila, quantidade_recebida=qtd(45))).json()
-    assert (ped["quantidade_recebida"], ped["nf"]) == (qtd(45), None)
+    assert (ped["status"], ped["linhas"][0]["recebida"]) == ("conferido", qtd(45))
     assert (await vila.conta("areia"))["saldo"] == qtd(57)
     assert (await _movs_areia(vila))[0]["origem_doc"] == "PED-0157"
     reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
-    assert reg["texto"] == "PED-0157: recebido → conferido · chegaram 45 de 40 m³"
+    assert reg["texto"] == "PED-0157 · 1ª entrega: 45 de 40 m³ de Areia média · pedido completo"
 
 
 async def test_conferir_sem_divergencia_so_cita_a_nf(vila):
     ped = (await _conferir(vila, nf="4471")).json()
-    assert ped["quantidade_recebida"] == qtd(40)
+    assert ped["linhas"][0]["recebida"] == qtd(40)
     reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
-    assert reg["texto"] == "PED-0157: recebido → conferido (NF 4471)"
+    assert reg["texto"] == "PED-0157 · 1ª entrega (NF 4471): 40 m³ de Areia média · pedido completo"
 
 
 async def test_desfazer_conferencia_parcial_limpa_e_estorna_o_que_entrou(vila):
@@ -247,7 +257,7 @@ async def test_desfazer_conferencia_parcial_limpa_e_estorna_o_que_entrou(vila):
     r = await vila.http.post(f"/registro/{ped['registro_id']}/desfazer", headers=vila.h)
     assert r.status_code == 200, r.text
     volta = (await vila.http.get(f"/obras/{vila.obra}/pedidos?status=recebido", headers=vila.h)).json()
-    assert [(p["numero"], p["quantidade_recebida"], p["nf"]) for p in volta] == [("PED-0157", None, None)]
+    assert [(p["numero"], p["linhas"][0]["recebida"], p["recebimentos"]) for p in volta] == [("PED-0157", 0, 0)]
     areia = await vila.conta("areia")
     assert (areia["saldo"], areia["a_caminho"]) == (qtd(12), qtd(40))
     estorno = (await _movs_areia(vila))[0]
@@ -281,7 +291,7 @@ async def test_avancar_devolve_registro_id(vila):
     r = await vila.http.post(f"/pedidos/{vila.pedido['PED-0158']}/avancar", headers=vila.h, json={"para": "recebido"})
     reg = (await vila.http.get("/registro", headers=vila.h)).json()[0]
     assert r.json()["registro_id"] == reg["id"]
-    assert (r.json()["quantidade_recebida"], r.json()["nf"]) == (None, None)
+    assert r.json()["recebimentos"] == 0
 
 
 # --- pedido manual que já nasce aprovado ---
@@ -353,7 +363,7 @@ async def test_ajustar_pedido_antes_de_aprovar(vila):
     assert prop["dados_originais"] == p["dados"]
     assert reg["texto"].endswith("· ajustado: quantidade 34 → 30 sc; fornecedor Depósito São Jorge → Casa do Cimento")
     ped = (await vila.http.get(f"/obras/{vila.obra}/pedidos?status=aprovado", headers=vila.h)).json()[0]
-    assert (ped["quantidade"], ped["fornecedor"]) == (qtd(30), "Casa do Cimento")
+    assert (ped["linhas"][0]["quantidade"], ped["fornecedor"]) == (qtd(30), "Casa do Cimento")
     # o que foi gravado é o que a lista devolve depois
     salvo = (await vila.http.get("/propostas?status=aprovada", headers=vila.h)).json()[0]
     assert (salvo["ajustada"], salvo["dados"]["quantidade"], salvo["dados_originais"]["quantidade"]) == (
@@ -396,8 +406,9 @@ async def test_ajustar_conferencia_proposta(vila):
                                                                 "para": "conferido"}))
     r = await _aprovar(vila, p, {"quantidade_recebida": qtd(36), "nf": "4471"})
     assert r.status_code == 200, r.text
-    assert r.json()["registro"]["texto"] == ("PED-0157: recebido → conferido · chegaram 36 de 40 m³ (NF 4471) · "
-                                             "ajustado: quantidade recebida — → 36 m³; nf — → 4471")
+    assert r.json()["registro"]["texto"] == ("PED-0157 · 1ª entrega (NF 4471): 36 de 40 m³ de Areia média · faltam "
+                                             "4 m³ de Areia média · ajustado: quantidade recebida — → 36 m³; "
+                                             "nf — → 4471")
     assert r.json()["proposta"]["dados_originais"] == {"pedido_id": vila.pedido["PED-0157"], "para": "conferido",
                                                        "quantidade_recebida": None, "nf": None}
     assert (await vila.conta("areia"))["saldo"] == qtd(48)

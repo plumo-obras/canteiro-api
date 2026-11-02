@@ -65,13 +65,36 @@ TRANSICOES: dict[StatusPedido, set[StatusPedido]] = {
     StatusPedido.ENVIADO: {StatusPedido.EM_TRANSITO, StatusPedido.RECEBIDO, StatusPedido.CANCELADO},
     StatusPedido.EM_TRANSITO: {StatusPedido.RECEBIDO},
     StatusPedido.RECEBIDO: {StatusPedido.CONFERIDO},
+    # de parcial, "conferido" é encerrar: o fornecedor não manda o resto e ele sai do "a caminho"
+    StatusPedido.PARCIAL: {StatusPedido.CONFERIDO},
     StatusPedido.CONFERIDO: set(),
     StatusPedido.CANCELADO: set(),
 }
 
 # O que conta como "a caminho" e como "em cotação" na conta de falta.
-A_CAMINHO = {StatusPedido.APROVADO, StatusPedido.ENVIADO, StatusPedido.EM_TRANSITO, StatusPedido.RECEBIDO}
+A_CAMINHO = {StatusPedido.APROVADO, StatusPedido.ENVIADO, StatusPedido.EM_TRANSITO, StatusPedido.RECEBIDO,
+             StatusPedido.PARCIAL}
 EM_COTACAO = {StatusPedido.EM_COTACAO}
+
+
+# Onde uma entrega pode ser registrada. Aprovado entra: o caminhão chega antes de alguém marcar "enviado" na tela.
+PODE_RECEBER = A_CAMINHO
+
+
+def falta_na_linha(linha) -> int:
+    """O que ainda está a caminho numa linha do pedido. Entrega a mais não vira falta negativa."""
+    return max(0, linha["quantidade"] - linha.get("recebida", 0))
+
+
+def cnpj_valido(cnpj: str) -> bool:
+    """14 dígitos com os dois verificadores (módulo 11). Sequência repetida ("000…") passa na conta e é recusada."""
+    if len(cnpj) != 14 or not cnpj.isdigit() or len(set(cnpj)) == 1:
+        return False
+    def dv(base: str) -> str:
+        pesos = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2][-len(base):]
+        r = sum(int(c) * w for c, w in zip(base, pesos, strict=True)) % 11
+        return "0" if r < 2 else str(11 - r)
+    return cnpj[12] == dv(cnpj[:12]) and cnpj[13] == dv(cnpj[:13])
 
 
 def validar_transicao(de: StatusPedido, para: StatusPedido) -> None:
