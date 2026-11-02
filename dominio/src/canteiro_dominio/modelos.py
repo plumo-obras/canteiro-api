@@ -226,6 +226,36 @@ class Recebimento(Documento):
     desfeito: bool = False
 
 
+class Cronograma(Documento):
+    """Cronograma físico-financeiro da obra: % de cada etapa por mês (centésimos; cada etapa soma 10000 ou fica fora).
+    Um por obra, ID derivado da obra. Guarda também a posição das medições (quantas, até que mês e o acumulado de cada
+    etapa), para a medição nova se conferir lendo um documento só na transação."""
+    obra_id: str
+    inicio: str                            # "AAAA-MM"
+    meses: int
+    etapas: list[dict[str, Any]] = Field(default_factory=list)   # [{etapa, percentuais: [int]}]
+    versao: int = 1                        # sobe a cada edição: o desfazer de uma edição velha é recusado
+    medicoes: int = 0
+    ultima_medicao: str | None = None      # "AAAA-MM"
+    acumulado: dict[str, int] = Field(default_factory=dict)      # etapa → % executado acumulado
+
+
+class Medicao(Documento):
+    """Boletim de medição mensal por etapa. Só a última pode ser desfeita (as seguintes partem do acumulado dela)."""
+    obra_id: str
+    numero: int
+    mes: str                               # "AAAA-MM"
+    etapas: list[dict[str, Any]]           # [{etapa, pct_acumulado, pct_periodo, valor_periodo}]
+    valor: Centavos = 0
+    pct_obra_acumulado: int = 0            # centésimos de %, ponderado pelo orçado atual de cada etapa
+    observacao: str = ""
+    anterior: dict[str, int] = Field(default_factory=dict)       # o acumulado antes desta: é o que o desfazer volta
+    mes_anterior: str | None = None
+    quem: str = ""
+    usuario_id: str | None = None
+    desfeito: bool = False
+
+
 class StatusProposta(StrEnum):
     PENDENTE = "pendente"
     APROVADA = "aprovada"

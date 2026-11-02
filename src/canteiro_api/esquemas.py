@@ -10,6 +10,7 @@ from canteiro_dominio.modelos import (
     Fornecedor,
     Insumo,
     ItemOrcamento,
+    Medicao,
     Movimento,
     Obra,
     Pedido,
@@ -704,3 +705,75 @@ class ListaEsperaCorpo(Entrada):
 class ListaEsperaResposta(BaseModel):
     ok: bool = True
     ja_estava: bool
+
+
+# --- cronograma e medição ---
+
+_MES = r"^\d{4}-(0[1-9]|1[0-2])$"
+
+
+class EtapaCronogramaCorpo(Entrada):
+    etapa: str = Field(min_length=1, max_length=60)
+    percentuais: list[int] = Field(max_length=60, description="centésimos de % por mês; soma 10000 ou tudo zero")
+
+
+class CronogramaCorpo(Entrada):
+    inicio: str = Field(pattern=_MES)
+    meses: int = Field(ge=1, le=60)
+    etapas: list[EtapaCronogramaCorpo] = Field(max_length=200)
+
+
+class EtapaMedicaoCorpo(Entrada):
+    etapa: str = Field(min_length=1, max_length=60)
+    pct_acumulado: int = Field(ge=0, le=10000)
+
+
+class MedicaoCorpo(Entrada):
+    mes: str = Field(pattern=_MES)
+    etapas: list[EtapaMedicaoCorpo] = Field(max_length=200)
+    observacao: str = Field("", max_length=500)
+    chave_idempotencia: str = Field(min_length=8, max_length=200)
+
+
+class EtapaCronograma(BaseModel):
+    etapa: str
+    descricao: str
+    atual: int
+    percentuais: list[int]
+    medido_acumulado: int = 0
+
+
+class MesCronograma(BaseModel):
+    mes: str
+    previsto: int
+    previsto_acumulado: int
+    pct_previsto_acumulado: int
+    medido: int | None = None
+    medido_acumulado: int | None = None
+    pct_medido_acumulado: int | None = None
+
+
+class Prazo(BaseModel):
+    termino_contratual: str | None = None
+    termino_projetado: str | None = None
+    atraso_meses: int | None = None
+    atraso_decimos: int | None = Field(None, description="atraso em décimos de mês (1,4 mês = 14)")
+    pct_previsto_na_medicao: int | None = None
+    pct_medido: int | None = None
+    mes_referencia: str | None = None
+
+
+class CronogramaObra(BaseModel):
+    inicio: str | None = None
+    meses: int = 0
+    etapas: list[EtapaCronograma] = Field(default_factory=list)
+    mensal: list[MesCronograma] = Field(default_factory=list)
+    medicoes: list[Medicao] = Field(default_factory=list)
+    prazo: Prazo = Field(default_factory=Prazo)
+    registro_id: str | None = None
+
+
+class MedicaoSaida(BaseModel):
+    medicao: Medicao
+    cronograma: CronogramaObra
+    registro_id: str | None = None

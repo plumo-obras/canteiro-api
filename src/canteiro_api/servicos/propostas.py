@@ -26,7 +26,7 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
-from . import fornecedores, obras, pedidos, versoes
+from . import cronograma, fornecedores, obras, pedidos, versoes
 from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
 from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
 
@@ -224,6 +224,8 @@ _DESFAZER = {
     "desfazer_recebimento": pedidos.preparar_desfazer_recebimento,
     "editar_pedido": pedidos.preparar_desfazer_edicao,
     "editar_fornecedor": fornecedores.preparar_desfazer_edicao,
+    "restaurar_cronograma": cronograma.preparar_restaurar,
+    "desfazer_medicao": cronograma.preparar_desfazer_medicao,
     "cancelar_pedido": preparar_cancelar_criado,
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,

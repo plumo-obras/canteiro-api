@@ -11,12 +11,16 @@ from canteiro_dominio.modelos import Movimento, Obra, Pedido, Recebimento, Statu
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
     AvancarCorpo,
+    CronogramaCorpo,
+    CronogramaObra,
     EtapaRef,
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
     LeituraPlanilha,
     Mapeamento,
+    MedicaoCorpo,
+    MedicaoSaida,
     MovimentoCorpo,
     MovimentoSaida,
     ObraCorpo,
@@ -35,7 +39,7 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import cronograma, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -322,3 +326,30 @@ async def recebimentos(pedido_id: str, u: UsuarioAtual = Depends(usuario_atual),
 async def etapas(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     return await versoes.etapas_da_obra(arm, u.tenant_id, obra_id)
+
+
+# --- cronograma e medição ---
+
+@r.get("/obras/{obra_id}/cronograma", response_model=CronogramaObra, tags=["cronograma"])
+async def ver_cronograma(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await cronograma.cronograma_da_obra(arm, u.tenant_id, obra_id)
+
+
+@r.put("/obras/{obra_id}/cronograma", response_model=CronogramaObra, tags=["cronograma"])
+async def salvar_cronograma(obra_id: str, corpo: CronogramaCorpo, u: UsuarioAtual = Depends(admin),
+                            arm=Depends(_arm)):
+    return await cronograma.salvar(arm, u, obra_id, corpo)
+
+
+@r.post("/obras/{obra_id}/medicoes", response_model=MedicaoSaida, status_code=status.HTTP_201_CREATED,
+        tags=["cronograma"], responses={200: {"description": "repetição da mesma chave: devolve a medição já gravada"}})
+async def medir(obra_id: str, corpo: MedicaoCorpo, response: Response, u: UsuarioAtual = Depends(admin),
+                arm=Depends(_arm)):
+    try:
+        med, criada, registro_id = await cronograma.medir(arm, u, obra_id, corpo)
+    except ConflitoDeId:
+        med, criada, registro_id = await cronograma.medir(arm, u, obra_id, corpo)
+    if not criada:
+        response.status_code = status.HTTP_200_OK
+    return {"medicao": med, "cronograma": await cronograma.cronograma_da_obra(arm, u.tenant_id, obra_id),
+            "registro_id": registro_id}

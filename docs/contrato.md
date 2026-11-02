@@ -249,6 +249,36 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 - `PATCH /fornecedores/{id}` (admin) com os mesmos campos, parciais → `Fornecedor + registro_id`, desfazer
   `editar_fornecedor`.
 
+## Cronograma físico-financeiro e medição
+
+Percentual em centésimos de ponto (12,5% = 1250; 100% = 10000), mês `"AAAA-MM"`. O % da obra é ponderado pelo orçado
+atual de cada etapa (contrato + aditivos vigentes).
+
+- `GET /obras/{obra_id}/cronograma` → `{inicio, meses, etapas, mensal, medicoes, prazo}`. Sem cronograma: `inicio`
+  `null`, `meses` 0, as etapas do orçamento com `percentuais: []` e `prazo.termino_contratual` pelo `inicio` +
+  `prazo_meses` da obra (ou `null`).
+  - `etapas`: `[{etapa, descricao, atual, percentuais, medido_acumulado}]`, todas as do orçamento vigente.
+  - `mensal`: `[{mes, previsto, previsto_acumulado, pct_previsto_acumulado, medido, medido_acumulado,
+    pct_medido_acumulado}]`, do início ao fim do cronograma (ou até a última medição, se for depois). `previsto` = Σ
+    orçado atual × % da etapa no mês. Os campos de medido são `null` depois da última medição.
+  - `prazo`: `{termino_contratual, termino_projetado, atraso_meses, pct_previsto_na_medicao, pct_medido,
+    mes_referencia}`. Referência = mês da última medição. Atraso = referência − 1º mês em que o previsto acumulado
+    alcança o % medido, interpolado dentro do mês: `atraso_decimos` (1,4 mês = 14; negativo = adiantada) e `atraso_meses`
+    arredondado (meio mês para cima). Projetado = contratual + `atraso_meses`. Sem medição, só o contratual.
+- `PUT /obras/{obra_id}/cronograma` (admin) `{inicio, meses (1–60), etapas: [{etapa, percentuais}]}` → o mesmo do GET
+  + `registro_id`. Substitui o cronograma inteiro. Cada etapa soma exatamente 10000 ou é toda zero (fica fora);
+  `percentuais` com `meses` posições; etapa fora do orçamento, repetida ou obra sem orçamento → 422. Com medição já
+  lançada, o novo cronograma tem de cobrir o mês dela (→ 422). Registro "Montou/Refez o cronograma: N etapas, M meses a
+  partir de AAAA-MM (era K)", desfazer `restaurar_cronograma` (409 se editado de novo depois). Aditivo de prazo =
+  `PATCH /obras/{id}` com `prazo_meses` + um PUT com mais meses.
+- `POST /obras/{obra_id}/medicoes` (admin) `{mes, etapas: [{etapa, pct_acumulado}], observacao?, chave_idempotencia}` →
+  `{medicao, cronograma, registro_id}` (201; a mesma chave devolve a mesma medição com 200; com outro conteúdo → 409).
+  Exige cronograma (→ 422). `mes` depois da última medição e entre o início e 12 meses após o término; acumulado entre
+  0 e 10000 e nunca menor que o anterior (corrigir = desfazer). Etapa que não vem repete o acumulado anterior.
+  `Medicao` = `{id, numero, mes, etapas: [{etapa, pct_acumulado, pct_periodo, valor_periodo}], valor,
+  pct_obra_acumulado, observacao, quem, criado_em}`; `valor_periodo` = orçado atual × % do período. Registro "3ª
+  medição (2026-03): R$ X no mês · Y% da obra executada"; desfazer `desfazer_medicao` só da última.
+
 ## Propostas, aprovação e registro
 
 - `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados}` → `Proposta` (pendente). Só valida e
