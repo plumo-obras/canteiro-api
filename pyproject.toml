@@ -21,7 +21,7 @@ dependencies = [
 dev = ["pytest>=8", "pytest-asyncio>=1.2", "httpx>=0.28", "ruff>=0.14"]
 
 [tool.uv.sources]
-canteiro-dominio = { path = "../../packages/dominio", editable = true }
+canteiro-dominio = { path = "dominio", editable = true }
 
 [build-system]
 requires = ["hatchling"]

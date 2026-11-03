@@ -1,0 +1,23 @@
+# O produto inteiro em contêineres, com os três repositórios clonados lado a lado:
+#   canteiro-api/  canteiro-agente/  canteiro-web/
+# Subir (de dentro de canteiro-api):  docker compose -f docker-compose.yml -f docker-compose.completo.yml up -d --build
+# Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY) vêm do .env, nunca daqui.
+# Sem ANTHROPIC_API_KEY o agente sobe no modelo de roteiro (MODELO_ROTEIRO=1, 0 tokens).
+services:
+  agente:
+    build: ../canteiro-agente
+    env_file: [{ path: .env, required: false }]
+    environment:
+      API_URL: http://api:8000
+      MODELO_ROTEIRO: ${MODELO_ROTEIRO:-1}
+    ports: ["8100:8100"]
+    depends_on: [api]
+
+  web:
+    build: ../canteiro-web
+    env_file: [{ path: .env, required: false }]
+    environment:
+      API_URL: http://api:8000
+      AGENTE_URL: http://agente:8100
+    ports: ["3000:3000"]
+    depends_on: [api, agente]

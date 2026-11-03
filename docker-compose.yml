@@ -1,0 +1,29 @@
+# Ambiente local da API: MongoDB em replica set de 1 nó (transações exigem replica set) + a API em contêiner.
+#   só o banco:   docker compose up -d mongo         (e rode a API com uvicorn, ver README)
+#   banco + API:  docker compose up -d --build       (lê o .env; JWT_SEGREDO, CHAVE_CIFRA etc. ficam lá, nunca aqui)
+# Para subir o produto inteiro (web + agente), clone os três repositórios lado a lado e use docker-compose.completo.yml.
+services:
+  mongo:
+    image: mongo:8
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      # inicia o replica set na 1ª subida e depois só confirma que está de pé
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 5s
+
+  api:
+    build: .
+    env_file: [{ path: .env, required: false }]
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0&directConnection=true
+    ports: ["8000:8000"]
+    depends_on:
+      mongo: { condition: service_healthy }
+
+volumes:
+  mongo-data:

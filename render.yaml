@@ -1,0 +1,30 @@
+# Render (plano gratuito): a API central. O agente tem o próprio render.yaml no canteiro-agente; a web fica na Vercel.
+# O serviço gratuito dorme após 15 min sem uso e leva ~30–60 s para acordar.
+# Segredos: sync:false = preencha no painel do Render. Nunca coloque valor aqui (o repositório é público).
+services:
+  - type: web
+    name: canteiro-api
+    runtime: docker
+    plan: free
+    region: virginia
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /saude
+    autoDeployTrigger: checksPass   # só publica depois que o CI do GitHub (.github/workflows/ci.yml) passar
+    envVars:
+      - key: MONGO_URL            # string do Atlas M0 (mongodb+srv://…)
+        sync: false
+      - key: MONGO_DB
+        value: canteiro
+      - key: JWT_SEGREDO
+        generateValue: true
+      - key: TOKEN_SERVICO_AGENTE # o MESMO valor no canteiro-agente
+        sync: false
+      - key: CHAVE_CIFRA          # 32 bytes em base64
+        sync: false
+      - key: PROXY_SEGREDO        # o MESMO valor na Vercel (projeto da web)
+        sync: false
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: CORS_ORIGENS         # quem chama POST /lista-espera do navegador (a landing da Plumo). Nunca "*".
+        value: https://plumo-site.vercel.app

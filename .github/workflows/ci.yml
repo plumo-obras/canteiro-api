@@ -1,0 +1,61 @@
+# CI da API. O Render só publica quando estes checks passam (render.yaml: autoDeployTrigger: checksPass).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dominio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: testes do domínio
+        working-directory: dominio
+        run: |
+          uv venv -p 3.14 .venv
+          uv pip install -p .venv -e ".[dev]"
+          .venv/bin/pytest -q
+
+  api:
+    # ubuntu-latest já roda kernel 6.19+, que esta versão do mongod recusa ("Linux kernel versions 6.19 and newer has a
+    # known incompatibility"). Voltar para ubuntu-latest quando a imagem do Mongo corrigir.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: MongoDB em replica set (transações)
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 mongod --replSet rs0 --bind_ip_all
+          sleep 5
+          if [ "$(docker inspect -f '{{.State.Running}}' mongo)" != "true" ]; then
+            echo "::error::o mongod parou ao subir; log abaixo"; docker logs mongo 2>&1 | tail -40; exit 1
+          fi
+          for i in $(seq 1 30); do docker exec mongo mongosh --quiet --eval "db.runCommand({ping:1}).ok" && break; sleep 2; done
+          docker exec mongo mongosh --quiet --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+          for i in $(seq 1 30); do docker exec mongo mongosh --quiet --eval "rs.status().myState" | grep -q 1 && break; sleep 2; done
+      - name: testes da API (memória + Mongo)
+        env:
+          EXIGIR_MONGO: "1"
+          MONGO_URL: mongodb://localhost:27017/?replicaSet=rs0&directConnection=true
+        run: |
+          uv venv -p 3.14 .venv
+          uv pip install -p .venv -e ./dominio -e ".[dev]"
+          .venv/bin/ruff check src tests
+          .venv/bin/pytest -q
+
+  imagem:
+    # Garante que o Dockerfile que o Render usa continua compilando.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t canteiro-api .

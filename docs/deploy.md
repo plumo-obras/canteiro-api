@@ -2,10 +2,13 @@
 
 ## O que está no ar (criado em 30/10/2026)
 
+> Até 02/11/2026 tudo saía do monorepo `Rizzi26/obras-agentic` (arquivado). Os serviços abaixo ainda apontam para ele
+> até serem religados aos repositórios novos: Render → Settings → Repository; Vercel → Settings → Git.
+
 | Recurso | Onde | Endereço / identificação |
 |---|---|---|
-| Web | Vercel, projeto `canteiro-web` (time `rizzi26s-projects`, raiz `apps/web`) | https://canteiro-web-nu.vercel.app (`canteiro-web.vercel.app` já era de outra conta) |
-| Landing (Plumo, lista de espera) | Vercel, projeto `plumo-site` (raiz `apps/site`, publica só `public/`, estático, sem build) | https://plumo-site.vercel.app (a 1ª versão saiu como Aprumo em `aprumo-site-nine.vercel.app`, que segue apontando para o mesmo projeto; `aprumo-site.vercel.app` é de outra conta) |
+| Web | Vercel, projeto `canteiro-web` (time `rizzi26s-projects`, repo `canteiro-web`, raiz do repo) | https://canteiro-web-nu.vercel.app (`canteiro-web.vercel.app` já era de outra conta) |
+| Landing (Plumo, lista de espera) | Vercel, projeto `plumo-site` (repo `canteiro-web`, raiz `site`, publica só `public/`, estático, sem build) | https://plumo-site.vercel.app (a 1ª versão saiu como Aprumo em `aprumo-site-nine.vercel.app`, que segue apontando para o mesmo projeto; `aprumo-site.vercel.app` é de outra conta) |
 | API | Render `canteiro-api` (`srv-dbig4pcs728c73f606m0`), Virginia, free | https://canteiro-api.onrender.com |
 | Agente | Render `canteiro-agente` (`srv-dbig4rvlk1mc73emi7t0`), Virginia, free, `MODELO_ROTEIRO=1` | https://canteiro-agente.onrender.com |
 | Banco | Atlas, projeto `canteiro`, cluster M0 `canteiro` (AWS us-east-1), usuário `canteiro-api` com `readWrite@canteiro` | `canteiro.lyhqjtc.mongodb.net` |
@@ -15,17 +18,17 @@
   rotacionam). A proteção fica no usuário restrito, na senha de 32 caracteres e no TLS.
 - **Os serviços do Render foram criados pela API** (a CLI do Render só valida Blueprints), com a mesma configuração do
   `render.yaml`. Mudou o `render.yaml`? Atualize o serviço pelo painel ou pela API (ou adote o arquivo como Blueprint).
-- **CI/CD:** o GitHub Actions (`.github/workflows/ci.yml`) roda a cada push e PR. O Render publica a API e o agente só
-  quando os checks passam (`autoDeployTrigger: checksPass`). A Vercel publica a web a cada push na `main`.
+- **CI/CD:** cada repositório tem o seu GitHub Actions (`.github/workflows/ci.yml`), a cada push e PR. O Render publica
+  a API e o agente só quando os checks do repo deles passam (`autoDeployTrigger: checksPass`). A Vercel publica a web a cada push na `main`.
 
 
 | Peça | Onde | Plano |
 |---|---|---|
-| Web (Next.js, `apps/web`) | Vercel, **2º projeto** (o 1º é o protótipo na raiz) | Hobby (uso não comercial; para cobrar clientes, Pro) |
-| API (`apps/api`) e agente (`apps/agente`) | Render, pelo `render.yaml` da raiz | Free (dorme após 15 min; acorda em ~30–60 s) |
+| Web (Next.js, repo `canteiro-web`) | Vercel | Hobby (uso não comercial; para cobrar clientes, Pro) |
+| API (`canteiro-api`) e agente (`canteiro-agente`) | Render, pelo `render.yaml` de cada repo | Free (dorme após 15 min; acorda em ~30–60 s) |
 | Banco | MongoDB Atlas | M0 (gratuito, 512 MB, replica set → transações funcionam) |
 
-O repositório é **público**: todo segredo vai só no painel de cada serviço.
+Os repositórios são **públicos**: todo segredo vai só no painel de cada serviço.
 
 ## 1. Gere os segredos (no seu terminal, não salve em arquivo do repo)
 
@@ -45,7 +48,7 @@ python3 -c "import base64, os; print('CHAVE_CIFRA', base64.b64encode(os.urandom(
 
 ## 3. Render (API e agente)
 
-1. New → **Blueprint** → escolha o repositório `obras-agentic`. O Render lê o `render.yaml` e cria `canteiro-api` e `canteiro-agente`.
+1. New → **Blueprint** → o repositório `canteiro-api`, e de novo com o `canteiro-agente`. Cada um tem o seu `render.yaml`.
 2. Preencha as variáveis marcadas como `sync: false`:
    - `canteiro-api`: `MONGO_URL` (Atlas), `TOKEN_SERVICO_AGENTE`, `CHAVE_CIFRA`, `PROXY_SEGREDO`, `SEED_ADMIN_EMAIL`.
      (`JWT_SEGREDO` o Render gera sozinho.)
@@ -58,14 +61,14 @@ python3 -c "import base64, os; print('CHAVE_CIFRA', base64.b64encode(os.urandom(
 O plano gratuito do Render não tem terminal, então rode o seed da sua máquina, com as variáveis só no terminal:
 
 ```bash
-cd apps/api
+cd canteiro-api
 MONGO_URL='mongodb+srv://…' MONGO_DB=canteiro SEED_ADMIN_EMAIL='voce@…' SEED_ADMIN_SENHA='…(12+ caracteres)' \
   .venv/bin/python -m canteiro_api.seed
 ```
 
 ## 5. Vercel (web)
 
-1. Add New → Project → o mesmo repositório → **Root Directory: `apps/web`** (framework Next.js, detectado sozinho).
+1. Add New → Project → o repositório `canteiro-web`, raiz do repo (framework Next.js, detectado sozinho).
 2. Variáveis de ambiente: `API_URL=https://canteiro-api.onrender.com`, `AGENTE_URL=https://canteiro-agente.onrender.com`,
    `PROXY_SEGREDO` (o mesmo da API), e `CANTEIRO_DEMO` **vazio** (com `1`, a web usa os dados de demonstração e ignora a API).
 3. A conversa em streaming passa por uma função do Next com `maxDuration = 300` s (limite do plano Hobby com Fluid Compute).

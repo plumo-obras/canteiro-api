@@ -1,7 +1,7 @@
 # Contrato do MVP-0 (API central × agente × web)
 
 Fonte da verdade entre as três frentes. Mudou aqui, mudou para todos: quem altera avisa no relatório.
-Modelos de documento: `packages/dominio/src/canteiro_dominio/modelos.py`. Regras: `regras.py`.
+Modelos de documento: `dominio/src/canteiro_dominio/modelos.py`. Regras: `regras.py`.
 Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON; a formatação ("2.760", "R$ 472,00")
 é do front e das mensagens do agente.
 
@@ -21,7 +21,7 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 
 ## Lista de espera (landing pública, sem login)
 
-Única rota que o navegador chama direto (a landing da Plumo, `apps/site`, em outro domínio). Não exige token.
+Única rota que o navegador chama direto (a landing da Plumo, `site/` no canteiro-web, em outro domínio). Não exige token.
 
 - `POST /lista-espera` `{email, nome?, empresa?, papel?, obras_ativas?, origem?, site?}` → `{ok: true, ja_estava}`.
   `email` obrigatório (até 254, conferido na forma); `nome`/`empresa` até 120; `origem` até 80 (ex. utm);

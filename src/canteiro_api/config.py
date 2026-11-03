@@ -3,11 +3,11 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_RAIZ = Path(__file__).resolve().parents[4]
+_RAIZ = Path(__file__).resolve().parents[2]  # raiz do repositório (src/canteiro_api/config.py)
 
 
 class Config(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(_RAIZ / ".env", _RAIZ / "apps/api/.env"), extra="ignore")
+    model_config = SettingsConfigDict(env_file=_RAIZ / ".env", extra="ignore")
 
     armazenamento: str = "mongo"                 # mongo | memoria
     mongo_url: str = "mongodb://localhost:27017/?replicaSet=rs0&directConnection=true"
