@@ -102,26 +102,47 @@ def _ativo(t: dict | None, cfg: Config) -> int:
     return t["contagem"]
 
 
-async def _bloqueado(arm, cfg: Config, email: str, ip: str) -> bool:
+def _tentativa(cfg: Config, id_: str, inicio, contagem: int) -> dict:
+    # expira_em = fim da janela: depois dela o contador já não conta (`_ativo`), então o TTL pode apagar o documento
+    return {"id": id_, "tenant_id": TENANT_SISTEMA, "inicio": inicio, "contagem": contagem,
+            "expira_em": inicio + timedelta(minutes=cfg.janela_tentativas_minutos)}
+
+
+async def _reservar_tentativa(arm, cfg: Config, email: str, ip: str) -> bool:
+    """Conta a tentativa ANTES de conferir a senha, numa transação só, e diz se ela cabe nos limites.
+
+    Ler os contadores, rodar o argon2 e só então anotar deixava N tentativas paralelas passarem pela mesma leitura:
+    o limite virava "5 por rodada" em vez de 5. Reservando antes, a transação serializa as tentativas (conflito de
+    escrita no Mongo e no Firestore) e a sexta já vê a quinta.
+    """
+    ids = _ids_tentativa(email, ip)
     limites = {"email": cfg.tentativas_por_email, "ip": cfg.tentativas_por_ip}
-    for tipo, id_ in _ids_tentativa(email, ip):
-        if _ativo(await arm.obter("tentativas", TENANT_SISTEMA, id_), cfg) >= limites[tipo]:
-            return True
-    return False
+
+    async def corpo(tx):
+        atuais = [await tx.obter("tentativas", TENANT_SISTEMA, id_) for _, id_ in ids]
+        contagens = [_ativo(t, cfg) for t in atuais]
+        cabe = all(n < limites[tipo] for (tipo, _), n in zip(ids, contagens, strict=True))
+        for (_, id_), t, n in zip(ids, atuais, contagens, strict=True):
+            # grava também quando recusa: a transação escreve o que leu para decidir (mesmo comportamento no Firestore)
+            tx.salvar("tentativas", _tentativa(cfg, id_, t["inicio"] if n else agora(), n + 1 if cabe else n))
+        return cabe
+
+    return await arm.em_transacao(corpo)
 
 
-async def _anotar_tentativa(arm, cfg: Config, email: str, ip: str, sucesso: bool) -> None:
+async def _devolver_tentativa(arm, cfg: Config, email: str, ip: str) -> None:
+    """Login certo não conta como tentativa: zera o contador do e-mail e devolve a vaga reservada no do IP (senão
+    um escritório inteiro atrás do mesmo IP gastaria o limite só entrando)."""
     ids = _ids_tentativa(email, ip)
 
     async def corpo(tx):
         atuais = [await tx.obter("tentativas", TENANT_SISTEMA, id_) for _, id_ in ids]
         for (tipo, id_), t in zip(ids, atuais, strict=True):
-            if sucesso and tipo == "email":
-                tx.salvar("tentativas", {"id": id_, "tenant_id": TENANT_SISTEMA, "inicio": agora(), "contagem": 0})
-            elif not sucesso:
-                n = _ativo(t, cfg)
-                inicio = t["inicio"] if n else agora()
-                tx.salvar("tentativas", {"id": id_, "tenant_id": TENANT_SISTEMA, "inicio": inicio, "contagem": n + 1})
+            n = _ativo(t, cfg)
+            if tipo == "email":
+                tx.salvar("tentativas", _tentativa(cfg, id_, agora(), 0))
+            else:
+                tx.salvar("tentativas", _tentativa(cfg, id_, t["inicio"] if n else agora(), max(n - 1, 0)))
 
     await arm.em_transacao(corpo)
 
@@ -136,8 +157,7 @@ async def consumir_tentativa(arm, cfg: Config, chave: str, limite: int) -> bool:
         n = _ativo(t, cfg)
         cabe = n < limite
         # grava também quando recusa: a transação escreve o que leu para decidir (mesmo comportamento no Firestore)
-        tx.salvar("tentativas", {"id": id_, "tenant_id": TENANT_SISTEMA, "inicio": t["inicio"] if n else agora(),
-                                 "contagem": n + 1 if cabe else n})
+        tx.salvar("tentativas", _tentativa(cfg, id_, t["inicio"] if n else agora(), n + 1 if cabe else n))
         return cabe
 
     return await arm.em_transacao(corpo)
@@ -150,7 +170,7 @@ def _negado(msg: str = "E-mail ou senha incorretos.") -> HTTPException:
 
 
 async def entrar(arm, cfg: Config, email: str, senha: str, ip: str) -> dict:
-    if await _bloqueado(arm, cfg, email, ip):
+    if not await _reservar_tentativa(arm, cfg, email, ip):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             "Muitas tentativas de entrar. Espere alguns minutos e tente de novo.")
     indice = await arm.obter("emails", TENANT_SISTEMA, id_de_email(email))
@@ -158,9 +178,9 @@ async def entrar(arm, cfg: Config, email: str, senha: str, ip: str) -> dict:
     # argon2 é lento de propósito: fora do laço de eventos para não travar as outras requisições
     ok = await asyncio.to_thread(senha_confere, u["senha_hash"] if u else _HASH_FANTASMA, senha)
     ok = ok and bool(u) and u["ativo"]
-    await _anotar_tentativa(arm, cfg, email, ip, ok)
     if not ok:
-        raise _negado()
+        raise _negado()     # a tentativa já foi contada na reserva
+    await _devolver_tentativa(arm, cfg, email, ip)
     token, renovacao = _nova_renovacao(cfg, u["id"], u["tenant_id"])
     await arm.criar("renovacoes", renovacao)
     return _resposta(cfg, u, token)

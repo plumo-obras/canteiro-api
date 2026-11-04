@@ -32,6 +32,10 @@ class Conflito(ErroNegocio):
     codigo = 409
 
 
+class GrandeDemais(ErroNegocio):
+    codigo = 413
+
+
 @dataclass
 class Operacao:
     """Resultado da fase de leitura. `aplicar()` grava e devolve o objeto criado ou alterado."""

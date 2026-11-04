@@ -13,10 +13,13 @@ from canteiro_dominio.tipos import novo_id
 from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
 from ..esquemas import MensagensCorpo, SessaoAlteracao, SessaoCorpo
-from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, listar_pagina, obra_do_tenant
+from ..nucleo import Conflito, ErroNegocio, GrandeDemais, NaoEncontrado, listar_pagina, obra_do_tenant
 
 # O Firestore limita o documento a 1 MiB; sobra margem para os outros campos.
 MAX_BYTES_MENSAGEM = 800_000
+# O lote inteiro é gravado numa transação, e o Firestore recusa commit acima de 10 MiB (50 mensagens de 800 KB dariam
+# 40 MB). 9 MiB de conteúdo deixa folga para os outros campos, os IDs e a atualização da sessão no mesmo commit.
+MAX_BYTES_LOTE = 9 * 1024 * 1024
 
 
 def id_mensagem(sessao_id: str, seq: int) -> str:
@@ -92,9 +95,15 @@ async def acrescentar(arm, u: UsuarioAtual, sessao_id: str, corpo: MensagensCorp
     """Só acrescenta. `seq_inicial` tem de ser o `total_mensagens` atual; reenvio do mesmo lote devolve 200."""
     momento = agora()
     novas = []
+    total_bytes = 0
     for i, m in enumerate(corpo.mensagens):
-        if len(json.dumps(m.conteudo, ensure_ascii=False).encode()) > MAX_BYTES_MENSAGEM:
+        tamanho = len(json.dumps(m.conteudo, ensure_ascii=False).encode())
+        if tamanho > MAX_BYTES_MENSAGEM:
             raise ErroNegocio(f"Mensagem {corpo.seq_inicial + i} grande demais para guardar.")
+        total_bytes += tamanho
+        if total_bytes > MAX_BYTES_LOTE:
+            raise GrandeDemais(f"Lote passa de {MAX_BYTES_LOTE // 2**20} MiB e não cabe numa gravação; divida em lotes "
+                               f"menores (a mensagem {corpo.seq_inicial + i} já fica de fora deste).")
         seq = corpo.seq_inicial + i
         novas.append(normalizar({"id": id_mensagem(sessao_id, seq), "tenant_id": u.tenant_id, "sessao_id": sessao_id,
                                  "seq": seq, "papel": m.papel, "conteudo": m.conteudo, "criado_em": momento}))

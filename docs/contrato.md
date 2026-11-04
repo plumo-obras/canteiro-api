@@ -16,7 +16,11 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   opera), `master` (+usuários). O papel **nunca** vem do token: a API resolve no banco a cada requisição.
 - Todas as rotas abaixo exigem `Authorization: Bearer <acesso>` e só enxergam o `tenant_id` do usuário.
 - Erros: `{detail: "mensagem pronta para a pessoa"}`. 401 sem sessão · 403 papel insuficiente · 404 não existe (ou é
-  de outro cliente) · 409 conflito (já decidido, chave reutilizada, fora de ordem) · 422 regra de negócio · 429 tentativas.
+  de outro cliente) · 409 conflito (já decidido, chave reutilizada, fora de ordem) · 413 corpo grande demais · 422 regra de
+  negócio · 429 tentativas.
+- Tamanho do corpo, conferido antes do login: até 1 MiB; 6 MiB nas rotas de upload (`…/orcamento/ler`,
+  `…/orcamento/importar`, `…/orcamento/versoes`, `/obras/{id}/importar`); 10 MiB em `POST /sessoes/{id}/mensagens`.
+  Acima disso → 413, sem ler o resto (vale também para corpo em partes, sem `Content-Length`).
 - OpenAPI em `GET /openapi.json` (e `/docs`).
 
 ## Lista de espera (landing pública, sem login)
@@ -368,7 +372,8 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 - `GET /sessoes/{id}/mensagens?depois_de=-1&limite=200` → `[{id, sessao_id, seq, papel, conteudo, criado_em}]` (por seq).
 - `POST /sessoes/{id}/mensagens` `{seq_inicial, mensagens:[{papel: user|assistant, conteudo: texto | [blocos]}]}`
   (até 50) → `Sessao + mensagens` (201). Só acrescenta: `seq_inicial` tem de ser o `total_mensagens` atual; reenvio do
-  mesmo lote → 200; outra coisa → 409 com o esperado na mensagem. Mensagem acima de ~800 KB → 422.
+  mesmo lote → 200; outra coisa → 409 com o esperado na mensagem. Mensagem acima de ~800 KB → 422; lote com mais de
+  9 MiB de conteúdo somado → 413 (o lote é uma transação só, e o Firestore recusa commit acima de 10 MiB): divida.
 
 ## Agente
 

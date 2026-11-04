@@ -12,6 +12,7 @@ from canteiro_dominio.regras import RegraViolada
 from .armazenamento import criar_armazenamento
 from .cofre import criar_cofre
 from .config import Config
+from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
 from .rotas import auth, fornecedores, lista_espera, obras, propostas, sessoes
 
@@ -60,6 +61,8 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.include_router(propostas.r)
     app.include_router(sessoes.r)
     app.include_router(lista_espera.r)
+    # o limite fica dentro do CORS: o 413 da lista de espera ainda leva o cabeçalho e o navegador consegue lê-lo
+    app.add_middleware(LimiteCorpo)
     app.add_middleware(_CorsSoNaListaDeEspera, origens=config.origens_cors())
     return app
 

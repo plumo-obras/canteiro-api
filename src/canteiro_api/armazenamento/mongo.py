@@ -21,24 +21,42 @@ logging.getLogger("pymongo.command").setLevel(logging.INFO)
 
 _OPS = {"==": "$eq", "in": "$in", "<": "$lt", "<=": "$lte", ">": "$gt", ">=": "$gte"}
 
-# Índices das consultas que a API faz. No Firestore viram índices compostos declarados.
+# Índices das consultas que a API faz (filtros de igualdade, depois o campo da ordenação ou da desigualdade). No
+# Firestore viram índices compostos declarados. `consultar` sempre acrescenta `_id` ao fim da ordenação (desempate
+# igual ao do Firestore), então todo índice termina em `_id`: sem ele o Mongo ordena em memória mesmo com o resto
+# casando. Consulta sem filtro também precisa de `tenant_id` na frente, senão o plano anda pelo `_id_` de todos os
+# clientes. O teste `test_indices.py` confere com explain() que nenhuma consulta da API cai em COLLSCAN ou SORT.
 INDICES: dict[str, list[list[str]]] = {
-    "obras": [["tenant_id", "nome"]],
-    "insumos": [["tenant_id", "obra_id", "nome"]],
-    "versoes_orcamento": [["tenant_id", "obra_id"]],
-    "itens_orcamento": [["tenant_id", "versao_id"]],
-    "recebimentos": [["tenant_id", "pedido_id"]],
-    "medicoes": [["tenant_id", "obra_id"]],
-    "saldos": [["tenant_id", "obra_id"]],
-    "movimentos": [["tenant_id", "obra_id", "insumo_id", "criado_em"]],
-    "pedidos": [["tenant_id", "obra_id", "status", "criado_em"], ["tenant_id", "obra_id", "criado_em"],
-                ["tenant_id", "status"]],
-    "propostas": [["tenant_id", "status", "obra_id", "criado_em"], ["tenant_id", "criado_em"]],
-    "registro": [["tenant_id", "obra_id", "criado_em"], ["tenant_id", "criado_em"]],
-    "uso_ia": [["tenant_id", "dia"]],
-    "outbox": [["tenant_id", "publicado", "criado_em"]],
-    "renovacoes": [["tenant_id", "familia"]],
+    "obras": [["tenant_id", "nome", "_id"]],
+    "insumos": [["tenant_id", "obra_id", "nome", "_id"], ["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
+    "saldos": [["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
+    "versoes_orcamento": [["tenant_id", "obra_id", "_id"]],
+    "itens_orcamento": [["tenant_id", "versao_id", "_id"]],
+    "recebimentos": [["tenant_id", "pedido_id", "_id"]],
+    "medicoes": [["tenant_id", "obra_id", "_id"]],
+    "movimentos": [["tenant_id", "obra_id", "insumo_id", "criado_em", "_id"]],
+    "pedidos": [["tenant_id", "obra_id", "status", "criado_em", "_id"], ["tenant_id", "obra_id", "criado_em", "_id"],
+                ["tenant_id", "obra_id", "status", "_id"], ["tenant_id", "obra_id", "_id"],
+                ["tenant_id", "status", "_id"]],
+    "propostas": [["tenant_id", "status", "obra_id", "criado_em", "_id"], ["tenant_id", "status", "criado_em", "_id"],
+                  ["tenant_id", "obra_id", "criado_em", "_id"], ["tenant_id", "criado_em", "_id"],
+                  ["tenant_id", "status", "_id"]],
+    "registro": [["tenant_id", "obra_id", "criado_em", "_id"], ["tenant_id", "criado_em", "_id"]],
+    "uso_ia": [["tenant_id", "dia", "_id"]],
+    "outbox": [["tenant_id", "publicado", "criado_em", "_id"]],
+    "renovacoes": [["tenant_id", "familia", "_id"]],
+    "sessoes": [["tenant_id", "dono", "atualizado_em", "_id"],
+                ["tenant_id", "dono", "obra_id", "atualizado_em", "_id"]],
+    "mensagens": [["tenant_id", "sessao_id", "seq", "_id"]],
+    "cronogramas": [["tenant_id", "_id"]],
+    "fornecedores": [["tenant_id", "_id"]],
 }
+
+# Coleções que se apagam sozinhas: o campo guarda o INSTANTE em que o documento vence (data BSON, nunca texto: o TTL
+# do Mongo ignora string). É o mesmo formato da política de TTL do Firestore, que apaga quando a data do campo passa;
+# por isso o índice usa expireAfterSeconds=0 em vez de "N segundos depois de criado_em". O apagamento é preguiçoso
+# nos dois bancos (minutos no Mongo, até um dia no Firestore): quem lê continua conferindo a validade no código.
+TTL: dict[str, str] = {"renovacoes": "expira_em", "tentativas": "expira_em", "outbox": "expira_em"}
 
 
 def _para_mongo(doc: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +86,8 @@ class ArmazenamentoMongo:
         for colecao, lista in INDICES.items():
             for campos in lista:
                 await self._db[colecao].create_index([(c, ASCENDING) for c in campos])
+        for colecao, campo in TTL.items():
+            await self._db[colecao].create_index([(campo, ASCENDING)], expireAfterSeconds=0)
 
     async def apagar_banco(self) -> None:
         """Só para testes."""
@@ -81,7 +101,7 @@ class ArmazenamentoMongo:
     async def obter(self, colecao: str, tenant_id: str, id: str) -> dict[str, Any] | None:
         return await self._ler(colecao, tenant_id, id)
 
-    async def consultar(self, consulta: Consulta) -> list[dict[str, Any]]:
+    def _montar(self, consulta: Consulta) -> tuple[dict[str, Any], list[tuple[str, int]]]:
         validar_consulta(consulta)
         filtro: dict[str, Any] = {"tenant_id": consulta.tenant_id}
         condicoes: list[dict[str, Any]] = []
@@ -95,8 +115,17 @@ class ArmazenamentoMongo:
         ultima = consulta.ordem[-1][1] if consulta.ordem else "asc"
         ordem = [(c, ASCENDING if s == "asc" else DESCENDING) for c, s in consulta.ordem]
         ordem.append(("_id", ASCENDING if ultima == "asc" else DESCENDING))
+        return filtro, ordem
+
+    async def consultar(self, consulta: Consulta) -> list[dict[str, Any]]:
+        filtro, ordem = self._montar(consulta)
         cursor = self._db[consulta.colecao].find(filtro, sort=ordem, limit=consulta.limite or 0)
         return [_de_mongo(d) async for d in cursor]
+
+    async def explicar(self, consulta: Consulta) -> dict[str, Any]:
+        """Plano da MESMA consulta que `consultar` faria. Só para testes (conferir que os índices servem)."""
+        filtro, ordem = self._montar(consulta)
+        return await self._db[consulta.colecao].find(filtro, sort=ordem, limit=consulta.limite or 0).explain()
 
     async def _criar(self, colecao: str, doc: dict[str, Any], session=None) -> None:
         try:

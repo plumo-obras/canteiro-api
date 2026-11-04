@@ -1,6 +1,6 @@
 """Documentos que só a API conhece (login, cliente, outbox). Os de negócio ficam em `canteiro_dominio.modelos`."""
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -94,6 +94,12 @@ def id_de_inscrito(email: str) -> str:
     return "espera-" + hashlib.sha256(normalizar_email(email).encode()).hexdigest()
 
 
+# Ainda não há relay em produção (`eventos.publicar_pendentes` só roda nos testes) e toda transação de negócio grava
+# um evento: sem prazo, a outbox cresceria para sempre. Sete dias cobrem um relay parado por um fim de semana longo;
+# quando o relay existir, evento mais velho que isso já não serve para ninguém (o estado atual está nas coleções).
+RETENCAO_OUTBOX = timedelta(days=7)
+
+
 class EventoOutbox(Documento):
     """Gravado na mesma transação da mudança; o relay publica no Pub/Sub depois."""
     tipo: str                                 # pedido.criado, estoque.movimento…
@@ -102,6 +108,11 @@ class EventoOutbox(Documento):
     dados: dict[str, Any] = {}
     publicado: bool = False
     publicado_em: datetime | None = None
+    # instante em que o TTL apaga o evento (Mongo e Firestore leem o vencimento do próprio campo)
+    expira_em: datetime | None = None
+
+    def model_post_init(self, _: Any) -> None:
+        self.expira_em = self.expira_em or self.criado_em + RETENCAO_OUTBOX
 
 
 def doc(modelo: BaseModel) -> dict[str, Any]:

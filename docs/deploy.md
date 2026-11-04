@@ -85,3 +85,31 @@ curl -s https://canteiro-api.onrender.com/saude; curl -s https://canteiro-agente
 
 No `canteiro-agente`: `MODELO_ROTEIRO=0` e `ANTHROPIC_API_KEY` com a chave de uma organização do Console da Anthropic
 (a assinatura Pro/Max não serve para a API). Cada conversa passa a gastar tokens, medidos em `/uso` e descontados dos créditos.
+
+## 8. Índices e vencimento (TTL) dos documentos
+
+**Mongo/Atlas:** nada a fazer à mão. A API cria os índices e os índices TTL ao subir (`garantir_indices` em
+`src/canteiro_api/armazenamento/mongo.py`, listas `INDICES` e `TTL`).
+
+- **TTL:** `renovacoes`, `tentativas` e `outbox` guardam em `expira_em` o instante (data BSON, nunca texto) em que o
+  documento vence, e o índice usa `expireAfterSeconds: 0`. Renovação vence com o próprio token; tentativa, no fim da
+  janela do limite de login; evento da outbox, **7 dias depois de criado** (`RETENCAO_OUTBOX` em `modelos.py`): ainda
+  não há relay em produção (`publicar_pendentes` só roda nos testes), e sem prazo a outbox cresceria a cada transação.
+  Documentos gravados antes de 04/11/2026 não têm `expira_em` e não vencem sozinhos; para limpá-los uma vez:
+  `db.tentativas.deleteMany({expira_em: {$exists: false}})` e o mesmo em `outbox` (renovações já tinham o campo).
+- **Índices trocados em 04/11/2026:** todo índice composto passou a terminar em `_id` (a API sempre desempata a
+  ordenação por ele; sem isso o Mongo ordena em memória). Os antigos, sem `_id` no fim, continuam no Atlas e só
+  ocupam espaço: liste com `db.<colecao>.getIndexes()` e apague com `dropIndex` os que não estão em `INDICES`.
+
+**Firestore (quando migrar):** TTL lá não é índice, é política por grupo de coleção, e tem de ser ligada uma vez em
+cada projeto. O formato já é o mesmo (o campo guarda o instante do vencimento, como `Timestamp`):
+
+```bash
+for c in renovacoes tentativas outbox; do
+  gcloud firestore fields ttls update expira_em --collection-group=$c --enable-ttl --project=<projeto>
+done
+```
+
+O Firestore apaga em até ~24 h depois do vencimento (o Mongo, em minutos): o código continua conferindo a validade
+ao ler, então o atraso não muda comportamento. Os índices compostos de `INDICES` viram declarações em
+`firestore.indexes.json` (o `_id` do fim corresponde ao `__name__`, que o Firestore já acrescenta sozinho).
