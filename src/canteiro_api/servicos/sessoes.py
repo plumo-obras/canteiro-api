@@ -6,7 +6,7 @@ A mensagem tem ID = `{sessao_id}-{seq:06d}`: ordena pelo ID, e reenviar o mesmo 
 import json
 from datetime import datetime
 
-from canteiro_dominio.armazenamento import Consulta, Filtro
+from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
 from canteiro_dominio.modelos import agora
 from canteiro_dominio.tipos import novo_id
 
@@ -20,6 +20,7 @@ MAX_BYTES_MENSAGEM = 800_000
 # O lote inteiro é gravado numa transação, e o Firestore recusa commit acima de 10 MiB (50 mensagens de 800 KB dariam
 # 40 MB). 9 MiB de conteúdo deixa folga para os outros campos, os IDs e a atualização da sessão no mesmo commit.
 MAX_BYTES_LOTE = 9 * 1024 * 1024
+SESSAO_NAO_ENCONTRADA = "Conversa não encontrada."
 
 
 def id_mensagem(sessao_id: str, seq: int) -> str:
@@ -30,7 +31,7 @@ async def _sessao_do_usuario(leitor, u: UsuarioAtual, sessao_id: str) -> dict:
     s = await leitor.obter("sessoes", u.tenant_id, sessao_id)
     # sessão de outra pessoa do mesmo cliente é tratada como inexistente: conversa é privada
     if not s or s["dono"] != u.id:
-        raise NaoEncontrado("Conversa não encontrada.")
+        raise NaoEncontrado(SESSAO_NAO_ENCONTRADA)
     return s
 
 
@@ -46,12 +47,18 @@ async def criar(arm, u: UsuarioAtual, corpo: SessaoCorpo) -> tuple[dict, bool]:
         existente = await tx.obter("sessoes", u.tenant_id, d["id"])
         if existente:
             if existente["dono"] != u.id:
-                raise Conflito("Já existe uma conversa com este ID.")
+                # Mesma resposta da sessão que não existe: um 409 aqui diria a quem chuta IDs que a conversa existe.
+                raise NaoEncontrado(SESSAO_NAO_ENCONTRADA)
             return existente, False
         tx.criar("sessoes", d)
         return d, True
 
-    return await arm.em_transacao(tx_corpo)
+    try:
+        return await arm.em_transacao(tx_corpo)
+    except ConflitoDeId:
+        # O ID é único na coleção inteira (Mongo e Firestore), não por cliente: a leitura acima, filtrada pelo tenant,
+        # não vê a sessão de outro cliente, e a gravação colide. Responder 409 revelaria que ela existe em algum lugar.
+        raise NaoEncontrado(SESSAO_NAO_ENCONTRADA) from None
 
 
 async def listar(arm, u: UsuarioAtual, obra_id: str | None, limite: int,

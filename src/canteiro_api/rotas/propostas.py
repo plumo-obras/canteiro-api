@@ -13,6 +13,7 @@ from ..esquemas import (
     AprovarCorpo,
     Creditos,
     PropostaCorpo,
+    PropostaCriada,
     PropostaSaida,
     RecusarCorpo,
     RegistroSaida,
@@ -30,10 +31,15 @@ def _arm(request: Request):
     return request.app.state.arm
 
 
-@r.post("/propostas", response_model=PropostaSaida, status_code=status.HTTP_201_CREATED, tags=["propostas"])
-async def criar(corpo: PropostaCorpo, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+@r.post("/propostas", response_model=PropostaCriada, status_code=status.HTTP_201_CREATED, tags=["propostas"],
+        responses={200: {"description": "nada novo: chave repetida ou proposta igual ainda pendente (ja_existia)"}})
+async def criar(corpo: PropostaCorpo, response: Response, u: UsuarioAtual = Depends(usuario_atual),
+                arm=Depends(_arm)):
     # Qualquer papel pode propor (o agente age com o token de quem pergunta); só admin+ aprova.
-    return await propostas.criar_proposta(arm, u, corpo)
+    d, ja_existia = await propostas.criar_proposta(arm, u, corpo)
+    if ja_existia:
+        response.status_code = status.HTTP_200_OK
+    return {**d, "ja_existia": ja_existia}
 
 
 @r.get("/propostas", response_model=list[PropostaSaida], tags=["propostas"])

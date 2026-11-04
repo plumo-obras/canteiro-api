@@ -10,6 +10,7 @@ from canteiro_dominio.modelos import (
     Fornecedor,
     Insumo,
     ItemOrcamento,
+    LinhaPedido,
     Medicao,
     Movimento,
     Obra,
@@ -21,6 +22,7 @@ from canteiro_dominio.modelos import (
     TipoVersao,
     VersaoOrcamento,
 )
+from canteiro_dominio.regras import falta_na_linha
 
 
 class Entrada(BaseModel):
@@ -252,6 +254,9 @@ class PropostaCorpo(Entrada):
     justificativa: str = Field("", max_length=1000)
     fonte: str = Field("", max_length=1000)
     dados: dict
+    chave_idempotencia: str | None = Field(
+        None, min_length=1, max_length=200,
+        description="opcional: repetir a mesma chave devolve a proposta já criada (200) em vez de criar outra")
 
 
 class AprovarCorpo(Entrada):
@@ -491,12 +496,18 @@ class EtapaOrcamento(_Andamento):
     contratado: int
     aditivos: int
     atual: int
+    # Calculados aqui, não em quem lê: o agente só cita, e a tela não refaz a conta.
+    saldo: int = Field(0, description="saldo a comprometer = atual − comprometido (negativo = estourou)")
+    estourou: bool = Field(False, description="comprometido passou do orçado atual")
 
 
 class TotaisOrcamento(_Andamento):
     contratado: int
     aditivos: int
     atual: int
+    saldo: int = Field(0, description="saldo a comprometer da obra = atual − comprometido")
+    aditivos_pct: int | None = Field(None, description="aditivos sobre o contratado, em centésimos de % (290 = "
+                                                       "2,9%); null sem contrato")
     # gasto sem etapa (obra sem orçamento na hora do pedido); já está somado nos três campos acima
     sem_etapa: _Andamento = Field(default_factory=_Andamento)
     n_itens: int
@@ -662,12 +673,37 @@ class PropostaSaida(Proposta):
     decidido_por_nome: str | None = None
 
 
+class PropostaCriada(PropostaSaida):
+    ja_existia: bool = Field(False, description="true = nada novo: a mesma chave já fora usada, ou uma proposta igual "
+                                                "desta obra ainda espera aprovação (é ela que volta)")
+
+
 class RegistroSaida(EntradaRegistro):
     quem_nome: str | None = None
     usuario_id: str | None = None
 
 
-class PedidoSaida(Pedido):
+class LinhaPedidoSaida(LinhaPedido):
+    falta_entregar: int = Field(0, description="milésimos que ainda faltam chegar: quantidade − recebida, nunca "
+                                               "negativo; 0 em pedido encerrado (conferido) ou cancelado")
+
+
+# Pedido encerrado com sobra não espera mais nada: "falta entregar" ali induziria a cobrar o fornecedor à toa.
+_FECHADOS = {StatusPedido.CONFERIDO, StatusPedido.CANCELADO}
+
+
+class PedidoListado(Pedido):
+    """O pedido como sai para leitura, com a conta de cada linha pronta (o agente cita, não subtrai)."""
+    linhas: list[LinhaPedidoSaida]
+
+    @model_validator(mode="after")
+    def _falta_entregar(self):
+        for x in self.linhas:
+            x.falta_entregar = 0 if self.status in _FECHADOS else falta_na_linha(x.model_dump())
+        return self
+
+
+class PedidoSaida(PedidoListado):
     registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita: é o que o Desfazer usa")
 
 

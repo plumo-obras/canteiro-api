@@ -196,6 +196,64 @@ async def test_registro_sem_desfazer(vila):
     assert (await vila.http.post(f"/registro/{reg['id']}/desfazer", headers=vila.h)).status_code == 422
 
 
+# --- sem proposta duplicada ---
+
+async def _pendentes(vila):
+    return (await vila.http.get(f"/propostas?status=pendente&obra_id={vila.obra}", headers=vila.h)).json()
+
+
+async def test_mesma_chave_devolve_a_mesma_proposta(vila):
+    """O agente manda (sessão, tool_use) como chave: a repetição da mesma chamada de ferramenta não duplica."""
+    corpo = proposta(vila, chave_idempotencia="sessao-1:toolu_1")
+    a = await vila.http.post("/propostas", headers=vila.h, json=corpo)
+    b = await vila.http.post("/propostas", headers=vila.h, json=corpo)
+    assert (a.status_code, b.status_code) == (201, 200)
+    assert a.json()["id"] == b.json()["id"] and (a.json()["ja_existia"], b.json()["ja_existia"]) == (False, True)
+    assert [x["id"] for x in await _pendentes(vila)] == [a.json()["id"]]
+    # a mesma chave com outro conteúdo é erro de quem chama, não uma proposta nova
+    outra = proposta(vila, dados=pedido_corpo(vila, q=10), chave_idempotencia="sessao-1:toolu_1")
+    assert (await vila.http.post("/propostas", headers=vila.h, json=outra)).status_code == 409
+    # decidida, a mesma chave continua devolvendo ela (com o status de agora), sem criar outra
+    aprovada = await vila.http.post(f"/propostas/{a.json()['id']}/aprovar", headers=vila.h)
+    assert aprovada.status_code == 200
+    de_novo = await vila.http.post("/propostas", headers=vila.h, json=corpo)
+    assert (de_novo.status_code, de_novo.json()["status"], de_novo.json()["ja_existia"]) == (200, "aprovada", True)
+
+
+async def test_proposta_igual_pendente_volta_a_existente(vila):
+    """Sem chave (outra volta da conversa, outra aba): a mesma proposta pendente na mesma obra não nasce de novo."""
+    a = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
+    # título e justificativa são texto do agente; o que decide é tipo + dados
+    b = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila, titulo="Repor cimento",
+                                                                         justificativa="de novo"))
+    assert (a.status_code, b.status_code, b.json()["ja_existia"]) == (201, 200, True)
+    assert b.json()["id"] == a.json()["id"] and b.json()["titulo"] == "Comprar 34 sc de cimento"
+    c = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila, dados=pedido_corpo(vila, q=30)))
+    assert (c.status_code, c.json()["ja_existia"]) == (201, False)
+    assert len(await _pendentes(vila)) == 2
+
+
+async def test_decidir_solta_a_trava_e_a_mesma_proposta_pode_voltar(vila):
+    a = (await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))).json()
+    await vila.http.post(f"/propostas/{a['id']}/recusar", headers=vila.h, json={"motivo": "agora não"})
+    b = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
+    assert (b.status_code, b.json()["ja_existia"]) == (201, False) and b.json()["id"] != a["id"]
+    # aprovar com ajuste também solta: a trava é do que o agente propôs, não do que foi executado
+    r = await vila.http.post(f"/propostas/{b.json()['id']}/aprovar", headers=vila.h,
+                             json={"ajustes": {"quantidade": qtd(30)}})
+    assert r.status_code == 200 and r.json()["proposta"]["ajustada"] is True
+    c = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
+    assert (c.status_code, c.json()["ja_existia"]) == (201, False)
+    assert [x["id"] for x in await _pendentes(vila)] == [c.json()["id"]]
+
+
+async def test_propostas_iguais_ao_mesmo_tempo_viram_uma(vila):
+    rs = await asyncio.gather(*[vila.http.post("/propostas", headers=vila.h, json=proposta(vila)) for _ in range(4)])
+    assert sorted(r.status_code for r in rs) == [200, 200, 200, 201], [r.text for r in rs]
+    assert len({r.json()["id"] for r in rs}) == 1
+    assert len(await _pendentes(vila)) == 1
+
+
 # --- conferir com o que chegou de fato ---
 
 async def _conferir(vila, **extra):

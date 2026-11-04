@@ -1,8 +1,21 @@
-"""Propostas (o agente só propõe), aprovação que executa e o desfazer a partir do registro."""
+"""Propostas (o agente só propõe), aprovação que executa e o desfazer a partir do registro.
+
+Duplicata se evita de dois jeitos, os dois pelo ID do documento (o Firestore não tem índice único nem deixa consultar
+dentro da transação):
+- `chave_idempotencia`: a proposta ganha um ID derivado da chave. O agente manda (sessão, tool_use): a repetição da
+  MESMA chamada de ferramenta cai no mesmo documento.
+- Trava de pendência: um documento em `propostas_pendentes` com ID derivado de (tenant, obra, tipo, dados canônicos)
+  aponta para a proposta pendente igual. Propor de novo a mesma coisa devolve a que já espera aprovação. Aprovar ou
+  recusar solta a trava (na mesma transação), e aí a mesma proposta pode nascer de novo. Uma trava por conteúdo, e
+  não um ID determinístico na própria proposta, porque a proposta decidida continua existindo com aquele conteúdo.
+"""
+import hashlib
+import json
 from dataclasses import replace
 
 from pydantic import ValidationError
 
+from canteiro_dominio.armazenamento import ConflitoDeId
 from canteiro_dominio.modelos import Proposta, StatusPedido, StatusProposta, TipoMovimento, TipoProposta, agora
 from canteiro_dominio.regras import validar_conferencia, validar_transicao
 from canteiro_dominio.tipos import fmt_qtd, fmt_reais
@@ -56,8 +69,36 @@ def _regras_dos_dados(dados) -> None:
         validar_conferencia(dados.para, quantidade_recebida=dados.quantidade_recebida, nf=dados.nf)
 
 
-async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> dict:
-    """Só valida e guarda. Conferir as referências agora evita cartão de decisão que nunca poderia ser aprovado."""
+TRAVAS = "propostas_pendentes"
+
+
+def id_trava(tenant_id: str, obra_id: str, tipo: str, dados: dict) -> str:
+    """O mesmo conteúdo dá sempre o mesmo ID. `dados` é o já validado e normalizado (o que fica gravado): "34" e
+    "34,0" viram o mesmo inteiro antes de chegar aqui, e a ordem das chaves não importa."""
+    canonico = json.dumps(dados, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return id_derivado(tenant_id, "proposta-pendente", obra_id, tipo, hashlib.sha256(canonico.encode()).hexdigest())
+
+
+def _trava_de(prop: dict) -> str:
+    # a trava foi feita com o que o agente propôs; um ajuste na aprovação muda `dados`, não o que estava travado
+    return id_trava(prop["tenant_id"], prop["obra_id"], prop["tipo"], prop.get("dados_originais") or prop["dados"])
+
+
+async def _ler_trava(tx, u: UsuarioAtual, prop: dict) -> dict | None:
+    t = await tx.obter(TRAVAS, u.tenant_id, _trava_de(prop))
+    return t if t and t.get("proposta_id") == prop["id"] else None
+
+
+def _soltar_trava(tx, u: UsuarioAtual, trava: dict | None) -> None:
+    if trava is not None:
+        tx.atualizar(TRAVAS, u.tenant_id, trava["id"], {"proposta_id": None, "atualizado_em": agora()})
+
+
+async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> tuple[dict, bool]:
+    """Só valida e guarda. Conferir as referências agora evita cartão de decisão que nunca poderia ser aprovado.
+
+    Devolve (proposta, já_existia): já_existia quando a chave já tinha sido usada ou quando uma proposta igual ainda
+    espera aprovação nesta obra; nesses casos nada é gravado."""
     dados = _dados(corpo.tipo, corpo.dados)
     _regras_dos_dados(dados)
     await obra_do_tenant(arm, u.tenant_id, corpo.obra_id)
@@ -74,17 +115,44 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> dict:
             if not p or p["obra_id"] != corpo.obra_id:
                 raise NaoEncontrado("Pedido não encontrado nesta obra.")
             validar_transicao(StatusPedido(p["status"]), dados.para)
+    chave = corpo.chave_idempotencia
     p = Proposta(tenant_id=u.tenant_id, obra_id=corpo.obra_id, tipo=corpo.tipo, titulo=corpo.titulo,
                  conta=corpo.conta, justificativa=corpo.justificativa, fonte=corpo.fonte,
-                 dados=_guardado(corpo.tipo, dados.model_dump(mode="json")))
+                 dados=_guardado(corpo.tipo, dados.model_dump(mode="json")),
+                 **({"id": id_derivado(u.tenant_id, "proposta-chave", chave)} if chave else {}))
     d = doc(p)
+    trava_id = _trava_de(d)
 
     async def corpo_tx(tx):
+        if chave:
+            mesma = await tx.obter("propostas", u.tenant_id, d["id"])
+            if mesma:
+                if (mesma["obra_id"], mesma["tipo"], mesma.get("dados_originais") or mesma["dados"]) != (
+                        d["obra_id"], d["tipo"], d["dados"]):
+                    raise Conflito("Esta chave de idempotência já foi usada com outra proposta.")
+                return mesma, True
+        trava = await tx.obter(TRAVAS, u.tenant_id, trava_id)
+        if trava and trava.get("proposta_id"):
+            igual = await tx.obter("propostas", u.tenant_id, trava["proposta_id"])
+            if igual and igual["status"] == StatusProposta.PENDENTE.value:
+                return igual, True
+        # A trava é o documento que decide, e por isso é gravado sempre (no Firestore a leitura dela entra no
+        # controle de conflito; no Mongo a escrita é que colide): duas propostas iguais ao mesmo tempo não passam.
+        if trava:
+            tx.atualizar(TRAVAS, u.tenant_id, trava_id, {"proposta_id": d["id"], "atualizado_em": agora()})
+        else:
+            tx.criar(TRAVAS, {"id": trava_id, "tenant_id": u.tenant_id, "proposta_id": d["id"],
+                              "atualizado_em": agora()})
         tx.criar("propostas", d)
         evento(tx, u.tenant_id, "proposta.criada", corpo.obra_id, {"proposta_id": p.id, "tipo": p.tipo.value})
+        return d, False
 
-    await arm.em_transacao(corpo_tx)
-    return d
+    try:
+        return await arm.em_transacao(corpo_tx)
+    except ConflitoDeId:
+        # Corrida: a outra criou a trava (ou a proposta da mesma chave) entre a leitura e a gravação desta. A segunda
+        # volta lê o que ela gravou e devolve a existente.
+        return await arm.em_transacao(corpo_tx)
 
 
 async def _preparar_proposta(tx, u: UsuarioAtual, prop: dict) -> Operacao:
@@ -190,6 +258,7 @@ def _descrever_ajuste(mudou: dict, unidade: str) -> str:
 async def aprovar(arm, u: UsuarioAtual, proposta_id: str, ajustes: dict | None = None) -> tuple[dict, dict]:
     async def corpo(tx):
         prop = await _proposta_pendente(tx, u, proposta_id)
+        trava = await _ler_trava(tx, u, prop)
         campos: dict = {}
         if ajustes:
             dados, mudou = _mesclar_ajustes(prop, ajustes)
@@ -205,6 +274,7 @@ async def aprovar(arm, u: UsuarioAtual, proposta_id: str, ajustes: dict | None =
                    "decidido_por_nome": u.nome, "decidido_em": agora(), "registro_id": entrada["id"]}
         # a proposta grava com os dados que foram executados, na mesma transação da execução
         tx.atualizar("propostas", u.tenant_id, proposta_id, campos)
+        _soltar_trava(tx, u, trava)
         evento(tx, u.tenant_id, "proposta.aprovada", prop["obra_id"], {"proposta_id": proposta_id,
                                                                       "ajustada": bool(campos.get("ajustada"))})
         return {**prop, **campos}, entrada
@@ -215,10 +285,12 @@ async def aprovar(arm, u: UsuarioAtual, proposta_id: str, ajustes: dict | None =
 async def recusar(arm, u: UsuarioAtual, proposta_id: str, motivo: str) -> dict:
     async def corpo(tx):
         prop = await _proposta_pendente(tx, u, proposta_id)
+        trava = await _ler_trava(tx, u, prop)
         campos = {"status": StatusProposta.RECUSADA.value, "decidido_por": u.id,
                   "decidido_por_nome": u.nome, "decidido_em": agora(),
                   "motivo_recusa": motivo}
         tx.atualizar("propostas", u.tenant_id, proposta_id, campos)
+        _soltar_trava(tx, u, trava)
         registrar(tx, u, obra_id=prop["obra_id"], texto=f"Recusou: {prop['titulo']} ({motivo})", origem="tela",
                   proposta_id=proposta_id)
         evento(tx, u.tenant_id, "proposta.recusada", prop["obra_id"], {"proposta_id": proposta_id})

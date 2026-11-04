@@ -21,7 +21,8 @@ async def test_resumo_soma_na_api_a_partir_do_seed(vila):
 async def test_resumo_bate_com_as_rotas_da_obra(vila):
     """O número da página inicial tem de ser o mesmo que a pessoa vê ao entrar na obra."""
     await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
-    await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
+    # outra quantidade: duas propostas IGUAIS pendentes viram uma só (a segunda devolve a primeira)
+    await vila.http.post("/propostas", headers=vila.h, json=proposta(vila, dados=pedido_corpo(vila, q=30)))
     await vila.http.post(f"/obras/{vila.obra}/pedidos", headers=vila.h, json=pedido_corpo(vila, q=34))
     [res] = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
 

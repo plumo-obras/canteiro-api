@@ -223,3 +223,40 @@ async def test_previsto_realizado_por_etapa(vila):
     t = o["totais"]
     assert (t["cotando"], t["comprometido"], t["realizado"], t["sem_etapa"]["realizado"]) == (
         450000, 349000, 258000, 0)
+
+
+async def test_saldo_estouro_e_aditivo_vem_prontos_da_api(vila):
+    """O agente só cita: saldo a comprometer, estouro da etapa e % do aditivo saem calculados de GET …/orcamento."""
+    from test_orcamento_versoes import ADITIVO
+    obra, i = await _obra_com_orcamento(vila)
+    r = await versao(vila, obra, ADITIVO, mapa(linha_cabecalho=2), tipo="aditivo", aplicar=True)
+    assert r.status_code == 201, r.text
+    await _pedido(vila, obra, [{"insumo_id": i["cimento"], "quantidade": qtd(500), "total": 2500000, "etapa": "1"}])
+    await _pedido(vila, obra, [{"insumo_id": i["brita"], "quantidade": qtd(25), "total": 325000, "etapa": "2"}])
+    o = (await vila.http.get(f"/obras/{obra}/orcamento", headers=vila.h)).json()
+    por = {e["etapa"]: e for e in o["etapas"]}
+    assert (por["1"]["atual"], por["1"]["saldo"], por["1"]["estourou"]) == (2352617, 2352617 - 2500000, True)
+    assert (por["2"]["atual"], por["2"]["saldo"], por["2"]["estourou"]) == (1666661, 1666661 - 325000, False)
+    t = o["totais"]
+    assert (t["saldo"], t["aditivos_pct"]) == (t["atual"] - t["comprometido"], 9070)     # 90,70% do contrato
+
+
+async def test_orcamento_vazio_nao_tem_percentual_de_aditivo(vila):
+    o = await nova_obra(vila)
+    t = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()["totais"]
+    assert (t["saldo"], t["aditivos_pct"]) == (0, None)
+
+
+async def test_linhas_do_pedido_trazem_o_que_falta_entregar(vila):
+    obra, i = await _obra_com_orcamento(vila)
+    aberto = (await _pedido(vila, obra, [{"insumo_id": i["brita"], "quantidade": qtd(25), "total": 325000,
+                                          "etapa": "2"}])).json()
+    await _receber(vila, aberto["id"], [(0, qtd(18))])
+    encerrado = (await _pedido(vila, obra, [{"insumo_id": i["cimento"], "quantidade": qtd(10), "total": 40000,
+                                             "etapa": "1"}])).json()
+    await _receber(vila, encerrado["id"], [(0, qtd(6))])
+    r = await vila.http.post(f"/pedidos/{encerrado['id']}/avancar", headers=vila.h, json={"para": "conferido"})
+    assert r.status_code == 200 and r.json()["linhas"][0]["falta_entregar"] == 0
+    lista = {p["id"]: p for p in (await vila.http.get(f"/obras/{obra}/pedidos", headers=vila.h)).json()}
+    assert lista[aberto["id"]]["linhas"][0]["falta_entregar"] == qtd(7)
+    assert lista[encerrado["id"]]["linhas"][0]["falta_entregar"] == 0      # o resto não vem: nada a cobrar

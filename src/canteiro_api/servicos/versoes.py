@@ -414,21 +414,36 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
             s = somas.setdefault(x["etapa"], [0, 0])
             s[0 if x["versao_id"] in contrato_ids else 1] += x["total"]
     gasto = await andamento_por_etapa(arm, tenant_id, obra_id)
-    etapas = [EtapaOrcamento(etapa=e, descricao=descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"),
-                             contratado=c, aditivos=a, atual=c + a, **gasto.pop(e, {}))
+    etapas = [_etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}))
               for e, (c, a) in somas.items()]
     # gasto numa etapa que não está no orçamento (pedido de antes da importação, ou etapa de versão desfeita)
     sem = {k: sum(g[k] for g in gasto.values()) for k in ("cotando", "comprometido", "realizado")}
     contratado = sum(e.contratado for e in etapas)
     aditivos = sum(e.aditivos for e in etapas)
+    andamento = {k: sum(getattr(e, k) for e in etapas) + sem[k] for k in ("cotando", "comprometido", "realizado")}
     return OrcamentoObra(
         versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"])} for v in versoes],
         itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
+                               saldo=contratado + aditivos - andamento["comprometido"],
+                               aditivos_pct=pct(aditivos, contratado) if contratado else None,
                                n_itens=sum(x["tipo"] == "item" for x in itens),
-                               n_etapas=len(descricoes), sem_etapa=sem,
-                               **{k: sum(getattr(e, k) for e in etapas) + sem[k]
-                                  for k in ("cotando", "comprometido", "realizado")}))
+                               n_etapas=len(descricoes), sem_etapa=sem, **andamento))
+
+
+def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: dict[str, int]) -> EtapaOrcamento:
+    """Saldo e estouro saem daqui prontos: quem lê (tela, agente) só mostra."""
+    atual, comprometido = contratado + aditivos, gasto.get("comprometido", 0)
+    return EtapaOrcamento(etapa=etapa, descricao=descricao, contratado=contratado, aditivos=aditivos, atual=atual,
+                          saldo=atual - comprometido, estourou=comprometido > atual, **gasto)
+
+
+CEM = 10000                            # 100% em centésimos de ponto percentual (290 = 2,9%)
+
+
+def pct(parte: int, todo: int) -> int:
+    """`parte` sobre `todo` em centésimos de %, arredondado para o mais próximo (meio para cima)."""
+    return (parte * CEM + todo // 2) // todo if todo else 0
 
 
 async def andamento_por_etapa(leitor, tenant_id: str, obra_id: str) -> dict[str, dict[str, int]]:

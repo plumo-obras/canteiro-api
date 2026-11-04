@@ -23,9 +23,9 @@ from ..esquemas import (
 from ..modelos import doc
 from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant, verbo_desfazer
 from .estoque import id_derivado
-from .versoes import orcamento_da_obra
+from .versoes import CEM, orcamento_da_obra
+from .versoes import pct as _pct
 
-CEM = 10000
 MESES_DEPOIS_DO_FIM = 12               # medição até um ano depois do término contratual (obra atrasada ainda mede)
 
 
@@ -44,10 +44,6 @@ def _mes_idx(mes: str) -> int:
 
 def _mes(idx: int) -> str:
     return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
-
-
-def _pct(parte: int, todo: int) -> int:
-    return (parte * CEM + todo // 2) // todo if todo else 0
 
 
 def _fmt_pct(c: int) -> str:

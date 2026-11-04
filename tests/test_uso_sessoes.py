@@ -160,4 +160,19 @@ async def test_sessao_e_privada(vila, http, arm, config):
         assert (await http.post(f"/sessoes/{sid}/mensagens", headers=h, json={
             "seq_inicial": 0, "mensagens": [{"papel": "user", "conteudo": "oi"}]})).status_code == 404
         assert (await http.get("/sessoes", headers=h)).json() == []
-    assert (await http.post("/sessoes", headers=colega, json={"id": sid})).status_code == 409
+
+
+async def test_abrir_sessao_alheia_responde_como_inexistente(vila, http, arm, config):
+    """POST /sessoes com o ID de outra pessoa (mesmo cliente) ou de outro cliente (o ID colide na coleção inteira)
+    responde exatamente como uma sessão que não existe: nem o código nem a mensagem revelam que ela está lá."""
+    sid = (await vila.http.post("/sessoes", headers=vila.h, json={})).json()["id"]
+    colega, _ = await vila.usuario("admin")
+    intruso = await nova_vila(http, arm, config)
+    inexistente = await http.get(f"/sessoes/{novo_id()}", headers=vila.h)
+    assert (inexistente.status_code, inexistente.json()) == (404, {"detail": "Conversa não encontrada."})
+    for h in (colega, intruso.h):
+        r = await http.post("/sessoes", headers=h, json={"id": sid})
+        assert (r.status_code, r.json()) == (404, {"detail": "Conversa não encontrada."})
+    # nada foi gravado no lugar: a sessão continua do dono e sem mensagens de ninguém
+    s = (await vila.http.get(f"/sessoes/{sid}", headers=vila.h)).json()
+    assert s["dono"] == vila.sessao["usuario"]["id"] and s["total_mensagens"] == 0

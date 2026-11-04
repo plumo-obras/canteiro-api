@@ -203,8 +203,12 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
   encerrado com sobra compromete só o que chegou) · `realizado` = o que já foi entregue ou medido, pelo preço do pedido.
   Cancelado não conta. `totais.sem_etapa` = o gasto sem etapa ou em etapa que não está nas versões vigentes (já somado
-  nos totais). Saldo da etapa = `atual − comprometido`. Atenção: `atual` é preço de contrato (com BDI e mão de obra);
-  comprometido e realizado são custo de compra.
+  nos totais). Atenção: `atual` é preço de contrato (com BDI e mão de obra); comprometido e realizado são custo de
+  compra.
+- **Contas prontas** (a tela e o agente só mostram): cada etapa traz `saldo` (= `atual − comprometido`, centavos;
+  negativo quando estourou) e `estourou` (`comprometido > atual`); `totais` traz `saldo` (o mesmo, da obra) e
+  `aditivos_pct` = aditivos sobre o contratado em **centésimos de %** (290 = 2,9%; arredondado ao mais próximo) ou
+  `null` sem contrato.
 - `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + registro_id`. Tira a obra de `em_orcamento` para `em_andamento`.
   Já aprovado → 409; sem contrato vigente **e** sem insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o
   orçamento de X (N itens, R$ total)" com o orçado atual (contrato + aditivos vigentes; sem contrato, "N insumos" da
@@ -230,9 +234,12 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 - `GET /obras/{obra_id}/pedidos?status=…&limite=100&antes_de=…` → `[Pedido]` (mais novos primeiro). `status` pode
   repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". `limite` até 500.
 - `Pedido` = `{id, numero, obra_id, fornecedor, fornecedor_id, previsao, observacao, status, valor, recebimentos,
-  criado_em, linhas: [{insumo_id, nome, unidade, tipo, etapa, quantidade, valor_unitario, total, recebida}]}`. Nome,
-  unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`; `recebida` soma as entregas;
-  `recebimentos` = quantas entregas valem. Pedido gravado antes das linhas sai no mesmo formato, com uma linha.
+  criado_em, linhas: [{insumo_id, nome, unidade, tipo, etapa, quantidade, valor_unitario, total, recebida,
+  falta_entregar}]}`. Nome, unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`;
+  `recebida` soma as entregas; `recebimentos` = quantas entregas valem. `falta_entregar` (milésimos, calculado pela
+  API com `regras.falta_na_linha`) = `quantidade − recebida`, nunca negativo, e 0 em pedido `conferido` (encerrado)
+  ou `cancelado`; vem no `GET …/pedidos` e nas respostas de criar, avançar e editar. Pedido gravado antes das linhas
+  sai no mesmo formato, com uma linha.
 - Status: `em_cotacao → aprovado → enviado → em_transito → (recebido) → parcial → conferido`, e `cancelado` até antes
   de receber. `parcial` = recebeu parte, o resto continua "a caminho". A tela chama `conferido` de **Recebido**.
   Conta: `cotando` soma as linhas dos pedidos em cotação; `a_caminho` soma o que **falta entregar** em cada linha
@@ -308,8 +315,16 @@ atual de cada etapa (contrato + aditivos vigentes).
 
 ## Propostas, aprovação e registro
 
-- `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados}` → `Proposta` (pendente). Só valida e
-  guarda: **não executa**. Qualquer papel propõe (o agente usa o token de quem conversa); `dados` inválido → 422.
+- `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados, chave_idempotencia?}` → `Proposta +
+  {ja_existia}` (201, pendente). Só valida e guarda: **não executa**. Qualquer papel propõe (o agente usa o token de
+  quem conversa); `dados` inválido → 422.
+  - **Sem duplicata** (pelo ID do documento, portável para o Firestore): `chave_idempotencia` (≤ 200; o agente manda
+    `"{sessao_id}:{tool_use_id}"`) — a mesma chave devolve a proposta já criada, no status em que estiver, com 200 e
+    `ja_existia: true`; a mesma chave com outra obra/tipo/dados → 409. Sem chave ou com chave nova: se uma proposta
+    **pendente** da mesma obra tem o mesmo `tipo` e os mesmos `dados` (depois de validados; título e justificativa
+    não contam), volta ela, com 200 e `ja_existia: true`, e nada é gravado. Aprovar ou recusar libera: depois disso a
+    mesma proposta pode ser criada de novo. Por trás, um documento `propostas_pendentes/{id derivado de tenant, obra,
+    tipo e dados}` aponta para a pendente, e aprovar/recusar o solta na mesma transação.
   `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, previsao?}` (o corpo do POST
   de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
   `POST …/avancar`) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
@@ -378,7 +393,10 @@ atual de cada etapa (contrato + aditivos vigentes).
 Um documento por sessão (`sessoes`) e um por mensagem (`mensagens`, ID = `{sessao_id}-{seq:06d}`). A sessão é
 privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
-- `POST /sessoes` `{id?, obra_id?, titulo?, abas?}` → `Sessao` (201; mesmo `id` do mesmo dono → 200).
+- `POST /sessoes` `{id?, obra_id?, titulo?, abas?}` → `Sessao` (201; mesmo `id` do mesmo dono → 200). `id` de uma
+  sessão de outra pessoa do cliente **ou de outro cliente** → 404 `"Conversa não encontrada."`, a mesma resposta da
+  sessão que não existe (nem o código nem a mensagem revelam que ela existe). `obra_id` de outro cliente → 404
+  `"Obra não encontrada."`.
   `Sessao = {id, tenant_id, dono, obra_id, titulo, abas:[obj] (≤ 20), total_mensagens, criado_em, atualizado_em}`.
 - `GET /sessoes?obra_id=&limite=30&antes_de=…` → `[Sessao]` (mais recentes primeiro; aqui `antes_de` compara com
   `atualizado_em`, a ordem da lista) · `GET /sessoes/{id}` →
@@ -393,9 +411,21 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
 - `POST /conversa` (serviço do agente, porta própria) `{sessao_id?, obra_id?, texto}` com o mesmo `Authorization` do
   usuário → **SSE**:
-  - `event: texto` `{delta}` · `event: ferramenta` `{nome, nivel: consulta|propoe, resumo}` (o "usou almoxarifado…")
-  - `event: proposta` `{Proposta}` (vira cartão de decisão na tela) · `event: fim` `{sessao_id, uso:{tokens, custo}}`
-  - `event: erro` `{mensagem}` (inclusive "sem créditos")
+  - `event: texto` `{delta}` · `event: ferramenta` `{nome, nivel: consulta|propoe, resumo}` (o "usou almoxarifado…"),
+    emitido quando a ferramenta **começa** (a tela mostra o andamento durante uma consulta lenta), uma vez por chamada
+  - `event: proposta` `{Proposta + ja_existia}` (vira cartão de decisão na tela; `ja_existia: true` = é a proposta
+    igual que já esperava aprovação) · `event: fim` `{sessao_id, uso:{tokens, custo}}`
+  - `event: erro` `{mensagem}` (inclusive "sem créditos"). Casos com mensagem própria: API central fora do ar ("O
+    sistema está fora do ar agora…"; a volta para ali, sem chamar o modelo de novo, grava o consumo já gasto e ainda
+    manda o `fim`); sessão que não abre (a mensagem da API: "Conversa não encontrada." / "Obra não encontrada.");
+    outra pergunta na mesma conversa ainda em andamento ("Esta conversa ainda está respondendo…", antes de qualquer
+    chamada ao modelo); histórico recusado com 409 por gravação concorrente ("…esta parte não foi salva…", seguido do
+    `fim`).
+  - **Uma volta por sessão de cada vez**, com trava no processo do agente (roda numa instância só). Com mais de uma
+    instância a trava não vale entre elas; aí o `POST /sessoes/{id}/mensagens` fora de sequência (409) é o que segura
+    a ordem, e o agente avisa que a parte dele não foi salva.
+  - Corpo inválido → 422 `{detail: "mensagem"}` (ex.: "A pergunta tem de ter de 1 a 8.000 caracteres."), como o
+    resto do contrato; sem `Authorization: Bearer` → 401.
 - Ferramentas (cada uma chama a API acima com o token do usuário):
 
 | Ferramenta | Nível | Chama |
@@ -414,7 +444,9 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 - `propor_pedido` confere a `etapa` contra `GET …/etapas` antes de propor: etapa que não existe, ou obra com orçamento
   e etapa omitida → erro para o modelo (que pergunta à pessoa), sem criar proposta.
 
-- As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API.
+- As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API
+  (falta, `falta_entregar` do pedido, saldo/estouro da etapa e `aditivos_pct` vêm prontos). As de `propor_*` mandam
+  `chave_idempotencia` = `"{sessao_id}:{tool_use_id}"` e, com `ja_existia`, dizem ao modelo que nada novo foi criado.
 
 ## Dados de exemplo (seed)
 

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from pydantic import ValidationError
 
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
-from canteiro_dominio.modelos import Movimento, Obra, Pedido, Recebimento, StatusPedido, TipoMovimento, TipoVersao
+from canteiro_dominio.modelos import Movimento, Obra, Recebimento, StatusPedido, TipoMovimento, TipoVersao
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
@@ -29,6 +29,7 @@ from ..esquemas import (
     OrcamentoObra,
     PedidoCorpo,
     PedidoEdicao,
+    PedidoListado,
     PedidoSaida,
     Previa,
     PreviaOrcamento,
@@ -233,7 +234,7 @@ async def importar(obra_id: str, arquivo: UploadFile = File(...), aplicar: bool 
 
 # --- pedidos ---
 
-@r.get("/obras/{obra_id}/pedidos", response_model=list[Pedido], tags=["pedidos"])
+@r.get("/obras/{obra_id}/pedidos", response_model=list[PedidoListado], tags=["pedidos"])
 async def listar_pedidos(obra_id: str, status_: list[StatusPedido] | None = Query(None, alias="status"),
                          limite: int = Query(100, ge=1, le=500), antes_de: datetime | None = None,
                          u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
