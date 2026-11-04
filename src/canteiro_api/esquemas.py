@@ -171,7 +171,8 @@ class RecebimentoCorpo(Entrada):
 
 class RecebimentoSaida(BaseModel):
     recebimento: Recebimento
-    pedido: Pedido
+    # Com a conta das linhas (falta_entregar): a tela troca o pedido por este depois da entrega.
+    pedido: PedidoListado
     registro_id: str | None = None
 
 
@@ -705,6 +706,9 @@ class PedidoListado(Pedido):
 
 class PedidoSaida(PedidoListado):
     registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita: é o que o Desfazer usa")
+
+
+RecebimentoSaida.model_rebuild()
 
 
 class MovimentoSaida(Movimento):

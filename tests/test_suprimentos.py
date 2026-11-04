@@ -251,7 +251,9 @@ async def test_linhas_do_pedido_trazem_o_que_falta_entregar(vila):
     obra, i = await _obra_com_orcamento(vila)
     aberto = (await _pedido(vila, obra, [{"insumo_id": i["brita"], "quantidade": qtd(25), "total": 325000,
                                           "etapa": "2"}])).json()
-    await _receber(vila, aberto["id"], [(0, qtd(18))])
+    entrega = (await _receber(vila, aberto["id"], [(0, qtd(18))])).json()
+    # a resposta da entrega também traz a conta: a tela troca o pedido por ela sem reler a lista
+    assert entrega["pedido"]["linhas"][0]["falta_entregar"] == qtd(7)
     encerrado = (await _pedido(vila, obra, [{"insumo_id": i["cimento"], "quantidade": qtd(10), "total": 40000,
                                              "etapa": "1"}])).json()
     await _receber(vila, encerrado["id"], [(0, qtd(6))])
