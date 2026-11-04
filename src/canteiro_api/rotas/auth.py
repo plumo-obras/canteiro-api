@@ -1,5 +1,6 @@
 import hmac
 import ipaddress
+import logging
 
 from fastapi import APIRouter, Request, status
 
@@ -7,6 +8,7 @@ from .. import auth
 from ..esquemas import EntrarCorpo, RenovarCorpo, Sessao
 
 r = APIRouter(prefix="/auth", tags=["autenticação"])
+log = logging.getLogger(__name__)
 
 
 def _redes(texto: str) -> list:
@@ -31,12 +33,21 @@ def _ip(request: Request) -> str:
     direto = request.client.host if request.client else "desconhecido"
     # A Vercel não tem IP fixo, então a lista de proxies não serve para o Next hospedado: ele se identifica
     # por um segredo compartilhado e informa o IP do visitante (que a Vercel lhe entrega). Tempo constante.
-    segredo = request.app.state.config.proxy_segredo
+    cfg = request.app.state.config
+    segredo = cfg.proxy_segredo
     enviado = request.headers.get("x-canteiro-proxy", "")
-    if segredo and enviado and hmac.compare_digest(enviado, segredo):
+    # Em bytes: compare_digest com str recusa não-ASCII (TypeError → 500 com um cabeçalho forjado).
+    if segredo and enviado and hmac.compare_digest(enviado.encode(), segredo.encode()):
         ip = request.headers.get("x-canteiro-ip-cliente", "").strip()
         return ip if _valido(ip) else direto
-    redes = _redes(request.app.state.config.trusted_proxies)
+    if cfg.ip_cabecalho:
+        ip = request.headers.get(cfg.ip_cabecalho, "").strip()
+        if _valido(ip):
+            return ip
+        # Sem o cabeçalho, todos os visitantes dividiriam o IP do balanceador: avisa para alguém ver a borda mudar.
+        log.warning("cabeçalho %s ausente ou inválido; limite por IP caiu no endereço da conexão", cfg.ip_cabecalho)
+        return direto
+    redes = _redes(cfg.trusted_proxies)
     if not redes or not _confiavel(direto, redes):
         return direto
     cadeia = [x.strip() for x in request.headers.get("x-forwarded-for", "").split(",") if x.strip()]

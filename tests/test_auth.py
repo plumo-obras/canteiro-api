@@ -161,9 +161,9 @@ def test_ip_da_cadeia():
 
     from canteiro_api.rotas.auth import _ip
 
-    def req(cliente, xff, proxies="10.0.0.0/8", segredo="", headers=None):
+    def req(cliente, xff, proxies="10.0.0.0/8", segredo="", headers=None, cabecalho=""):
         h = {"x-forwarded-for": xff, **(headers or {})}
-        cfg = SimpleNamespace(trusted_proxies=proxies, proxy_segredo=segredo)
+        cfg = SimpleNamespace(trusted_proxies=proxies, proxy_segredo=segredo, ip_cabecalho=cabecalho)
         return SimpleNamespace(client=SimpleNamespace(host=cliente), headers=h,
                                app=SimpleNamespace(state=SimpleNamespace(config=cfg)))
 
@@ -180,8 +180,8 @@ def test_ip_informado_pelo_next_com_segredo():
 
     from canteiro_api.rotas.auth import _ip
 
-    def req(headers, segredo="s3gredo-do-next"):
-        cfg = SimpleNamespace(trusted_proxies="", proxy_segredo=segredo)
+    def req(headers, segredo="s3gredo-do-next", cabecalho=""):
+        cfg = SimpleNamespace(trusted_proxies="", proxy_segredo=segredo, ip_cabecalho=cabecalho)
         return SimpleNamespace(client=SimpleNamespace(host="76.76.21.9"), headers=headers,
                                app=SimpleNamespace(state=SimpleNamespace(config=cfg)))
 
@@ -191,3 +191,22 @@ def test_ip_informado_pelo_next_com_segredo():
     assert _ip(req({"x-canteiro-ip-cliente": "200.1.2.3"})) == "76.76.21.9"      # sem segredo: ignora o cabeçalho
     assert _ip(req(ok, segredo="")) == "76.76.21.9"                               # desligado na API
     assert _ip(req({**ok, "x-canteiro-ip-cliente": "lixo"})) == "76.76.21.9"     # IP inválido não vale
+    assert _ip(req({**ok, "x-canteiro-proxy": "sêgredo"})) == "76.76.21.9"      # não-ASCII não derruba (era 500)
+
+
+def test_ip_pelo_cabecalho_da_borda():
+    """No Render a Cloudflare sobrescreve o CF-Connecting-IP; o X-Forwarded-For o cliente escreve como quiser."""
+    from types import SimpleNamespace
+
+    from canteiro_api.rotas.auth import _ip
+
+    def req(headers):
+        cfg = SimpleNamespace(trusted_proxies="10.0.0.0/8", proxy_segredo="s", ip_cabecalho="cf-connecting-ip")
+        return SimpleNamespace(client=SimpleNamespace(host="10.1.2.3"), headers=headers,
+                               app=SimpleNamespace(state=SimpleNamespace(config=cfg)))
+
+    assert _ip(req({"cf-connecting-ip": "200.1.2.3", "x-forwarded-for": "9.9.9.9, 200.1.2.3"})) == "200.1.2.3"
+    assert _ip(req({"x-forwarded-for": "9.9.9.9"})) == "10.1.2.3"        # sem o cabeçalho: nunca o XFF forjável
+    assert _ip(req({"cf-connecting-ip": "lixo"})) == "10.1.2.3"
+    assert _ip(req({"x-canteiro-proxy": "s", "x-canteiro-ip-cliente": "200.9.9.9",
+                    "cf-connecting-ip": "76.76.21.9"})) == "200.9.9.9"    # o Next (Vercel) com segredo vem antes

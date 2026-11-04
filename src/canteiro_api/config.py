@@ -27,6 +27,9 @@ class Config(BaseSettings):
     # Segredo que o Next (Vercel, sem IP fixo) manda em X-Canteiro-Proxy junto com X-Canteiro-Ip-Cliente.
     # Com ele, a API aceita o IP do visitante informado pelo Next para o limite de tentativas. Vazio = desligado.
     proxy_segredo: str = ""
+    # Cabeçalho com o IP do visitante que a borda SOBRESCREVE (o cliente não consegue forjar). No Render, que põe a
+    # Cloudflare na frente de tudo e não limpa o X-Forwarded-For enviado pelo cliente: "cf-connecting-ip".
+    ip_cabecalho: str = ""
 
     # limite de tentativas de login (janela deslizante simples)
     tentativas_por_email: int = 5
