@@ -27,6 +27,10 @@ updates:
     groups:
       compose-menor-e-patch:
         update-types: [minor, patch]
+    ignore:
+      # o mongo local e o do CI seguem a versão maior do Atlas de produção (8): testar no 9 não diz nada sobre ele
+      - dependency-name: mongo
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: uv
     # uv.lock da raiz, que inclui o domínio (dominio/ entra como dependência editável)
