@@ -11,7 +11,10 @@ services:
       API_URL: http://api:8000
       MODELO_ROTEIRO: ${MODELO_ROTEIRO:-1}
     ports: ["8100:8100"]
-    depends_on: [api]
+    # esperar o /saude (HEALTHCHECK das imagens), não só o contêiner existir: o agente e a web falam com a API logo ao
+    # subir, e a API só responde depois que o Mongo aceitou o replica set
+    depends_on:
+      api: { condition: service_healthy }
 
   web:
     build: ../canteiro-web
@@ -20,4 +23,6 @@ services:
       API_URL: http://api:8000
       AGENTE_URL: http://agente:8100
     ports: ["3000:3000"]
-    depends_on: [api, agente]
+    depends_on:
+      api: { condition: service_healthy }
+      agente: { condition: service_healthy }

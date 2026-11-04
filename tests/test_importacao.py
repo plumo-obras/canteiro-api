@@ -72,3 +72,79 @@ async def test_viewer_nao_importa(vila):
     r = await vila.http.post(f"/obras/{vila.obra}/importar", headers=h,
                              files={"arquivo": ("a.csv", b"nome;unidade;saldo;precisa_ate_o_fim;curva\n", "text/csv")})
     assert r.status_code == 403
+
+
+CAB = "nome;unidade;saldo;precisa_ate_o_fim;curva\n"
+
+
+async def lista(vila):
+    return {x["insumo"]["nome"]: x for x in
+            (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()}
+
+
+async def test_nome_igual_a_menos_de_espaco_e_caixa_e_o_mesmo_insumo(vila):
+    # no mesmo arquivo: a segunda grafia é erro de linha, não um segundo insumo
+    r = await enviar(vila, (CAB + "Areia  média fina;m³;1;1;B\nareia média FINA;m³;1;1;B\n").encode())
+    assert [(e["linha"], e["campo"]) for e in r.json()["erros"]] == [(3, "nome")]
+    # contra o que já está na obra (seed: "Areia média"), com espaço sobrando
+    r = await enviar(vila, (CAB + " AREIA   média ;m³;1;1;B\n").encode())
+    assert [(e["linha"], e["campo"]) for e in r.json()["erros"]] == [(2, "nome")]
+    # o nome gravado sai com os espaços arrumados, e o ID é o mesmo do cadastro pela tela
+    r = await enviar(vila, (CAB + "Pedra   rachão;m³;0;5;C\n").encode(), True)
+    assert r.json()["aplicado"] is True
+    pedra = (await lista(vila))["Pedra rachão"]["insumo"]
+    dup = await vila.http.post(f"/obras/{vila.obra}/insumos", headers=vila.h,
+                               json={"nome": "pedra rachão", "unidade": "m³"})
+    assert dup.status_code == 409
+    from canteiro_api.servicos.estoque import id_insumo
+    assert pedra["id"] == id_insumo(vila.tenant_id, vila.obra, "PEDRA  RACHÃO")
+
+
+async def test_importacoes_simultaneas_nao_duplicam(vila):
+    import asyncio
+    conteudo = (CAB + "Telha colonial;un;10;100;B\n").encode()
+    rs = await asyncio.gather(*(enviar(vila, conteudo, True) for _ in range(3)), return_exceptions=True)
+    assert sum(1 for r in rs if not isinstance(r, Exception) and r.status_code == 200) >= 1
+    assert all(isinstance(r, Exception) or r.status_code in (200, 409) for r in rs)
+    itens = [x for x in (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()
+             if x["insumo"]["nome"] == "Telha colonial"]
+    assert len(itens) == 1 and itens[0]["conta"]["saldo"] == qtd(10)
+
+
+async def test_desfazer_importacao_arquiva_e_devolve_o_saldo(vila):
+    r = await enviar(vila, (CAB + "Telha;un;150;400;B\nCal;sc;0;30;C\n").encode(), True)
+    (reg_id,) = r.json()["registro_ids"]
+    telha = (await lista(vila))["Telha"]["insumo"]
+    desfeito = await vila.http.post(f"/registro/{reg_id}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    assert desfeito.json()["texto"] == "Desfeito: importação de 2 insumo(s) da planilha"
+    assert {"Telha", "Cal"}.isdisjoint(await lista(vila))
+    # o livro-razão fecha: ajuste inicial + ajuste oposto
+    movs = (await vila.http.get(f"/obras/{vila.obra}/insumos/{telha['id']}/movimentos", headers=vila.h)).json()
+    assert sorted(m["quantidade"] for m in movs) == [-qtd(150), qtd(150)]
+
+    refeito = await vila.http.post(f"/registro/{desfeito.json()['id']}/desfazer", headers=vila.h)
+    assert refeito.status_code == 200, refeito.text
+    assert refeito.json()["texto"] == "Refeito: Importou 2 insumo(s) da planilha"
+    itens = await lista(vila)
+    assert itens["Telha"]["conta"]["saldo"] == qtd(150) and "Cal" in itens
+
+    # desfeita de novo, a mesma planilha volta a importar (os documentos arquivados são reaproveitados)
+    assert (await vila.http.post(f"/registro/{refeito.json()['id']}/desfazer", headers=vila.h)).status_code == 200
+    r = await enviar(vila, (CAB + "telha;un;7;400;B\n").encode(), True)
+    assert r.json()["aplicado"] is True, r.text
+    itens = await lista(vila)
+    assert itens["telha"]["insumo"]["id"] == telha["id"] and itens["telha"]["conta"]["saldo"] == qtd(7)
+
+
+async def test_desfazer_importacao_recusa_se_um_insumo_andou(vila):
+    r = await enviar(vila, (CAB + "Prego 17x21;kg;5;10;C\nArame recozido;kg;0;10;C\n").encode(), True)
+    prego = (await lista(vila))["Prego 17x21"]["insumo"]
+    m = await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h,
+                             json={"insumo_id": prego["id"], "tipo": "saida", "quantidade": 1000,
+                                   "chave_idempotencia": "prego-saida-1"})
+    assert m.status_code == 201, m.text
+    d = await vila.http.post(f"/registro/{r.json()['registro_ids'][0]}/desfazer", headers=vila.h)
+    assert d.status_code == 409 and "Prego 17x21" in d.json()["detail"]
+    # tudo ou nada: o arame, que não andou, continua na lista
+    assert {"Prego 17x21", "Arame recozido"} <= set(await lista(vila))

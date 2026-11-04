@@ -84,7 +84,8 @@ def test_transicoes_validas_e_invalidas():
 
 # --- tipos portáveis ---
 
-@pytest.mark.parametrize("entrada,esperado", [("1,5", 1500), ("2.760,0", 2760000), ("2760", 2760000), ("1.5", 1500), (3.2, 3200), ("1.299,9", 1299900), (600, 600000)])
+@pytest.mark.parametrize("entrada,esperado", [("1,5", 1500), ("2.760,0", 2760000), ("2760", 2760000), ("1.5", 1500),
+                                              (3.2, 3200), ("1.299,9", 1299900), (600, 600000)])
 def test_qtd_aceita_formato_brasileiro(entrada, esperado):
     assert qtd(entrada) == esperado
 

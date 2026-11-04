@@ -48,7 +48,7 @@ docker compose up -d mongo                                # Mongo (replica set d
 uv venv -p 3.14 .venv && uv pip install -p .venv -e ./dominio -e ".[dev]"
 (cd dominio && uv venv -p 3.14 .venv && uv pip install -p .venv -e ".[dev]" && .venv/bin/pytest)   # regras
 .venv/bin/pytest                                          # API (memória + o Mongo do compose)
-.venv/bin/ruff check src tests
+.venv/bin/ruff check src tests dominio
 .venv/bin/uvicorn canteiro_api.main:app --reload
 docker compose up -d --build                              # Mongo + API em contêiner (lê o .env)
 docker compose -f docker-compose.yml -f docker-compose.completo.yml up -d --build   # + agente e web (repos lado a lado)

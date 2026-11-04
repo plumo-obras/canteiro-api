@@ -93,6 +93,28 @@ async def test_chave_propria_cifrada_e_entregue_so_ao_agente(vila, config):
     assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).status_code == 404
 
 
+async def test_chave_propria_no_registro_sem_desfazer_e_sem_segredo(vila, config):
+    """Exceção documentada em rotas/sessoes.py: o registro mostra conectar/desconectar, mas não guarda receita que
+    precisaria do segredo, nem deixa um admin desconectar pela porta dos fundos do Desfazer."""
+    chave = "sk-ant-teste-" + novo_id()
+    h_master, _ = await vila.usuario("master")
+    await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_master)
+    cifrado = (await vila.arm.obter("segredos", vila.tenant_id, f"anthropic-{vila.tenant_id}"))["cifrado"]
+    await vila.http.delete("/conta/chave-anthropic", headers=h_master)
+    regs = (await vila.http.get("/registro", headers=h_master)).json()
+    conectou = next(x for x in regs if x["texto"].startswith("Conectou a chave própria"))
+    desconectou = next(x for x in regs if x["texto"] == "Desconectou a chave própria da Anthropic")
+    assert conectou["texto"].endswith(f"(…{chave[-4:]})")
+    assert conectou["desfazer"] is None and desconectou["desfazer"] is None
+    # nem a chave nem o texto cifrado entram no registro, por nenhum caminho
+    brutos = [await vila.arm.obter("registro", vila.tenant_id, x["id"]) for x in (conectou, desconectou)]
+    assert chave not in str(brutos) and cifrado not in str(brutos)
+    for x in (conectou, desconectou):
+        r = await vila.http.post(f"/registro/{x['id']}/desfazer", headers=h_master)
+        assert r.status_code == 422 and "não tem como ser desfeita" in r.json()["detail"]
+    assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).status_code == 404
+
+
 # --- sessões ---
 
 async def test_sessao_criar_acrescentar_e_ler(vila):

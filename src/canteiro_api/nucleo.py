@@ -90,7 +90,8 @@ async def obra_do_tenant(leitor, tenant_id: str, obra_id: str) -> dict:
 
 async def insumo_da_obra(leitor, tenant_id: str, obra_id: str, insumo_id: str) -> dict:
     i = await leitor.obter("insumos", tenant_id, insumo_id)
-    if not i or i["obra_id"] != obra_id:
+    # arquivado = cadastro desfeito: para quem lança movimento ou pedido, ele não existe mais
+    if not i or i["obra_id"] != obra_id or i.get("arquivado"):
         raise NaoEncontrado("Insumo não encontrado nesta obra.")
     return i
 

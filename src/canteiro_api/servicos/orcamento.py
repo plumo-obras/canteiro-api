@@ -26,8 +26,8 @@ from ..esquemas import (
     PreviaOrcamento,
 )
 from ..modelos import doc
-from ..nucleo import ErroNegocio, evento, obra_do_tenant, registrar
-from .estoque import _nome_chave, id_derivado
+from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant
+from .estoque import _nome_chave, criado, gravar_insumo_novo, id_insumo, receita_insumos
 from .importacao import decodificar
 from .obras import insumos_da_obra
 
@@ -35,7 +35,8 @@ MAX_LINHAS = 2000
 # Planilha com mais linhas que isso nem é orçamento de obra; o teto protege a memória de quem lê arquivo enorme.
 MAX_LINHAS_LIDAS = MAX_LINHAS + 500
 LINHAS_CABECALHO = 30
-# até 4 escritas por insumo novo (insumo, saldo, movimento) + registro e evento: folgado nas 500 da transação
+# até 3 escritas por insumo novo (insumo, saldo, movimento) + registro e evento: folgado nas 500 da transação, e o
+# desfazer do lote (insumo, movimento, saldo por linha) também
 LINHAS_POR_TRANSACAO = 100
 
 # Sinônimos por "contém", sobre o título sem acento e sem pontuação. A ordem importa: unidade e quantidade primeiro,
@@ -386,36 +387,60 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if not linhas:
         raise ErroNegocio("Nenhuma linha para importar.")
     lotes = [linhas[i:i + LINHAS_POR_TRANSACAO] for i in range(0, len(linhas), LINHAS_POR_TRANSACAO)]
+    registros = []
     for k, lote in enumerate(lotes, start=1):
         parte = f" — parte {k} de {len(lotes)}" if len(lotes) > 1 else ""
-        await arm.em_transacao(_gravar_lote(u, obra_id, lote, existentes, parte))
-    return previa.model_copy(update={"aplicado": True})
+        registros.append(await arm.em_transacao(_gravar_lote(u, obra_id, lote, existentes, parte)))
+    return previa.model_copy(update={"aplicado": True, "registro_ids": registros})
 
 
 def _gravar_lote(u: UsuarioAtual, obra_id: str, lote: list[LinhaOrcamento], existentes: dict[str, dict], parte: str):
-    """Sem desfazer: a prévia é a rede de segurança, e corrigir é reimportar (o insumo existente é atualizado)."""
+    """Um lote = uma transação = uma entrada no registro. O Desfazer arquiva os insumos novos e devolve aos atualizados
+    os valores de antes; para isso o insumo atualizado é relido aqui dentro (o da prévia pode ter mudado)."""
+    campos = ("precisa_ate_o_fim", "valor_unitario", "curva")
+
     async def corpo(tx):
-        novos = atualizados = total = 0
+        alvos = []
         for x in lote:
-            total += x.total
             atual = existentes.get(_nome_chave(x.nome))
-            if atual:
-                tx.atualizar("insumos", u.tenant_id, atual["id"], {
-                    "precisa_ate_o_fim": x.quantidade, "valor_unitario": x.valor_unitario, "curva": x.curva})
-                atualizados += 1
-                continue
-            # o mesmo ID do cadastro pela tela: um "Cadastrar «Cal»" depois da importação colide, não duplica
-            ins = Insumo(id=id_derivado(u.tenant_id, "insumo", obra_id, _nome_chave(x.nome)), tenant_id=u.tenant_id,
-                         obra_id=obra_id, nome=x.nome, unidade=x.unidade, precisa_ate_o_fim=x.quantidade,
-                         valor_unitario=x.valor_unitario, curva=x.curva)
-            tx.criar("insumos", doc(ins))
-            if x.saldo:
-                tx.criar("movimentos", doc(Movimento(
-                    tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=ins.id, tipo=TipoMovimento.AJUSTE,
-                    quantidade=x.saldo, quem=u.nome, usuario_id=u.id, origem="sistema", origem_doc="orçamento")))
-            tx.criar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=x.saldo)))
-            novos += 1
-        registrar(tx, u, obra_id=obra_id, origem="tela",
-                  texto=f"Importou o orçamento: {novos} novos, {atualizados} atualizados ({fmt_reais(total)}){parte}")
-        evento(tx, u.tenant_id, "orcamento.importado", obra_id, {"novos": novos, "atualizados": atualizados})
+            id_ = atual["id"] if atual else id_insumo(u.tenant_id, obra_id, x.nome)
+            alvos.append((x, atual is not None, await tx.obter("insumos", u.tenant_id, id_), id_))
+        novos: list[dict] = []
+        restaurar: list[dict] = []
+
+        def aplicar():
+            total = 0
+            for x, atualiza, lido, id_ in alvos:
+                total += x.total
+                if atualiza:
+                    if not lido or lido.get("arquivado"):
+                        raise Conflito(f"'{x.nome}' mudou agora há pouco; envie a planilha de novo.")
+                    depois = {"precisa_ate_o_fim": x.quantidade, "valor_unitario": x.valor_unitario, "curva": x.curva}
+                    tx.atualizar("insumos", u.tenant_id, id_, depois)
+                    restaurar.append({"id": id_, "antes": {k: lido.get(k) for k in campos}, "depois": depois})
+                    continue
+                # o mesmo ID do cadastro pela tela: um "Cadastrar «Cal»" depois da importação colide, não duplica
+                ins = Insumo(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, nome=x.nome, unidade=x.unidade,
+                             precisa_ate_o_fim=x.quantidade, valor_unitario=x.valor_unitario, curva=x.curva)
+                d = doc(ins)
+                gravar_insumo_novo(tx, d, lido)
+                if x.saldo:
+                    tx.criar("movimentos", doc(Movimento(
+                        tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=ins.id, tipo=TipoMovimento.AJUSTE,
+                        quantidade=x.saldo, quem=u.nome, usuario_id=u.id, origem="sistema", origem_doc="orçamento")))
+                # o saldo nasce com o instante do cadastro: é por ele que o desfazer sabe que nada se mexeu depois
+                tx.salvar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=x.saldo,
+                                              atualizado_em=ins.criado_em)))
+                novos.append(criado(d, x.saldo))
+            evento(tx, u.tenant_id, "orcamento.importado", obra_id,
+                   {"novos": len(novos), "atualizados": len(restaurar)})
+            return total
+
+        op = Operacao(obra_id=obra_id, aplicar=aplicar,
+                      texto=lambda total: f"Importou o orçamento: {len(novos)} novos, {len(restaurar)} atualizados "
+                                          f"({fmt_reais(total)}){parte}",
+                      desfazer=lambda _: receita_insumos(obra_id, f"importação do orçamento{parte}", arquivar=novos,
+                                                         restaurar=restaurar))
+        _, reg = executar_e_registrar(tx, u, op)
+        return reg["id"]
     return corpo

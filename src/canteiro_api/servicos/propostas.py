@@ -29,7 +29,14 @@ from ..nucleo import (
     registrar,
 )
 from . import cronograma, fornecedores, obras, pedidos, versoes
-from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
+from .estoque import (
+    id_derivado,
+    linhas_de,
+    preparar_estorno,
+    preparar_movimento,
+    preparar_restaurar_insumos,
+    recusar_se_ha_pedido_aberto,
+)
 from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
 
 
@@ -233,6 +240,7 @@ _DESFAZER = {
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,
     "desligar_versao": versoes.preparar_desligar,
+    "restaurar_insumos": preparar_restaurar_insumos,
 }
 
 
@@ -243,6 +251,12 @@ def _com_texto(receita: dict | None, texto: str) -> dict | None:
 
 
 async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
+    previa = await arm.obter("registro", u.tenant_id, entrada_id)
+    receita_previa = (previa or {}).get("desfazer") or {}
+    if receita_previa.get("op") == "restaurar_insumos" and receita_previa.get("arquivar"):
+        await recusar_se_ha_pedido_aberto(arm, u.tenant_id, receita_previa["obra_id"],
+                                          [x["id"] for x in receita_previa["arquivar"]])
+
     async def corpo(tx):
         e = await tx.obter("registro", u.tenant_id, entrada_id)
         if not e:

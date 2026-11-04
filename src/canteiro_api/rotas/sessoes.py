@@ -74,6 +74,13 @@ async def acrescentar_mensagens(sessao_id: str, corpo: MensagensCorpo, response:
 
 
 # --- chave própria da Anthropic (o segredo só volta pela rota interna, para o serviço do agente) ---
+#
+# EXCEÇÃO À REGRA DO DESFAZER, deliberada: conectar e desconectar entram no registro SEM receita de desfazer.
+# - Desfazer a desconexão teria de devolver o segredo, e para isso a receita guardaria a chave (cifrada ou não). O
+#   registro é lido por qualquer papel, copiado para auditoria e nunca expira: não é lugar de segredo.
+# - Desfazer a conexão seria desconectar, mas pelo registro isso passaria pelo /registro/{id}/desfazer, que é de
+#   admin, enquanto mexer na chave é só do master; e, se a chave foi trocada depois, "desfazer" não volta a anterior.
+# O caminho de volta é explícito e do master: DELETE (desconectar) ou PUT com a chave colada de novo.
 
 def _id_segredo(tenant_id: str) -> str:
     return f"anthropic-{tenant_id}"
@@ -117,7 +124,8 @@ async def conectar_chave(corpo: ChaveCorpo, request: Request, u: UsuarioAtual = 
         tx.salvar("segredos", {"id": _id_segredo(u.tenant_id), "tenant_id": u.tenant_id, "tipo": "anthropic",
                                "cifrado": cifrado, "final": final, "atualizado_em": agora(), "por": u.id})
         tx.atualizar("tenants", u.tenant_id, u.tenant_id, {"chave_propria": True})
-        registrar(tx, u, obra_id=None, texto=f"Conectou a chave própria da Anthropic (…{final})")
+        # só os 4 últimos caracteres, que a tela da conta já mostra; desfazer=None é a exceção explicada acima
+        registrar(tx, u, obra_id=None, texto=f"Conectou a chave própria da Anthropic (…{final})", desfazer=None)
         evento(tx, u.tenant_id, "conta.chave_propria", None, {"ativa": True})
 
     await arm.em_transacao(tx_corpo)
@@ -133,7 +141,7 @@ async def desconectar_chave(u: UsuarioAtual = Depends(exigir(Papel.MASTER)), arm
         tx.salvar("segredos", {"id": _id_segredo(u.tenant_id), "tenant_id": u.tenant_id, "tipo": "anthropic",
                                "cifrado": None, "final": None, "atualizado_em": agora(), "por": u.id})
         tx.atualizar("tenants", u.tenant_id, u.tenant_id, {"chave_propria": False})
-        registrar(tx, u, obra_id=None, texto="Desconectou a chave própria da Anthropic")
+        registrar(tx, u, obra_id=None, texto="Desconectou a chave própria da Anthropic", desfazer=None)
         evento(tx, u.tenant_id, "conta.chave_propria", None, {"ativa": False})
 
     await arm.em_transacao(tx_corpo)

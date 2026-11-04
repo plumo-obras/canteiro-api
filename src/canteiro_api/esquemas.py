@@ -402,6 +402,8 @@ class Previa(BaseModel):
     aplicado: bool
     linhas: list[LinhaImportada]
     erros: list[ErroLinha]
+    registro_ids: list[str] = Field(default_factory=list,
+                                    description="uma EntradaRegistro por lote gravado: é o que o Desfazer usa")
 
 
 class PreviaOrcamento(BaseModel):
@@ -413,6 +415,8 @@ class PreviaOrcamento(BaseModel):
     novos: int
     atualizados: int
     juntadas: int = Field(description="linhas da planilha absorvidas em outra (mesmo insumo repetido)")
+    registro_ids: list[str] = Field(default_factory=list,
+                                    description="uma EntradaRegistro por lote gravado: é o que o Desfazer usa")
 
 
 class ItemPrevia(BaseModel):

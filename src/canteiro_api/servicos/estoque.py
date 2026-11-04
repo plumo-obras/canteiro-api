@@ -15,9 +15,19 @@ from canteiro_dominio.regras import (
 )
 from canteiro_dominio.tipos import fmt_qtd
 
+from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
 from ..modelos import doc
-from ..nucleo import Conflito, NaoEncontrado, Operacao, evento, insumo_da_obra, obra_do_tenant, registrar
+from ..nucleo import (
+    Conflito,
+    NaoEncontrado,
+    Operacao,
+    evento,
+    executar_e_registrar,
+    insumo_da_obra,
+    obra_do_tenant,
+    verbo_desfazer,
+)
 
 _NS = uuid.UUID("6f1c2a52-3b7e-4c1e-9a55-0c4a1f2b7d10")
 
@@ -143,7 +153,8 @@ def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) 
 
 async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra."""
-    insumos = await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)], [("nome", "asc")]))
+    insumos = ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
+                                                  [("nome", "asc")])))
     saldos = {s["id"]: s["saldo"] for s in
               await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
     pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
@@ -155,30 +166,159 @@ def _nome_chave(nome: str) -> str:
     return " ".join(nome.split()).casefold()
 
 
+def nome_limpo(nome: str) -> str:
+    return " ".join(nome.split())
+
+
+def id_insumo(tenant_id: str, obra_id: str, nome: str) -> str:
+    """O nome é a chave: "Areia  média" e "areia média" caem no mesmo documento, venham da tela ou de planilha."""
+    return id_derivado(tenant_id, "insumo", obra_id, _nome_chave(nome))
+
+
+def ativos(insumos: list[dict]) -> list[dict]:
+    # filtro em Python, não na consulta: o insumo gravado antes do campo `arquivado` não o tem, e no Firestore a
+    # igualdade não casa com campo ausente
+    return [i for i in insumos if not i.get("arquivado")]
+
+
+def gravar_insumo_novo(tx, d: dict, existente: dict | None) -> None:
+    """Grava o insumo de ID derivado do nome. `existente` é o que a transação leu nesse ID: arquivado (cadastro
+    desfeito) é reaproveitado; ativo quer dizer que alguém cadastrou o mesmo nome agora há pouco."""
+    if existente is None:
+        tx.criar("insumos", d)
+    elif existente.get("arquivado"):
+        tx.salvar("insumos", d)
+    else:
+        raise Conflito(f"'{d['nome']}' já está cadastrado nesta obra.")
+
+
+_CAMPOS_INSUMO = ("nome", "unidade", "tipo", "precisa_ate_o_fim", "valor_unitario", "curva")
+
+
+def criado(d: dict, saldo: int) -> dict:
+    """O que a receita guarda de um insumo recém-criado para saber, no desfazer, que ninguém mexeu nele depois."""
+    return {"id": d["id"], "saldo": saldo, "saldo_em": d["criado_em"], "campos": {k: d.get(k) for k in _CAMPOS_INSUMO}}
+
+
+def receita_insumos(obra_id: str, rotulo: str, *, arquivar: list[dict] = (), restaurar: list[dict] = ()) -> dict:
+    """Receita de desfazer de cadastro/importação de insumos.
+
+    `arquivar`: [`criado(...)`] — insumos criados; desfazer tira das listas e devolve o saldo inicial (ajuste oposto),
+    só se nada mudou desde então: `saldo_em` é o `atualizado_em` que a criação gravou no saldo (qualquer movimento o
+    troca) e `campos` o que ela gravou no insumo (uma importação posterior o troca).
+    `restaurar`: [{id, antes, depois}] — campos que a importação sobrescreveu.
+    """
+    return {"op": "restaurar_insumos", "obra_id": obra_id, "rotulo": rotulo, "arquivar": list(arquivar),
+            "reativar": [], "restaurar": list(restaurar)}
+
+
+async def recusar_se_ha_pedido_aberto(arm, tenant_id: str, obra_id: str, insumo_ids: list[str]) -> None:
+    """Arquivar um insumo com pedido aberto deixaria o pedido sem ter onde dar entrada (receber daria 404).
+
+    Fica fora da transação porque a porta não consulta dentro dela (o Firestore só lê por ID ali): sobra a janela de
+    alguém criar um pedido entre esta leitura e o desfazer, que é pequena e recuperável com Refazer.
+    """
+    ids = set(insumo_ids)
+    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
+                                                                  Filtro("status", "in", PEDIDOS_ABERTOS)]))
+    presos = sorted({p["numero"] for p in pedidos if any(linha["insumo_id"] in ids for linha in p["linhas"])})
+    if presos:
+        raise Conflito(f"Há pedido aberto com este insumo ({', '.join(presos)}); cancele-o antes de desfazer.")
+
+
+async def preparar_restaurar_insumos(tx, u: UsuarioAtual, receita: dict) -> Operacao:
+    """Desfaz (ou refaz) cadastro e importação de insumos, tudo ou nada.
+
+    Arquivar em vez de apagar porque a porta não apaga documento; o saldo inicial sai por um ajuste oposto, como no
+    estorno, para o livro-razão continuar fechando com a projeção. Recusa se qualquer insumo andou desde então:
+    desfazer em cima de um movimento ou de uma edição posterior apagaria trabalho de outra pessoa.
+    """
+    obra_id = receita["obra_id"]
+    lidos: dict[str, tuple[dict, dict | None]] = {}
+    for x in [*receita["arquivar"], *receita["reativar"], *receita["restaurar"]]:
+        i = await tx.obter("insumos", u.tenant_id, x["id"])
+        if not i or i["obra_id"] != obra_id:
+            raise NaoEncontrado("Insumo não encontrado nesta obra.")
+        lidos[x["id"]] = (i, await tx.obter("saldos", u.tenant_id, x["id"]))
+    for x, arquivado, saldo_esperado in [*((x, False, x["saldo"]) for x in receita["arquivar"]),
+                                         *((x, True, 0) for x in receita["reativar"])]:
+        i, saldo = lidos[x["id"]]
+        intocado = (saldo and saldo["atualizado_em"] == normalizar(x["saldo_em"]) and saldo["saldo"] == saldo_esperado
+                    and all(i.get(k) == v for k, v in x.get("campos", {}).items()))
+        if bool(i.get("arquivado")) != arquivado or not intocado:
+            raise Conflito(f"{i['nome']} teve movimento ou mudou desde então; não dá para desfazer.")
+    for x in receita["restaurar"]:
+        i, _ = lidos[x["id"]]
+        if i.get("arquivado") or any(i.get(k) != v for k, v in x["depois"].items()):
+            raise Conflito(f"{i['nome']} foi editado de novo depois; não dá para desfazer.")
+    quando = agora()
+
+    def ajustar(i: dict, saldo: dict, quantidade: int, novo: int) -> None:
+        if quantidade:
+            tx.criar("movimentos", doc(Movimento(
+                tenant_id=u.tenant_id, obra_id=obra_id, insumo_id=i["id"], tipo=TipoMovimento.AJUSTE,
+                quantidade=quantidade, quem=u.nome, usuario_id=u.id, origem="tela",
+                origem_doc="refazer" if receita.get("refazer") else "desfazer")))
+        tx.salvar("saldos", doc(Saldo(id=i["id"], tenant_id=u.tenant_id, obra_id=obra_id, saldo=novo,
+                                      atualizado_em=quando)))
+
+    def aplicar() -> dict:
+        for x in receita["arquivar"]:
+            i, saldo = lidos[x["id"]]
+            tx.atualizar("insumos", u.tenant_id, i["id"], {"arquivado": True})
+            ajustar(i, saldo, -x["saldo"], 0)
+        for x in receita["reativar"]:
+            i, saldo = lidos[x["id"]]
+            tx.atualizar("insumos", u.tenant_id, i["id"], {"arquivado": False})
+            ajustar(i, saldo, x["saldo"], x["saldo"])
+        for x in receita["restaurar"]:
+            tx.atualizar("insumos", u.tenant_id, x["id"], x["antes"])
+        evento(tx, u.tenant_id, "estoque.insumos_restaurados", obra_id,
+               {"arquivados": [x["id"] for x in receita["arquivar"]],
+                "reativados": [x["id"] for x in receita["reativar"]],
+                "restaurados": [x["id"] for x in receita["restaurar"]]})
+        return {"obra_id": obra_id}
+
+    # o refazer é a mesma receita com os papéis trocados; `saldo_em` passa a ser o instante gravado agora
+    inversa = {**receita, "arquivar": [{**x, "saldo_em": quando} for x in receita["reativar"]],
+               "reativar": [{**x, "saldo_em": quando} for x in receita["arquivar"]],
+               "restaurar": [{**x, "antes": x["depois"], "depois": x["antes"]} for x in receita["restaurar"]],
+               "refazer": not receita.get("refazer")}
+    return Operacao(obra_id=obra_id, aplicar=aplicar,
+                    texto=lambda d: f"{verbo_desfazer(receita)}: {receita['rotulo']}",
+                    desfazer=lambda d: inversa)
+
+
 async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade: str, curva: str,
                        precisa_ate_o_fim: int, valor_unitario: int = 0, tipo: str = "material") -> dict:
     """Cadastra um insumo na obra. O nome é a chave: "Areia  média" e "areia média" são o mesmo insumo.
 
-    A checagem contra os que já existem (inclusive os importados, de ID aleatório) é uma consulta antes da transação;
-    o ID derivado do nome fecha a corrida de dois cadastros iguais ao mesmo tempo (o segundo cai em ConflitoDeId).
+    A checagem contra os que já existem (inclusive os importados antigos, de ID aleatório) é uma consulta antes da
+    transação; o ID derivado do nome fecha a corrida de dois cadastros iguais ao mesmo tempo. Um cadastro desfeito
+    (arquivado) com o mesmo nome é reaproveitado.
     """
-    nome = " ".join(nome.split())
+    nome = nome_limpo(nome)
     await obra_do_tenant(arm, u.tenant_id, obra_id)
-    existentes = await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    existentes = ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
-    ins = Insumo(id=id_derivado(u.tenant_id, "insumo", obra_id, _nome_chave(nome)), tenant_id=u.tenant_id,
+    ins = Insumo(id=id_insumo(u.tenant_id, obra_id, nome), tenant_id=u.tenant_id,
                  obra_id=obra_id, nome=nome, tipo=tipo, unidade=unidade.strip(), curva=curva,
                  precisa_ate_o_fim=precisa_ate_o_fim,
                  valor_unitario=valor_unitario)
     d = doc(ins)
+    o_que = "serviço" if tipo == "servico" else "insumo"
 
     async def corpo(tx):
-        tx.criar("insumos", d)
-        tx.criar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=0)))
-        reg = registrar(tx, u, obra_id=obra_id, origem="tela",
-                        texto=f"Cadastrou o {'serviço' if tipo == 'servico' else 'insumo'} {nome} "
-                              f"({ins.unidade}, curva {curva})")
+        gravar_insumo_novo(tx, d, await tx.obter("insumos", u.tenant_id, ins.id))
+        # a projeção nasce com o instante do cadastro: é por ele que o desfazer sabe que nada se mexeu desde então
+        tx.salvar("saldos", doc(Saldo(id=ins.id, tenant_id=u.tenant_id, obra_id=obra_id, saldo=0,
+                                      atualizado_em=ins.criado_em)))
+        op = Operacao(obra_id=obra_id, aplicar=lambda: d,
+                      texto=lambda _: f"Cadastrou o {o_que} {nome} ({ins.unidade}, curva {curva})",
+                      desfazer=lambda _: receita_insumos(obra_id, f"cadastro do {o_que} {nome}",
+                                                         arquivar=[criado(d, 0)]))
+        _, reg = executar_e_registrar(tx, u, op)
         evento(tx, u.tenant_id, "estoque.insumo_criado", obra_id, {"insumo_id": ins.id})
         return {**d, "registro_id": reg["id"]}
 

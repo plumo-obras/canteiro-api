@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 # API central do Canteiro. Contexto de build = raiz deste repositório (o domínio mora em dominio/).
-FROM python:3.14-slim
+# Imagens travadas pelo digest do índice multi-arquitetura: a mesma tag pode apontar para outra imagem amanhã, e o que
+# o CI testou tem de ser o que o Render publica. O Dependabot (ecossistema docker) sobe tag e digest juntos; o uv é um
+# estágio com nome, e não um --mount=from=<imagem>, porque o Dependabot só lê as linhas FROM.
+FROM ghcr.io/astral-sh/uv:0.11@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 AS uv
+FROM python:3.14-slim@sha256:930e1abba7c4e8f96ed93e8012c35d174d7732752731bbd5e8e757d7ec6f3966
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_NO_CACHE=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     PATH=/srv/.venv/bin:$PATH
 WORKDIR /srv
@@ -8,10 +12,10 @@ WORKDIR /srv
 # (--mount) e não fica na imagem. Dependências antes do código, para mudança no src não reinstalar tudo.
 COPY pyproject.toml uv.lock ./
 COPY dominio dominio
-RUN --mount=from=ghcr.io/astral-sh/uv:0.11,source=/uv,target=/bin/uv \
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync --frozen --no-dev --no-install-project
 COPY src src
-RUN --mount=from=ghcr.io/astral-sh/uv:0.11,source=/uv,target=/bin/uv \
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync --frozen --no-dev --no-editable \
  && useradd --create-home --uid 10001 canteiro
 USER canteiro

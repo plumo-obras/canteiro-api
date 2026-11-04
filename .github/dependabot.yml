@@ -1,0 +1,38 @@
+# Atualizações semanais do que fica travado no repositório: actions (por SHA), imagens (por digest) e o uv.lock.
+# Menor e patch vêm num PR só por ecossistema, para não afogar a revisão; major vem sozinho, porque é o que quebra.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-menor-e-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    # Dockerfile (python e o estágio do uv)
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      imagens-menor-e-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker-compose
+    # o mongo de docker-compose.yml; o do CI (docker run em ci.yml) acompanha à mão o digest que este PR trouxer
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      compose-menor-e-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: uv
+    # uv.lock da raiz, que inclui o domínio (dominio/ entra como dependência editável)
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python-menor-e-patch:
+        update-types: [minor, patch]

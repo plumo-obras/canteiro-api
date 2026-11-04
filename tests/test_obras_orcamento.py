@@ -299,6 +299,40 @@ async def test_atualiza_insumo_existente_e_recusa_unidade_diferente(vila):
     assert p["erros"][0]["linha"] == 3 and "já está cadastrado em m³" in p["erros"][0]["mensagem"]
 
 
+async def test_desfazer_importacao_do_orcamento_arquiva_novos_e_volta_os_atualizados(vila):
+    o = await nova_obra(vila)
+    m = {"planilha": "Orçamento", "linha_cabecalho": 1, "nome": 0, "unidade": 1, "quantidade": 2, "valor_unitario": 3,
+         "saldo": 4}
+    url = f"/obras/{o['id']}/insumos"
+    plan1 = xlsx(["Descrição", "Un", "Qtd", "Unit", "Saldo"], ["Cal hidratada", "sc", 30, "18,50", 4])
+    r1 = await importar(vila, plan1, m, aplicar=True, obra=o["id"])
+    cal = (await vila.http.get(url, headers=vila.h)).json()[0]["insumo"]
+    # a segunda importação atualiza a cal e cria o fio
+    plan2 = xlsx(["Descrição", "Un", "Qtd", "Unit", "Saldo"], ["cal hidratada", "sc", 36, "19", None],
+                 ["Fio 2,5 mm", "m", 500, "1,20", 50])
+    r2 = await importar(vila, plan2, m, aplicar=True, obra=o["id"])
+    (reg2,) = r2.json()["registro_ids"]
+    desfeito = await vila.http.post(f"/registro/{reg2}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    assert desfeito.json()["texto"] == "Desfeito: importação do orçamento"
+    itens = {x["insumo"]["nome"]: x for x in (await vila.http.get(url, headers=vila.h)).json()}
+    assert set(itens) == {"Cal hidratada"}
+    c = itens["Cal hidratada"]
+    assert (c["insumo"]["precisa_ate_o_fim"], c["insumo"]["valor_unitario"], c["conta"]["saldo"]) == (
+        qtd(30), 1850, qtd(4))
+
+    refeito = await vila.http.post(f"/registro/{desfeito.json()['id']}/desfazer", headers=vila.h)
+    assert refeito.status_code == 200, refeito.text
+    itens = {x["insumo"]["nome"]: x for x in (await vila.http.get(url, headers=vila.h)).json()}
+    assert itens["Cal hidratada"]["insumo"]["precisa_ate_o_fim"] == qtd(36)
+    assert itens["Fio 2,5 mm"]["conta"]["saldo"] == qtd(50)
+
+    # a primeira importação não se desfaz mais: a cal foi atualizada depois (e esse refazer ainda vale)
+    r = await vila.http.post(f"/registro/{r1.json()['registro_ids'][0]}/desfazer", headers=vila.h)
+    assert r.status_code == 409
+    assert cal["id"] in {x["insumo"]["id"] for x in (await vila.http.get(url, headers=vila.h)).json()}
+
+
 # --- aprovar ---
 
 async def test_aprovar_orcamento_e_desfazer(vila):

@@ -11,7 +11,7 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
     obras = await arm.consultar(Consulta("obras", tenant_id, ordem=[("nome", "asc")]))
     if not obras:
         return []
-    insumos = await arm.consultar(Consulta("insumos", tenant_id))
+    insumos = estoque.ativos(await arm.consultar(Consulta("insumos", tenant_id)))
     saldos = {s["id"]: s["saldo"] for s in await arm.consultar(Consulta("saldos", tenant_id))}
     pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
     pendentes = await arm.consultar(Consulta("propostas", tenant_id,

@@ -1,4 +1,6 @@
 # CI da API. O Render só publica quando estes checks passam (render.yaml: autoDeployTrigger: checksPass).
+# Toda action vai travada pelo SHA do commit (a tag pode ser movida por quem controla o repositório dela); o comentário
+# diz a versão, e o Dependabot (.github/dependabot.yml) atualiza os dois.
 name: ci
 
 on:
@@ -17,8 +19,8 @@ jobs:
   dominio:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: testes do domínio
         working-directory: dominio
         run: |
@@ -26,18 +28,46 @@ jobs:
           uv pip install -p .venv -e ".[dev]"
           .venv/bin/pytest -q
 
+  versao-dominio:
+    # O canteiro-agente instala o domínio pela tag dominio-vX.Y.Z: mudar dominio/ sem subir a versão deixa o agente
+    # rodando um código diferente do que a tag diz (ou impede de publicar a tag nova). Testes do domínio não vão para
+    # o pacote, então não contam.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: dominio/ mudou junto com a versão
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "sem commit de base para comparar (branch nova?); nada a conferir"; exit 0
+          fi
+          base=$(git merge-base "$BASE" HEAD)
+          mudou=$(git diff --name-only "$base" HEAD -- dominio/ ':(exclude)dominio/tests/')
+          if [ -z "$mudou" ]; then echo "dominio/ não mudou"; exit 0; fi
+          antes=$(git show "$base:dominio/pyproject.toml" 2>/dev/null | grep -m1 '^version' || true)
+          agora=$(grep -m1 '^version' dominio/pyproject.toml)
+          if [ "$antes" = "$agora" ]; then
+            echo "::error file=dominio/pyproject.toml::dominio/ mudou mas a versão não ($agora). Suba a versão em dominio/pyproject.toml e, depois do merge, publique a tag dominio-vX.Y.Z (o canteiro-agente instala por ela)."
+            echo "$mudou"
+            exit 1
+          fi
+          echo "dominio/ mudou e a versão subiu: ${antes#version = } -> ${agora#version = }"
+
   api:
     # ubuntu-latest já roda kernel 6.19+, que esta versão do mongod recusa ("Linux kernel versions 6.19 and newer has a
     # known incompatibility"). Voltar para ubuntu-latest quando a imagem do Mongo corrigir.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
       - name: MongoDB em replica set (transações)
         run: |
-          docker run -d --name mongo -p 27017:27017 mongo:8 mongod --replSet rs0 --bind_ip_all
+          docker run -d --name mongo -p 127.0.0.1:27017:27017 mongo:8@sha256:e16e606f792ea89d2b4907b54e5e31eb86a7a23e27231dce3a982cc8f2d73cd2 mongod --replSet rs0 --bind_ip_all
           sleep 5
           if [ "$(docker inspect -f '{{.State.Running}}' mongo)" != "true" ]; then
             echo "::error::o mongod parou ao subir; log abaixo"; docker logs mongo 2>&1 | tail -40; exit 1
@@ -51,14 +81,14 @@ jobs:
           MONGO_URL: mongodb://localhost:27017/?replicaSet=rs0&directConnection=true
         run: |
           uv sync --frozen --extra dev
-          .venv/bin/ruff check src tests
+          .venv/bin/ruff check src tests dominio
           .venv/bin/pytest -q
 
   imagem:
     # Garante que o Dockerfile que o Render usa continua compilando.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -t canteiro-api .
       - name: o contêiner sobe e responde /saude
         run: |

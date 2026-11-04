@@ -184,3 +184,65 @@ async def test_cadastrar_insumo_exige_admin_e_valida(vila):
     for ruim in ({"nome": "", "unidade": "un"}, {"nome": "X", "unidade": ""},
                  {"nome": "X", "unidade": "un", "curva": "D"}, {"nome": "X", "unidade": "un", "precisa_ate_o_fim": -1}):
         assert (await vila.http.post(url, headers=vila.h, json=ruim)).status_code == 422
+
+
+async def _desfazer(vila, registro_id):
+    return await vila.http.post(f"/registro/{registro_id}/desfazer", headers=vila.h)
+
+
+async def _ids_na_lista(vila):
+    return {x["insumo"]["id"] for x in (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()}
+
+
+async def test_desfazer_cadastro_arquiva_refazer_volta_e_o_nome_fica_livre(vila):
+    url = f"/obras/{vila.obra}/insumos"
+    ins = (await vila.http.post(url, headers=vila.h, json={"nome": "Cal hidratada", "unidade": "sc"})).json()
+    desfeito = await _desfazer(vila, ins["registro_id"])
+    assert desfeito.status_code == 200, desfeito.text
+    assert desfeito.json()["texto"] == "Desfeito: cadastro do insumo Cal hidratada"
+    assert ins["id"] not in await _ids_na_lista(vila)
+    # arquivado não recebe movimento: para quem lança, ele não existe
+    m = await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h,
+                             json={"insumo_id": ins["id"], "tipo": "entrada", "quantidade": 1000,
+                                   "chave_idempotencia": "cal-arquivada-1"})
+    assert m.status_code == 404
+
+    refeito = await _desfazer(vila, desfeito.json()["id"])
+    assert refeito.status_code == 200, refeito.text
+    assert refeito.json()["texto"] == "Refeito: Cadastrou o insumo Cal hidratada (sc, curva C)"
+    assert ins["id"] in await _ids_na_lista(vila)
+
+    # desfeito de novo, o mesmo nome (com outra grafia) cadastra outra vez no mesmo documento
+    assert (await _desfazer(vila, refeito.json()["id"])).status_code == 200
+    de_novo = await vila.http.post(url, headers=vila.h, json={"nome": "CAL  hidratada", "unidade": "kg"})
+    assert de_novo.status_code == 201, de_novo.text
+    assert de_novo.json()["id"] == ins["id"] and de_novo.json()["unidade"] == "kg"
+    conta = next(x for x in (await vila.http.get(url, headers=vila.h)).json() if x["insumo"]["id"] == ins["id"])
+    assert conta["insumo"]["arquivado"] is False and conta["conta"]["saldo"] == 0
+
+
+async def test_desfazer_cadastro_recusa_depois_de_movimento(vila):
+    url = f"/obras/{vila.obra}/insumos"
+    ins = (await vila.http.post(url, headers=vila.h, json={"nome": "Brita 2", "unidade": "m³"})).json()
+    for chave, tipo in (("brita-entrada", "entrada"), ("brita-saida", "saida")):
+        r = await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h,
+                                 json={"insumo_id": ins["id"], "tipo": tipo, "quantidade": 1000,
+                                       "chave_idempotencia": chave})
+        assert r.status_code == 201, r.text
+    # saldo voltou a zero, mas houve movimento: desfazer o cadastro apagaria o livro-razão da tela
+    r = await _desfazer(vila, ins["registro_id"])
+    assert r.status_code == 409 and "teve movimento" in r.json()["detail"]
+    assert ins["id"] in await _ids_na_lista(vila)
+
+
+async def test_desfazer_cadastro_recusa_com_pedido_aberto(vila):
+    """Arquivado, o insumo some para quem lança: o pedido aberto ficaria sem ter onde dar entrada."""
+    url = f"/obras/{vila.obra}/insumos"
+    ins = (await vila.http.post(url, headers=vila.h, json={"nome": "Tela soldada", "unidade": "m²"})).json()
+    p = await vila.http.post(f"/obras/{vila.obra}/pedidos", headers=vila.h,
+                             json={"insumo_id": ins["id"], "quantidade": 10_000, "fornecedor": "Gerdau",
+                                   "valor": 50_000})
+    assert p.status_code == 201, p.text
+    r = await _desfazer(vila, ins["registro_id"])
+    assert r.status_code == 409 and p.json()["numero"] in r.json()["detail"]
+    assert ins["id"] in await _ids_na_lista(vila)

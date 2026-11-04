@@ -114,6 +114,9 @@ class Insumo(Documento):
     precisa_ate_o_fim: Milesimos = 0       # quanto a obra ainda vai consumir (orçamento/planejamento)
     curva: CurvaABC = CurvaABC.B           # curva A exige destino na baixa
     valor_unitario: Centavos = 0           # preço unitário do orçamento; 0 = sem preço
+    # cadastro desfeito pelo registro: a porta não apaga documento, então ele sai das listas e da Conta. O ID fica
+    # reservado: cadastrar o mesmo nome de novo reaproveita este documento.
+    arquivado: bool = False
 
 
 class TipoMovimento(StrEnum):
@@ -287,7 +290,8 @@ class Proposta(Documento):
     decidido_por: str | None = None
     decidido_em: datetime | None = None
     motivo_recusa: str | None = None
-    registro_id: str | None = None         # a EntradaRegistro da execução: é o que o Desfazer usa (sobrevive a recarregar a tela)
+    # a EntradaRegistro da execução: é o que o Desfazer usa (sobrevive a recarregar a tela)
+    registro_id: str | None = None
     # Quem aprova pode corrigir a proposta antes (ex.: 30 sc em vez de 34). `dados` passa a ser o que foi executado e
     # `dados_originais` guarda o que o agente propôs, para a auditoria mostrar a diferença.
     ajustada: bool = False
@@ -306,7 +310,10 @@ class EntradaRegistro(Documento):
 
 
 class UsoIA(Documento):
-    """Livro de consumo: uma linha por chamada ao modelo. Fonte da fatura (créditos) ou do informativo (chave própria)."""
+    """Livro de consumo: uma linha por chamada ao modelo.
+
+    Fonte da fatura (créditos) ou do informativo (chave própria).
+    """
     usuario_id: str | None = None
     obra_id: str | None = None
     sessao_id: str | None = None

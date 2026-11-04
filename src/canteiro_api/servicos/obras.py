@@ -17,7 +17,7 @@ from ..nucleo import (
     registrar,
     verbo_desfazer,
 )
-from .estoque import id_derivado
+from .estoque import ativos, id_derivado
 
 # Como cada campo aparece no texto do registro ("Atualizou a obra X: área, padrão").
 ROTULOS = {
@@ -47,7 +47,8 @@ async def criar_obra(arm, u: UsuarioAtual, corpo: ObraCorpo) -> tuple[dict, bool
             return existente, False
         o = doc(Obra(id=id_, tenant_id=u.tenant_id, status="em_orcamento", **dados))
         tx.criar("obras", o)
-        # sem desfazer: a porta de armazenamento não apaga documento (o mesmo vale para o cadastro de insumo)
+        # sem desfazer: a porta de armazenamento não apaga documento, e arquivar a obra (como o insumo desfeito) ainda
+        # não tem onde aparecer: tiraria da lista uma obra com orçamento, pedidos e registro
         registrar(tx, u, obra_id=id_, texto=f"Criou a obra {o['nome']}", origem="tela", id=id_registro)
         evento(tx, u.tenant_id, "obra.criada", id_, {"nome": o["nome"]})
         return o, True
@@ -94,7 +95,7 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
 
 async def insumos_da_obra(arm, tenant_id: str, obra_id: str) -> list[dict]:
     # a transação portável só lê por ID; a lista de insumos vem antes, por consulta
-    return await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    return ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)])))
 
 
 async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos: list[dict],

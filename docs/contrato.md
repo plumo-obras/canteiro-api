@@ -74,7 +74,14 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   não medido.
 - `POST /obras/{obra_id}/insumos` `{nome, unidade, tipo?="material", curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
   (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
-  maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Sem desfazer.
+  maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Registro "Cadastrou o
+  insumo X (un, curva C)" com `desfazer` `restaurar_insumos` (ver abaixo).
+- **Desfazer de cadastro e importação de insumos** (`restaurar_insumos`): a porta não apaga, então o insumo criado é
+  **arquivado** (`Insumo.arquivado = true`, domínio ≥ 0.2.0): sai de `GET …/insumos`, do resumo e da aprovação do
+  orçamento, e movimento ou pedido nele → 404. Saldo inicial de importação sai por um AJUSTE oposto. Os campos que uma
+  importação de orçamento sobrescreveu voltam ao valor de antes. Tudo ou nada: 409 se qualquer insumo do lote teve
+  movimento ou foi editado depois. Refazer reativa (e relança o ajuste). Cadastrar ou importar de novo o mesmo nome
+  reaproveita o documento arquivado (o ID sai do nome).
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50&antes_de=…` → `[Movimento]` (mais novos primeiro;
   paginação em "Listagens paginadas")
 - `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, etapa?, origem_doc?, chave_idempotencia}` →
@@ -90,7 +97,10 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   `nome;unidade;saldo;precisa_ate_o_fim;curva`. Cria insumos e um movimento de AJUSTE inicial. Responde a prévia
   (`?aplicar=false`) ou aplica (`?aplicar=true`). Número ambíguo ("2.760") volta como erro da linha.
   Resposta sempre `{aplicado, linhas:[{linha, nome, unidade, saldo, precisa_ate_o_fim, curva}], erros:[{linha, campo, mensagem}]}`;
-  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra é erro da linha. É a importação
+  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra (sem diferenciar maiúsculas e
+  espaços) é erro da linha; o nome é gravado com os espaços arrumados e o ID sai dele, o mesmo do cadastro pela tela
+  (duas importações iguais ao mesmo tempo não duplicam: a segunda → 409). Aplicada, a resposta traz `registro_ids`
+  (um registro "Importou N insumo(s) da planilha" por lote de 100, com `desfazer` `restaurar_insumos`). É a importação
   antiga, no nosso formato de colunas; a do orçamento (abaixo) lê a planilha que a construtora já tem.
 
 ## Orçamento por planilha
@@ -116,7 +126,8 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 
 - `POST /obras/{obra_id}/orcamento/importar` (multipart `arquivo`, `mapeamento` = JSON, `aplicar` = bool) →
   `PreviaOrcamento` = `{aplicado, linhas: [LinhaOrcamento], ignoradas: [{linha, texto, motivo}],
-  erros: [{linha, campo, mensagem}], total, novos, atualizados, juntadas}`.
+  erros: [{linha, campo, mensagem}], total, novos, atualizados, juntadas, registro_ids}` (`registro_ids` só quando
+  aplicada: um por lote).
   - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
   - **Ignorada** (não é erro): sem descrição, sem unidade (título de etapa ou subtotal) ou quantidade vazia/zero.
   - **Erro da linha**: número inválido ou ambíguo ("2.760"), negativo, curva fora de A/B/C, descrição > 120 ou unidade
@@ -132,7 +143,8 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
     troca `precisa_ate_o_fim`, `valor_unitario` e `curva` (o saldo da planilha só vale para insumo novo).
   - Gravação em lotes de 100 por transação; insumo novo tem o mesmo ID do cadastro pela tela (nome repetido depois
     colide em vez de duplicar) e saldo > 0 vira um AJUSTE inicial. Registro "Importou o orçamento: N novos, M
-    atualizados (R$ X)" por lote, **sem desfazer**: a prévia é a rede de segurança, e corrigir é reimportar.
+    atualizados (R$ X)" por lote, com `desfazer` `restaurar_insumos`: arquiva os novos e devolve aos atualizados
+    `precisa_ate_o_fim`, `valor_unitario` e `curva` de antes.
 
 ### Orçamento da obra (EAP, em versões)
 
@@ -298,8 +310,8 @@ atual de cada etapa (contrato + aditivos vigentes).
 
 - `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados}` → `Proposta` (pendente). Só valida e
   guarda: **não executa**. Qualquer papel propõe (o agente usa o token de quem conversa); `dados` inválido → 422.
-  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, previsao?}` (o corpo do POST de
-  pedido **sem** `aprovado`) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
+  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, previsao?}` (o corpo do POST
+  de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
   `POST …/avancar`) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
 - `GET /propostas?status=pendente&obra_id=…&limite=100&antes_de=…` → `[Proposta]` (mais novas primeiro)
 - `POST /propostas/{id}/aprovar` `{ajustes?}` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o
@@ -356,6 +368,8 @@ atual de cada etapa (contrato + aditivos vigentes).
   Nunca traz a chave nem o cifrado. `final` = os 4 últimos caracteres (a tela põe o "…").
 - `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "abcd"}`. Guardada cifrada
   (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE` desconecta.
+  Conectar e desconectar entram no registro **sem `desfazer`**, por decisão: a receita teria de guardar o segredo
+  (desfazer a desconexão), e o Desfazer é de admin enquanto a chave é só do master. Voltar atrás é `PUT`/`DELETE`.
 - `GET /interno/chave-anthropic` (só o serviço do agente: `Authorization: Bearer <token de serviço>` +
   `X-Canteiro-Usuario: Bearer <acesso do usuário>`) → `{chave}` com `Cache-Control: no-store`; 404 sem chave própria.
 
@@ -388,11 +402,17 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 |---|---|---|
 | `listar_obras()` | consulta | `GET /obras` |
 | `consultar_estoque(obra_id, busca?)` | consulta | `GET /obras/{id}/insumos` |
-| `historico_movimentos(obra_id, insumo_id)` | consulta | `GET …/movimentos` |
+| `historico_movimentos(obra_id, insumo_id, limite?=20)` | consulta | `GET …/movimentos` |
 | `listar_pedidos(obra_id, status?)` | consulta | `GET /obras/{id}/pedidos` |
-| `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa)` | propõe | `POST /propostas` (criar_pedido) |
+| `consultar_orcamento(obra_id, busca?)` | consulta | `GET /obras/{id}/orcamento` |
+| `consultar_cronograma(obra_id)` | consulta | `GET /obras/{id}/cronograma` |
+| `listar_fornecedores(busca?)` | consulta | `GET /fornecedores` |
+| `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido) |
 | `propor_avanco_pedido(obra_id, pedido_id, para, justificativa, quantidade_recebida?, nf?)` | propõe | `POST /propostas` (avancar_pedido) |
 | `propor_ajuste_estoque(obra_id, insumo_id, quantidade, motivo)` | propõe | `POST /propostas` (ajuste_estoque) |
+
+- `propor_pedido` confere a `etapa` contra `GET …/etapas` antes de propor: etapa que não existe, ou obra com orçamento
+  e etapa omitida → erro para o modelo (que pergunta à pessoa), sem criar proposta.
 
 - As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API.
 
