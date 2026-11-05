@@ -233,9 +233,18 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   (centavos), somados das linhas dos pedidos da obra pela `etapa` de cada linha. `cotando` = pedidos em cotação ·
   `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
   encerrado com sobra compromete só o que chegou) · `realizado` = o que já foi entregue ou medido, pelo preço do pedido.
-  Cancelado não conta. `totais.sem_etapa` = o gasto sem etapa ou em etapa que não está nas versões vigentes (já somado
+  Cancelado não conta. `totais.sem_etapa` = o pedido sem etapa ou em etapa que não está nas versões vigentes (já somado
   nos totais). Atenção: `atual` é preço de contrato (com BDI e mão de obra); comprometido e realizado são custo de
   compra.
+- **Gastos no realizado** (regra em `canteiro_dominio.gastos.gastos_no_orcamento`): o **gasto avulso** (comprovante
+  confirmado **sem** `pedido_id`, não estornado) é dinheiro que saiu e soma, pelo `valor`, no `comprometido` **e** no
+  `realizado` da etapa dele, mexendo no `saldo` e no `estourou`; cada etapa traz `gastos_avulsos` (a parte que veio de
+  gasto, já somada). **Pagamento de pedido não soma**: o custo do pedido já está no realizado pela entrega; somar o
+  pagamento contaria duas vezes. `totais.gastos` = `{total, nas_etapas, fora_do_orcamento, na_lista_padrao,
+  sem_etapa_do_orcamento}`, todos já somados no `comprometido`/`realizado`/`saldo` dos totais: `fora_do_orcamento` =
+  gastos nas **etapas extras** (não engordam etapa do orçamento); `sem_etapa_do_orcamento` = gastos numa chave que não
+  é etapa vigente nem extra (lançados na lista padrão antes da importação, ou etapa de versão desfeita; reclassifique
+  com `PATCH /gastos/{id}`); `na_lista_padrao` = obra sem orçamento, gastos na lista padrão.
 - **Contas prontas** (a tela e o agente só mostram): cada etapa traz `saldo` (= `atual − comprometido`, centavos;
   negativo quando estourou) e `estourou` (`comprometido > atual`); `totais` traz `saldo` (o mesmo, da obra) e
   `aditivos_pct` = aditivos sobre o contratado em **centésimos de %** (290 = 2,9%; arredondado ao mais próximo) ou
@@ -371,7 +380,8 @@ atual de cada etapa (contrato + aditivos vigentes).
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
   - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
-    saldo, etapas_estouradas: [{etapa, descricao, saldo}]}` (os totais de `GET …/orcamento`).
+    saldo, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de `GET …/orcamento`; `realizado` e
+    `comprometido` já com os gastos avulsos, e `gastos` = o mesmo `totais.gastos`).
   - `entregas`: `{hoje, atrasadas, proximos_7_dias, sem_previsao, nf_para_conferir}`; cada entrega =
     `{pedido_id, numero, fornecedor, status, previsao, itens: [{nome, unidade, falta_entregar}]}`, só pedidos de
     aprovado a parcial, pela `previsao` "AAAA-MM-DD" (outro formato conta em `sem_previsao`).
@@ -381,28 +391,37 @@ atual de cada etapa (contrato + aditivos vigentes).
 
 ## Gastos da obra: comprovantes, leitura por IA e revisão
 
-Gasto é **dinheiro que saiu**, numa data, numa etapa de gasto. A pessoa envia o comprovante (Pix, NF paga, boleto
+Gasto é **dinheiro que saiu**, numa data, numa etapa. A pessoa envia o comprovante (Pix, NF paga, boleto
 pago, recibo, papel à mão), o serviço do agente lê com IA e preenche o máximo, e uma pessoa (admin) confere e confirma.
 Só a confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não conta em nada. Regras em
 `dominio/src/canteiro_dominio/{etapas,leitura,gastos}.py`.
 
-**Duas árvores, duas "etapas".** Nesta seção, **etapa** é sempre a **etapa de gasto** (as 24 fixas + as extras da
-obra, chave como `eletrica` ou `x-<id>`), que é OUTRA árvore que a **EAP do orçamento** (as etapas numeradas da
-planilha de cada construtora, `etapa: "3"` em `GET …/orcamento`, no cronograma e na apropriação de pedidos). O de-para
-entre as duas vem depois. Por isso **gasto avulso não mexe no orçamento**: o `realizado`/`comprometido` de
-`GET …/orcamento` e do resumo da obra continuam vindo só das entregas e medições de pedidos; o total dos gastos avulsos
-aparece só em `GET …/gastos/resumo`.
+**Uma árvore só, a do orçamento quando ele existe.** Obra **com orçamento** (alguma versão vigente): as etapas de
+gasto são as **etapas do orçamento** (as mesmas de `GET …/etapas`, na ordem dele; chave = o código da etapa, como
+`"18"`, a mesma chave de `GET …/orcamento`, do cronograma e da apropriação de pedidos) mais as **etapas extras** da
+obra. Obra **sem orçamento**: a **lista padrão** de 24 etapas (chave estável como `fundacao`, `eletrica`, `pessoal`)
+mais as extras antes de "Outros". O gasto avulso soma no `realizado` da etapa do orçamento (ver "Gastos no realizado"
+no orçamento); o das extras fica "fora do orçamento". Gasto lançado na lista padrão antes de a obra importar o
+orçamento **continua contando** (nos totais) e aparece como **"sem etapa do orçamento"** até alguém reclassificar.
+
+`origem` (em `/arvore`, no resumo e nos lançados) diz de onde vem a etapa: `orcamento` · `padrao` (lista padrão, só em
+obra sem orçamento) · `extra` · `sem_etapa_do_orcamento` (chave que não está mais na árvore: lista padrão numa obra
+que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lançados).
 
 **Árvore de gasto:**
 
-- `GET /obras/{obra_id}/arvore` (qualquer papel) → `[{chave, nome, inclui, fixa, topicos: [{id, nome}]}]`. As 24
-  **etapas fixas** (iguais em toda obra; chave estável como `fundacao`, `eletrica`, `pessoal`), as **etapas extras** da
-  obra (chave `x-<id>`) antes de "Outros", e os **tópicos** de cada etapa. Arquivados não aparecem.
+- `GET /obras/{obra_id}/arvore` (qualquer papel) → `[{chave, nome, inclui, fixa, origem, topicos: [{id, nome}]}]`.
+  Com orçamento: as etapas dele (`origem: "orcamento"`, `fixa: true`, `inclui: ""`, `nome` = "18 INSTALAÇÃO ELÉTRICA
+  - 220V", com o código na frente; etapa sem número da planilha fica só com a descrição) e depois as extras
+  (`origem: "extra"`, `fixa: false`, chave `x-<id>`). Sem orçamento: as 24 da lista padrão (`origem: "padrao"`,
+  `fixa: true`), as extras antes de "Outros". Os **tópicos** de cada etapa ficam presos à chave dela (no orçamento, o
+  código). Arquivados não aparecem; tópico de uma etapa que saiu da árvore também não.
 - `POST /obras/{obra_id}/etapas-extras` `{nome}` e `POST /obras/{obra_id}/topicos` `{etapa, nome}` (admin) → 201 +
-  `registro_id`. Nome até 60, sem repetir (sem diferenciar acento e maiúscula) entre as etapas da obra / os tópicos da
-  etapa → 422. Até 20 etapas extras por obra e 30 tópicos por etapa. Desfazer a criação arquiva; refazer reativa.
-  Limite e nome único valem também com pedidos simultâneos e no Desfazer/Refazer (reativar ou voltar o nome antigo
-  que outro pegou nesse meio-tempo → 422 "Já existe: …").
+  `registro_id`. Nome até 60, sem repetir (sem diferenciar acento e maiúscula) entre as etapas da obra (com orçamento:
+  a descrição de cada etapa dele, com ou sem o código; sem: a lista padrão) / os tópicos da etapa → 422. `etapa` do
+  tópico tem de estar na árvore de hoje → 422. Até 20 etapas extras por obra e 30 tópicos por etapa. Desfazer a
+  criação arquiva; refazer reativa. Limite e nome único valem também com pedidos simultâneos e no Desfazer/Refazer
+  (reativar ou voltar o nome antigo que outro pegou nesse meio-tempo → 422 "Já existe: …").
 - `PATCH /etapas-extras/{id}` e `PATCH /topicos/{id}` `{nome?, arquivado?}` (admin) → renomeia e/ou arquiva/reativa,
   com Desfazer e Refazer. Nada mudou → 422. Arquivado sai da árvore e não recebe gasto novo; gasto antigo fica.
 
@@ -436,7 +455,7 @@ aparece só em `GET …/gastos/resumo`.
   cnpj_favorecido, classificacao: {certeza, opcoes: [{etapa, topico_id, motivo}]}, observacoes}`. `erro` = frase para
   a pessoa ("A leitura automática falhou agora…"); não apaga uma leitura anterior. Comprovante já revisado → 409.
 - `GET /comprovantes/{id}` → `Comprovante + revisao`, o formulário pronto (recalculado a cada abertura, porque a árvore
-  muda): `valor`, `data_pagamento`, `favorecido`, `descricao` = `{estado: lido | conferir | vazio, opcoes: [{valor,
+  muda: com orçamento, as opções são etapas dele e extras; uma sugestão da lista padrão é descartada): `valor`, `data_pagamento`, `favorecido`, `descricao` = `{estado: lido | conferir | vazio, opcoes: [{valor,
   rotulo, motivo, fornecedor_id}], escolhido}`; `classificacao` = `{estado, opcoes: [{etapa, topico_id, rotulo,
   motivo}], escolhido}`; mais `tipo_documento`, `situacao_pagamento`, `avisos: [str]`, `observacoes`.
   - **lido**: certeza alta e uma opção válida, já marcada (`escolhido: 0`). **conferir**: dúvida; até 3 opções com o
@@ -447,12 +466,14 @@ aparece só em `GET …/gastos/resumo`.
     `a_pagar`/`incerto` → aviso de que o documento não comprova pagamento. Leitura que falhou → o erro vem em `avisos`.
 - `POST /comprovantes/{id}/confirmar` (admin) `{valor, data_pagamento, favorecido, descricao, etapa, topico_id?,
   fornecedor_id?, pedido_id?}` → `{gasto, comprovante, registro_id}` (201). Valor > 0 em centavos; data `AAAA-MM-DD`
-  até hoje (fuso de São Paulo); favorecido e descrição obrigatórios; etapa da árvore e tópico daquela etapa → senão
+  até hoje (fuso de São Paulo); favorecido e descrição obrigatórios; etapa da árvore de hoje (com orçamento, um código
+  dele ou uma extra) e tópico daquela etapa → senão
   422 e o comprovante continua na fila. Já revisado → 409. Registro "Gasto de R$ 350,00 em Instalações elétricas ›
   Quadro: mão de obra (João da Silva)", desfazer `estornar_gasto`: o gasto sai das contas (`estornado`) e o
   comprovante volta para a fila.
   - **Com `pedido_id`** (pedido da obra, de aprovado em diante): o gasto é o pagamento do pedido. Soma em
-    `Pedido.pago` e **não** no total da etapa, porque o custo do pedido já conta pela entrega. `pago` nunca passa do
+    `Pedido.pago` e **não** no total da etapa nem no realizado do orçamento, porque o custo do pedido já conta pela
+    entrega. `pago` nunca passa do
     `valor` do pedido: confirmar um gasto que passaria → **409** (o comprovante continua na fila; a pessoa corrige o
     valor, liga a outro pedido ou confirma sem pedido). O estorno tira de `pago` só o valor daquele gasto.
 - `POST /comprovantes/{id}/descartar` `{motivo?}` (admin) → `Comprovante + registro_id`. O arquivo fica guardado.
@@ -462,10 +483,23 @@ aparece só em `GET …/gastos/resumo`.
 
 - `Gasto` = `{id, obra_id, comprovante_id, valor, data_pagamento, favorecido, fornecedor_id, descricao, etapa,
   topico_id, pedido_id, quem, usuario_id, estornado, criado_em}`.
-- `GET /obras/{obra_id}/gastos?etapa=…&limite=100&antes_de=…` → confirmados e não estornados (mais novos primeiro).
-- `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, etapas: [{etapa, nome, total,
-  topicos: [{topico_id, nome, total}]}]}`. `total` = gastos avulsos (não entra no realizado do orçamento);
-  `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já arquivados.
+- `GET /obras/{obra_id}/gastos?etapa=…&limite=100&antes_de=…` → confirmados e não estornados (mais novos primeiro),
+  cada um com `etapa_nome` (o nome de hoje; chave antiga da lista padrão mantém o nome dela, ex. "Fundação") e
+  `etapa_origem` (`orcamento` | `padrao` | `extra` | `sem_etapa_do_orcamento`): a tela marca "sem etapa do orçamento"
+  e oferece mudar a etapa.
+- `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, tem_orcamento, fora_do_orcamento,
+  sem_etapa_do_orcamento, etapas: [{etapa, nome, origem, total, topicos: [{topico_id, nome, total}]}]}`. `total` =
+  gastos avulsos (é o que soma no realizado do orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
+  `fora_do_orcamento` e `sem_etapa_do_orcamento` = as partes do `total` nas extras e em chave fora da árvore (com
+  orçamento; sem orçamento é 0). `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
+  arquivados; as `sem_etapa_do_orcamento` vêm por último.
+- `PATCH /gastos/{gasto_id}` `{etapa, topico_id?}` (admin) → `Gasto + {etapa_nome, etapa_origem, registro_id}`. Muda a
+  etapa (e o tópico; sem `topico_id` = sem tópico) de um gasto confirmado: é como o "sem etapa do orçamento" vai para
+  uma etapa do orçamento e passa a somar no realizado dela. Destino tem de estar na árvore de hoje e o tópico naquela
+  etapa → 422; mesma etapa e tópico → 422 "Nada mudou."; gasto estornado → 409; não existe → 404; viewer → 403.
+  Vale também para pagamento de pedido (que continua sem somar). Registro "Mudou o gasto de R$ 120,00 (descrição) de
+  Fundação para 2 FUNDAÇÕES", desfazer `reclassificar_gasto`: volta para a etapa de antes (mesmo que ela não esteja
+  mais na árvore), com Refazer; 409 se a etapa do gasto mudou de novo depois ou se ele foi estornado.
 
 ## Propostas, aprovação e registro
 
@@ -535,7 +569,8 @@ aparece só em `GET …/gastos/resumo`.
   do usuário no cabeçalho `X-Canteiro-Usuario`, para a API conferir que batem. O `id` vem no corpo (UUIDv7 do agente):
   repetir a chamada não duplica a linha.
 - `GET /uso?de=AAAA-MM-DD&ate=AAAA-MM-DD` → `{total, por_dia:[{dia, custo, tokens}], por_obra:[…], por_rota:[…]}`
-  (somado na API a partir das linhas; sem agregação no banco, para ser portável).
+  (somado na API a partir das linhas; sem agregação no banco, para ser portável). `rota` é uma chave, não um texto
+  para mostrar (a tela dá o nome): `conversa`, `briefing` e `comprovante` (leitura de comprovante de gasto).
 - `GET /creditos` → `{saldo_microdolares, franquia, chave_propria:bool, usuario_id, tenant_id}`. O agente consulta **antes** de chamar o modelo;
   sem saldo (e sem chave própria) → 402 com mensagem para a pessoa.
   O 402 traz o mesmo corpo de `Creditos` mais `detail` (mensagem para a pessoa). `POST /uso` aceita o token do usuário

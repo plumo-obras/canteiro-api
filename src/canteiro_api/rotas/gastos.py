@@ -17,8 +17,10 @@ from ..esquemas import (
     EtapaExtraCorpo,
     EtapaExtraSaida,
     EtapaNaArvoreSaida,
+    GastoReclassificado,
     GastoSaida,
     LeituraCorpo,
+    ReclassificarCorpo,
     ResumoGastos,
     TopicoCorpo,
     TopicoSaida,
@@ -133,6 +135,12 @@ async def listar_gastos(obra_id: str, etapa: str | None = Query(None, max_length
                         limite: int = Query(100, ge=1, le=500), antes_de: datetime | None = None,
                         u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await gastos.listar_gastos(arm, u, obra_id, etapa, limite, antes_de)
+
+
+@r.patch("/gastos/{gasto_id}", response_model=GastoReclassificado)
+async def reclassificar(gasto_id: str, corpo: ReclassificarCorpo, u: UsuarioAtual = Depends(admin),
+                        arm=Depends(_arm)):
+    return await gastos.reclassificar(arm, u, gasto_id, corpo)
 
 
 @r.get("/obras/{obra_id}/gastos/resumo", response_model=ResumoGastos)

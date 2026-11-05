@@ -326,9 +326,9 @@ class EtapaExtra(Documento):
 
 
 class Topico(Documento):
-    """Subdivisão de uma etapa (fixa ou extra) dentro de uma obra: "Bloco B", "Mão de obra", "Quadro geral"."""
+    """Subdivisão de uma etapa (do orçamento, padrão ou extra) dentro de uma obra: "Bloco B", "Quadro geral"."""
     obra_id: str
-    etapa: str                             # chave fixa ou "x-<id da etapa extra>"
+    etapa: str                             # código da etapa do orçamento, chave da lista padrão ou "x-<id>"
     nome: str
     arquivado: bool = False
     atualizado_em: datetime = Field(default_factory=agora)
@@ -375,7 +375,7 @@ class Gasto(Documento):
     favorecido: str                        # quem recebeu o dinheiro, como no comprovante
     fornecedor_id: str | None = None
     descricao: str
-    etapa: str                             # etapa DE GASTO (chave fixa ou "x-<id>"), não a da EAP do orçamento
+    etapa: str                             # código da etapa do orçamento, chave da lista padrão ou "x-<id>" (extra)
     topico_id: str | None = None
     pedido_id: str | None = None
     quem: str = ""

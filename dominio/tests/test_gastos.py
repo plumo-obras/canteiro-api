@@ -15,10 +15,18 @@ from canteiro_dominio.etapas import (
     chave_extra,
     indice_da_arvore,
     montar_arvore,
+    nome_da_etapa,
+    nomes_da_base,
+    origem_da_etapa,
     validar_classificacao,
     validar_nome,
 )
-from canteiro_dominio.gastos import soma_nos_gastos_avulsos, validar_gasto
+from canteiro_dominio.gastos import (
+    gastos_no_orcamento,
+    soma_nos_gastos_avulsos,
+    validar_gasto,
+    validar_reclassificacao,
+)
 from canteiro_dominio.leitura import (
     AVISO_A_PAGAR,
     AVISO_INCERTO,
@@ -319,3 +327,86 @@ def test_documentos_novos_nascem_com_padrao_certo():
     g = Gasto(tenant_id="t", obra_id="o", valor=1, data_pagamento="2026-11-03", favorecido="x", descricao="y",
               etapa="outros")
     assert soma_nos_gastos_avulsos(g.model_dump())
+
+
+# --- árvore a partir do orçamento e gastos no realizado ---
+
+ORCAMENTO = [("1", "SERVIÇOS PRELIMINARES"), ("18", "INSTALAÇÃO ELÉTRICA - 220V"), ("fundacoes", "FUNDAÇÕES"),
+             ("18", "repetida no aditivo")]
+
+
+def arvore_orcamento():
+    extras = [{"id": "e1", "nome": "Taxas"}]
+    topicos = [{"id": "t1", "etapa": "18", "nome": "Quadro"}, {"id": "t2", "etapa": "eletrica", "nome": "Antigo"}]
+    return montar_arvore(extras, topicos, ORCAMENTO)
+
+
+def test_com_orcamento_a_arvore_e_a_dele_na_ordem_mais_as_extras():
+    a = arvore_orcamento()
+    assert [(e.chave, e.nome, e.origem, e.fixa) for e in a] == [
+        ("1", "1 SERVIÇOS PRELIMINARES", "orcamento", True),
+        ("18", "18 INSTALAÇÃO ELÉTRICA - 220V", "orcamento", True),
+        ("fundacoes", "FUNDAÇÕES", "orcamento", True),       # sem número: a chave é o nome, não se repete
+        ("x-e1", "Taxas", "extra", False),
+    ]
+    assert [t.nome for t in a[1].topicos] == ["Quadro"]    # tópico da lista padrão não aparece
+    assert all(e.origem == "padrao" for e in montar_arvore([], [], [("", "antes da 1ª etapa")]) if e.fixa)
+
+
+def test_origem_e_nome_de_qualquer_chave_gravada():
+    orc = dict(ORCAMENTO[:3])
+    assert [origem_da_etapa(c, orc) for c in ("18", "x-e1", "eletrica")] == [
+        "orcamento", "extra", "sem_etapa_do_orcamento"]
+    assert [origem_da_etapa(c, {}) for c in ("eletrica", "x-e1", "inventada")] == [
+        "padrao", "extra", "sem_etapa_do_orcamento"]
+    assert nome_da_etapa("eletrica", orcamento=orc, extras={}) == "Instalações elétricas"
+    assert nome_da_etapa("x-e9", orcamento=orc, extras={"e9": "Arquivada"}) == "Arquivada"
+    assert nome_da_etapa("18", orcamento=orc, extras={}) == "18 INSTALAÇÃO ELÉTRICA - 220V"
+
+
+def test_topico_e_extra_conferem_a_base_do_orcamento():
+    base = {"1", "18"}
+    assert ativar_topico({}, {}, id_=None, etapa="18", nome="Quadro", chaves_base=base) == "Quadro"
+    with pytest.raises(RegraViolada, match="Escolha uma etapa"):
+        ativar_topico({}, {}, id_=None, etapa="eletrica", nome="Quadro", chaves_base=base)
+    # no Desfazer a base não é conhecida: só a extra é conferida
+    assert ativar_topico({}, {}, id_="t1", etapa="eletrica", nome="Quadro", chaves_base=None) == "Quadro"
+    with pytest.raises(RegraViolada):
+        ativar_topico({}, {}, id_="t1", etapa="x-sumiu", nome="Quadro", chaves_base=None)
+    nomes = nomes_da_base(ORCAMENTO[:2])
+    with pytest.raises(RegraViolada, match="Já existe"):
+        ativar_extra({}, id_=None, nome="instalação elétrica - 220v", nomes_base=nomes)
+    assert ativar_extra({}, id_=None, nome="Fundação", nomes_base=nomes) == "Fundação"
+    assert nomes_da_base([]) == [e.nome for e in ETAPAS_FIXAS]
+
+
+def _g(valor, etapa, **kw):
+    return {"valor": valor, "etapa": etapa, **kw}
+
+
+def test_gastos_no_orcamento_repartem_por_origem_e_ignoram_pedido_e_estorno():
+    gastos = [_g(100, "18"), _g(50, "18"), _g(30, "x-e1"), _g(20, "eletrica"),
+              _g(999, "18", pedido_id="p1"), _g(777, "18", estornado=True)]
+    r = gastos_no_orcamento(gastos, {"1", "18"})
+    assert (r.por_etapa, r.fora_do_orcamento, r.sem_etapa_do_orcamento, r.na_lista_padrao) == ({"18": 150}, 30, 20, 0)
+    assert (r.nas_etapas, r.fora_das_etapas, r.total) == (150, 50, 200)
+    sem = gastos_no_orcamento(gastos, set())
+    assert (sem.por_etapa, sem.na_lista_padrao, sem.sem_etapa_do_orcamento) == ({}, 20, 150)
+
+
+def test_reclassificar_exige_destino_da_arvore_de_hoje():
+    a = arvore_orcamento()
+    validar_reclassificacao({"etapa": "eletrica"}, etapa="18", topico_id="t1", arvore=a)
+    with pytest.raises(RegraViolada, match="Nada mudou"):
+        validar_reclassificacao({"etapa": "18", "topico_id": "t1"}, etapa="18", topico_id="t1", arvore=a)
+    with pytest.raises(RegraViolada, match="Escolha uma etapa"):
+        validar_reclassificacao({"etapa": "18"}, etapa="eletrica", topico_id=None, arvore=a)
+
+
+def test_revisao_aceita_o_codigo_do_orcamento():
+    leit = leitura(classificacao={"certeza": "baixa", "opcoes": [
+        {"etapa": "eletrica", "topico_id": None, "motivo": "lista padrão"},
+        {"etapa": "18", "topico_id": "t1", "motivo": "quadro"}]})
+    r = montar_revisao(leit, arvore=arvore_orcamento(), hoje=HOJE)
+    assert [(o.etapa, o.topico_id, o.rotulo) for o in r.classificacao.opcoes] == [
+        ("18", "t1", "18 INSTALAÇÃO ELÉTRICA - 220V › Quadro")]

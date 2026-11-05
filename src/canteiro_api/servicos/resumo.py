@@ -148,7 +148,8 @@ def _resumo_financeiro(o) -> ResumoFinanceiro:
         tem_orcamento=tem, contratado=t.contratado, aditivos=t.aditivos, aditivos_pct=t.aditivos_pct,
         orcado_atual=t.atual, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado, saldo=t.saldo,
         etapas_estouradas=[EtapaEstourada(etapa=e.etapa, descricao=e.descricao, saldo=e.saldo)
-                           for e in o.etapas if e.estourou])
+                           for e in o.etapas if e.estourou],
+        gastos=t.gastos)
 
 
 def _resumo_entregas(pedidos: list[dict], hoje: date, insumos: dict[str, dict]) -> ResumoEntregas:

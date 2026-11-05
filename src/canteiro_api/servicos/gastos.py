@@ -1,4 +1,5 @@
-"""Gastos da obra: árvore (etapas fixas, extras e tópicos), comprovantes a revisar e gastos confirmados.
+"""Gastos da obra: árvore (etapas do orçamento ou a lista padrão, extras e tópicos), comprovantes a revisar e gastos
+confirmados.
 
 Fluxo: a pessoa envia o comprovante → o serviço do agente lê (IA) e grava a leitura → a revisão abre com o máximo
 preenchido → uma pessoa (admin) confirma e só então nasce o `Gasto`, com registro e Desfazer. A IA nunca grava gasto.
@@ -9,17 +10,24 @@ from zoneinfo import ZoneInfo
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.etapas import (
-    ETAPAS_FIXAS,
-    PREFIXO_EXTRA,
+    CHAVES_FIXAS,
     EtapaNaArvore,
     ativar_extra,
     ativar_topico,
     chave_extra,
     indice_da_arvore,
     montar_arvore,
+    nome_da_etapa,
+    nomes_da_base,
+    origem_da_etapa,
     validar_nome,
 )
-from canteiro_dominio.gastos import soma_nos_gastos_avulsos, validar_gasto
+from canteiro_dominio.gastos import (
+    gastos_no_orcamento,
+    soma_nos_gastos_avulsos,
+    validar_gasto,
+    validar_reclassificacao,
+)
 from canteiro_dominio.leitura import LeituraComprovante, montar_revisao
 from canteiro_dominio.modelos import (
     Comprovante,
@@ -34,7 +42,7 @@ from canteiro_dominio.tipos import fmt_reais
 
 from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
-from ..esquemas import ConfirmarCorpo, EdicaoArvoreCorpo, LeituraCorpo
+from ..esquemas import ConfirmarCorpo, EdicaoArvoreCorpo, LeituraCorpo, ReclassificarCorpo
 from ..modelos import doc
 from ..nucleo import (
     Conflito,
@@ -49,7 +57,7 @@ from ..nucleo import (
     receita_inversa,
     verbo_desfazer,
 )
-from . import fornecedores, tipo_arquivo
+from . import fornecedores, tipo_arquivo, versoes
 from .estoque import id_derivado
 
 _SP = ZoneInfo("America/Sao_Paulo")
@@ -60,7 +68,6 @@ _SP = ZoneInfo("America/Sao_Paulo")
 MAX_ARQUIVO = 4 * 1024 * 1024
 MAX_IMAGEM = 3_500_000
 MAX_LEGENDA = 300
-_NOMES_FIXOS = {e.chave: e.nome for e in ETAPAS_FIXAS}
 
 
 def hoje() -> date:
@@ -80,16 +87,46 @@ async def _extras_e_topicos(leitor, tenant_id: str, obra_id: str) -> tuple[list[
     return extras, topicos
 
 
-async def arvore_da_obra(leitor, tenant_id: str, obra_id: str) -> list[EtapaNaArvore]:
+async def base_da_arvore(leitor, tenant_id: str, obra_id: str) -> list[tuple[str, str]]:
+    """As etapas do orçamento vigente, (código, descrição), na ordem dele: as mesmas de `GET …/etapas` e da apropriação
+    de pedidos. Vazio = obra sem orçamento, e a árvore usa a lista padrão.
+
+    Lida fora da transação (é consulta, e a porta não consulta dentro dela). Uma importação de orçamento no mesmo
+    segundo de um tópico novo pode deixar o tópico numa etapa que acabou de sair: ele só não aparece."""
+    return [(e.etapa, e.descricao) for e in await versoes.etapas_da_obra(leitor, tenant_id, obra_id)]
+
+
+def _chaves_base(base: list[tuple[str, str]]):
+    return {c for c, _ in base if c} or CHAVES_FIXAS
+
+
+async def arvore_da_obra(leitor, tenant_id: str, obra_id: str,
+                         base: list[tuple[str, str]] | None = None) -> list[EtapaNaArvore]:
     await obra_do_tenant(leitor, tenant_id, obra_id)
-    return montar_arvore(*await _extras_e_topicos(leitor, tenant_id, obra_id))
+    if base is None:
+        base = await base_da_arvore(leitor, tenant_id, obra_id)
+    return montar_arvore(*await _extras_e_topicos(leitor, tenant_id, obra_id), base)
 
 
-def _nome_etapa(chave: str, extras: dict[str, dict]) -> str:
-    if chave in _NOMES_FIXOS:
-        return _NOMES_FIXOS[chave]
-    x = extras.get(chave.removeprefix(PREFIXO_EXTRA))
-    return x["nome"] if x else chave
+async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """{etapa do orçamento: descrição}, {id da extra: nome} e {id do tópico: nome}, com os arquivados: gasto antigo
+    continua com nome."""
+    base = await base_da_arvore(leitor, tenant_id, obra_id)
+    extras, topicos = await _extras_e_topicos(leitor, tenant_id, obra_id)
+    return dict(base), {x["id"]: x["nome"] for x in extras}, {t["id"]: t["nome"] for t in topicos}
+
+
+def _com_etapa(g: dict, orcamento: dict[str, str], extras: dict[str, str]) -> dict:
+    """O gasto com o nome e a origem da etapa dele: a lista de lançados mostra "sem etapa do orçamento" sem a tela
+    precisar cruzar com a árvore."""
+    return {**g, "etapa_nome": nome_da_etapa(g["etapa"], orcamento=orcamento, extras=extras),
+            "etapa_origem": origem_da_etapa(g["etapa"], orcamento)}
+
+
+def _rotulo(etapa: str, topico_id: str | None, orcamento: dict[str, str], extras: dict[str, str],
+            topicos: dict[str, str]) -> str:
+    nome = nome_da_etapa(etapa, orcamento=orcamento, extras=extras)
+    return f"{nome} › {topicos[topico_id]}" if topico_id in topicos else nome
 
 
 def _id_indice(tenant_id: str, obra_id: str) -> str:
@@ -127,11 +164,12 @@ async def _exigir_indice(tx, tenant_id: str, obra_id: str, inicial: dict | None)
 async def criar_etapa_extra(arm, u: UsuarioAtual, obra_id: str, nome: str) -> dict:
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
 
     async def corpo(tx):
         # limite e nome conferidos DENTRO da transação, contra o índice: duas criações simultâneas não furam
         indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
-        limpo = ativar_extra(indice["extras"], id_=None, nome=nome)
+        limpo = ativar_extra(indice["extras"], id_=None, nome=nome, nomes_base=nomes_da_base(base))
         d = doc(EtapaExtra(tenant_id=u.tenant_id, obra_id=obra_id, nome=limpo))
 
         def aplicar():
@@ -150,11 +188,13 @@ async def criar_etapa_extra(arm, u: UsuarioAtual, obra_id: str, nome: str) -> di
 async def criar_topico(arm, u: UsuarioAtual, obra_id: str, etapa: str, nome: str) -> dict:
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
 
     async def corpo(tx):
         indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
-        limpo = ativar_topico(indice["extras"], indice["topicos"], id_=None, etapa=etapa, nome=nome)
-        nome_etapa = _nome_etapa(etapa, {i: {"nome": n} for i, n in indice["extras"].items()})
+        limpo = ativar_topico(indice["extras"], indice["topicos"], id_=None, etapa=etapa, nome=nome,
+                              chaves_base=_chaves_base(base))
+        nome_etapa = nome_da_etapa(etapa, orcamento=dict(base), extras=indice["extras"])
         d = doc(Topico(tenant_id=u.tenant_id, obra_id=obra_id, etapa=etapa, nome=limpo))
 
         def aplicar():
@@ -192,9 +232,10 @@ def _texto_edicao(colecao: str, antigo: dict, mudou: dict) -> str:
     return " ".join(partes)
 
 
-def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict) -> dict:
+def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict, base: list[tuple[str, str]] | None) -> dict:
     """O índice depois de `item` receber `mudou` ({nome?, arquivado?}). Confere limite e nome quando o item termina
-    ativo (criado, renomeado ou reativado); arquivado só sai do índice."""
+    ativo (criado, renomeado ou reativado); arquivado só sai do índice. `base` = as etapas do orçamento lidas antes da
+    transação (None = não se sabe: confere o nome contra a lista padrão e não confere a etapa do tópico)."""
     final = {**item, **mudou}
     extras, topicos = dict(indice["extras"]), dict(indice["topicos"])
     alvo = extras if colecao == "etapas_extras" else topicos
@@ -203,9 +244,11 @@ def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict) -> dict:
             validar_nome(final["nome"])
         alvo.pop(item["id"], None)
     elif colecao == "etapas_extras":
-        extras[item["id"]] = ativar_extra(extras, id_=item["id"], nome=final["nome"])
+        extras[item["id"]] = ativar_extra(extras, id_=item["id"], nome=final["nome"],
+                                          nomes_base=nomes_da_base(base) if base is not None else None)
     else:
-        nome = ativar_topico(extras, topicos, id_=item["id"], etapa=item["etapa"], nome=final["nome"])
+        nome = ativar_topico(extras, topicos, id_=item["id"], etapa=item["etapa"], nome=final["nome"],
+                             chaves_base=_chaves_base(base) if base is not None else None)
         topicos[item["id"]] = {"etapa": item["etapa"], "nome": nome}
     return {"extras": extras, "topicos": topicos}
 
@@ -217,6 +260,7 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
     obra_id = atual["obra_id"]
     mudancas = corpo.model_dump(exclude_none=True)
     inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
 
     async def corpo_tx(tx):
         d = await tx.obter(colecao, u.tenant_id, id_)
@@ -228,7 +272,7 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
         if not mudou:
             raise ErroNegocio("Nada mudou.")
         # reativar também confere o nome: enquanto estava arquivado, outro pode ter nascido com ele
-        novo_indice = _indice_com(indice, colecao, d, mudou)
+        novo_indice = _indice_com(indice, colecao, d, mudou, base)
         antes = {k: d.get(k) for k in mudou}
 
         def aplicar():
@@ -246,7 +290,14 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
     return await arm.em_transacao(corpo_tx)
 
 
-async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict) -> Operacao:
+async def base_para_desfazer_arvore(leitor, tenant_id: str, receita: dict) -> list[tuple[str, str]] | None:
+    """Fora da transação, antes do Desfazer/Refazer de uma edição da árvore: as etapas do orçamento daquela obra."""
+    d = await leitor.obter(receita["colecao"], tenant_id, receita["id"])
+    return await base_da_arvore(leitor, tenant_id, d["obra_id"]) if d else None
+
+
+async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict,
+                                   base: list[tuple[str, str]] | None = None) -> Operacao:
     colecao = receita["colecao"]
     d = await tx.obter(colecao, u.tenant_id, receita["id"])
     if not d:
@@ -257,7 +308,7 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict) -> Operac
     # (limite e nome único). Obra sem índice (gravada antes dele) só acontece em dado antigo de desenvolvimento: aplica
     # sem conferir, e o índice nasce na próxima criação.
     indice = await _indice_na_tx(tx, u.tenant_id, d["obra_id"], None)
-    novo_indice = _indice_com(indice, colecao, d, receita["antes"]) if indice is not None else None
+    novo_indice = _indice_com(indice, colecao, d, receita["antes"], base) if indice is not None else None
 
     def aplicar():
         tx.atualizar(colecao, u.tenant_id, d["id"], {**receita["antes"], "atualizado_em": _agora()})
@@ -514,22 +565,26 @@ async def listar_gastos(arm, u: UsuarioAtual, obra_id: str, etapa: str | None, l
     filtros = [Filtro("obra_id", "==", obra_id), Filtro("estornado", "==", False)]
     if etapa:
         filtros.append(Filtro("etapa", "==", etapa))
-    return await listar_pagina(arm, Consulta("gastos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
-                               "criado_em", antes_de)
+    pagina = await listar_pagina(arm, Consulta("gastos", u.tenant_id, filtros, [("criado_em", "desc")],
+                                               limite=limite), "criado_em", antes_de)
+    orcamento, extras, _ = await _nomes(arm, u.tenant_id, obra_id)
+    return [_com_etapa(g, orcamento, extras) for g in pagina]
 
 
 async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     """Gastos por etapa e tópico, somados na API (sem agregação no banco, para ser portável). Inclui etapa e tópico
-    já arquivados: o dinheiro que saiu continua lá."""
+    já arquivados, e a etapa que não é mais da árvore (lista padrão de antes do orçamento): o dinheiro que saiu
+    continua lá, marcado "sem etapa do orçamento", depois das outras."""
     await obra_do_tenant(arm, u.tenant_id, obra_id)
-    gastos = await arm.consultar(Consulta("gastos", u.tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                   Filtro("estornado", "==", False)]))
+    gastos = await versoes.gastos_da_obra(arm, u.tenant_id, obra_id)
     a_revisar = await arm.consultar(Consulta("comprovantes", u.tenant_id, [
         Filtro("obra_id", "==", obra_id), Filtro("status", "==", StatusComprovante.A_REVISAR.value)]))
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
+    orcamento = dict(base)
     extras, topicos = await _extras_e_topicos(arm, u.tenant_id, obra_id)
-    extras_por_id = {x["id"]: x for x in extras}
+    extras_nomes = {x["id"]: x["nome"] for x in extras}
     topicos_por_id = {t["id"]: t for t in topicos}
-    ordem = {e.chave: i for i, e in enumerate(montar_arvore(extras, []))}
+    ordem = {e.chave: i for i, e in enumerate(montar_arvore(extras, [], base))}
 
     por_etapa: dict[str, dict[str | None, int]] = {}
     pedidos = 0
@@ -540,14 +595,94 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
         t = por_etapa.setdefault(g["etapa"], {})
         t[g.get("topico_id")] = t.get(g.get("topico_id"), 0) + g["valor"]
 
+    def posicao(k: str):
+        return (origem_da_etapa(k, orcamento) == "sem_etapa_do_orcamento", ordem.get(k, len(ordem)), k)
+
     etapas = []
-    for chave in sorted(por_etapa, key=lambda k: (ordem.get(k, len(ordem)), k)):
+    for chave in sorted(por_etapa, key=posicao):
         por_topico = por_etapa[chave]
         itens = [{"topico_id": tid, "total": v,
                   "nome": topicos_por_id[tid]["nome"] if tid in topicos_por_id else "Sem tópico"}
                  for tid, v in por_topico.items()]
         itens.sort(key=lambda x: (x["topico_id"] is None, x["nome"]))
-        etapas.append({"etapa": chave, "nome": _nome_etapa(chave, extras_por_id), "total": sum(por_topico.values()),
+        etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
+                       "origem": origem_da_etapa(chave, orcamento), "total": sum(por_topico.values()),
                        "topicos": itens})
-    return {"total": sum(e["total"] for e in etapas), "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
-            "etapas": etapas}
+    # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o realizado de lá
+    no_orcamento = gastos_no_orcamento(gastos, orcamento)
+    return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
+            "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
+            "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "etapas": etapas}
+
+
+# --- reclassificar: mudar a etapa de um gasto já confirmado ---
+
+def _chave_rotulo(etapa: str, topico_id: str | None) -> str:
+    return f"{etapa}|{topico_id or ''}"
+
+
+async def reclassificar(arm, u: UsuarioAtual, gasto_id: str, corpo: ReclassificarCorpo) -> dict:
+    """Leva um gasto para outra etapa (e tópico) da árvore de hoje. É o caminho do gasto "sem etapa do orçamento"
+    (lançado na lista padrão antes de a obra importar orçamento) até a etapa certa do orçamento, onde ele passa a
+    somar no realizado. Com Desfazer, que devolve a etapa de antes (mesmo que ela não esteja mais na árvore)."""
+    g = await arm.obter("gastos", u.tenant_id, gasto_id)
+    if not g:
+        raise NaoEncontrado("Gasto não encontrado.")
+    if g.get("estornado"):
+        raise Conflito("Este gasto foi desfeito: não dá para mudar a etapa.")
+    obra_id = g["obra_id"]
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
+    validar_reclassificacao(g, etapa=corpo.etapa, topico_id=corpo.topico_id,
+                            arvore=await arvore_da_obra(arm, u.tenant_id, obra_id, base))
+    orcamento, extras, topicos = await _nomes(arm, u.tenant_id, obra_id)
+    antes = {"etapa": g["etapa"], "topico_id": g.get("topico_id")}
+    depois = {"etapa": corpo.etapa, "topico_id": corpo.topico_id}
+    # os nomes vão na receita: o Desfazer roda dentro da transação, onde não dá para consultar o orçamento
+    rotulos = {_chave_rotulo(**x): _rotulo(x["etapa"], x["topico_id"], orcamento, extras, topicos)
+               for x in (antes, depois)}
+
+    async def corpo_tx(tx):
+        atual = await tx.obter("gastos", u.tenant_id, gasto_id)
+        if atual.get("estornado"):
+            raise Conflito("Este gasto foi desfeito: não dá para mudar a etapa.")
+        if {"etapa": atual["etapa"], "topico_id": atual.get("topico_id")} != antes:
+            raise Conflito("A etapa deste gasto mudou agora há pouco. Abra de novo e confira.")
+
+        def aplicar():
+            tx.atualizar("gastos", u.tenant_id, gasto_id, depois)
+            return {**atual, **depois}
+
+        receita = {"op": "reclassificar_gasto", "gasto_id": gasto_id, "antes": antes, "depois": depois,
+                   "rotulos": rotulos}
+        op = Operacao(obra_id=obra_id, aplicar=aplicar,
+                      texto=lambda r: f"Mudou o gasto de {fmt_reais(g['valor'])} ({g['descricao']}) de "
+                                      f"{rotulos[_chave_rotulo(**antes)]} para {rotulos[_chave_rotulo(**depois)]}",
+                      desfazer=lambda r: receita)
+        novo, reg = executar_e_registrar(tx, u, op)
+        evento(tx, u.tenant_id, "gasto.reclassificado", obra_id, {"gasto_id": gasto_id})
+        return {**_com_etapa(novo, orcamento, extras), "registro_id": reg["id"]}
+
+    return await arm.em_transacao(corpo_tx)
+
+
+async def preparar_reclassificar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
+    """Desfazer (e Refazer) a mudança de etapa. Volta para a etapa de antes sem conferir a árvore: é o estado que o
+    gasto já teve, e a pessoa pode reclassificar de novo. Se a etapa do gasto mudou depois, não desfaz por cima."""
+    g = await tx.obter("gastos", u.tenant_id, receita["gasto_id"])
+    if not g:
+        raise NaoEncontrado("Gasto não encontrado.")
+    if g.get("estornado"):
+        raise Conflito("Este gasto foi desfeito depois; não dá para mudar a etapa dele.")
+    if {"etapa": g["etapa"], "topico_id": g.get("topico_id")} != receita["depois"]:
+        raise Conflito("A etapa deste gasto mudou de novo depois; não dá para desfazer esta mudança.")
+    volta = receita["antes"]
+
+    def aplicar():
+        tx.atualizar("gastos", u.tenant_id, g["id"], volta)
+        return {**g, **volta}
+
+    nome = receita.get("rotulos", {}).get(_chave_rotulo(**volta), volta["etapa"])
+    return Operacao(obra_id=g["obra_id"], aplicar=aplicar,
+                    texto=lambda r: f"{verbo_desfazer(receita)}: o gasto de {fmt_reais(g['valor'])} "
+                                    f"({g['descricao']}) voltou para {nome}",
+                    desfazer=lambda r: receita_inversa(receita))

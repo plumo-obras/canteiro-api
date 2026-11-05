@@ -12,6 +12,7 @@ dentro da transação):
 import hashlib
 import json
 from dataclasses import replace
+from functools import partial
 
 from pydantic import ValidationError
 
@@ -391,6 +392,7 @@ _DESFAZER = {
     "editar_arvore": gastos.preparar_desfazer_arvore,
     "estornar_gasto": gastos.preparar_estorno_gasto,
     "reabrir_comprovante": gastos.preparar_reabrir,
+    "reclassificar_gasto": gastos.preparar_reclassificar,
 }
 
 
@@ -406,6 +408,9 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
     if receita_previa.get("op") == "restaurar_insumos" and receita_previa.get("arquivar"):
         await recusar_se_ha_pedido_aberto(arm, u.tenant_id, receita_previa["obra_id"],
                                           [x["id"] for x in receita_previa["arquivar"]])
+    # a árvore de gasto depende do orçamento da obra, e consultar o orçamento não pode ser dentro da transação
+    base_arvore = (await gastos.base_para_desfazer_arvore(arm, u.tenant_id, receita_previa)
+                   if receita_previa.get("op") == "editar_arvore" else None)
 
     async def corpo(tx):
         e = await tx.obter("registro", u.tenant_id, entrada_id)
@@ -417,7 +422,10 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
             raise ErroNegocio("Esta entrada não tem como ser desfeita.")
         prop = await tx.obter("propostas", u.tenant_id, e["proposta_id"]) if e.get("proposta_id") else None
         receita = e["desfazer"]
-        op = await _DESFAZER[receita["op"]](tx, u, receita)
+        preparar = _DESFAZER[receita["op"]]
+        if receita["op"] == "editar_arvore":
+            preparar = partial(preparar, base=base_arvore)
+        op = await preparar(tx, u, receita)
         if receita.get("refazer") and receita.get("texto"):
             op = replace(op, texto=lambda d: f"Refeito: {receita['texto']}")
         # a receita de refazer guarda o texto da ação original: "Refeito: Atualizou a obra X: cliente" diz o que

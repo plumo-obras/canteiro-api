@@ -14,6 +14,7 @@ import re
 from decimal import Decimal
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
+from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import ItemOrcamento, StatusPedido, TipoVersao, VersaoOrcamento
 from canteiro_dominio.regras import EM_COTACAO
 from canteiro_dominio.tipos import fmt_reais, qtd, reais
@@ -24,6 +25,7 @@ from ..esquemas import (
     ErroLinha,
     EtapaOrcamento,
     EtapaRef,
+    GastosNoOrcamentoSaida,
     ItemPrevia,
     LinhaIgnorada,
     Mapeamento,
@@ -414,13 +416,20 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
             s = somas.setdefault(x["etapa"], [0, 0])
             s[0 if x["versao_id"] in contrato_ids else 1] += x["total"]
     gasto = await andamento_por_etapa(arm, tenant_id, obra_id)
-    etapas = [_etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}))
+    # Gasto avulso (comprovante confirmado, sem pedido) é dinheiro que saiu: soma no comprometido e no realizado da
+    # etapa dele, e por isso mexe no saldo e no estouro. A repartição é do domínio (inclusive o que não entra em etapa).
+    avulsos = gastos_no_orcamento(await gastos_da_obra(arm, tenant_id, obra_id), {e for e in somas if e})
+    etapas = [_etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}),
+                     avulsos.por_etapa.get(e, 0))
               for e, (c, a) in somas.items()]
     # gasto numa etapa que não está no orçamento (pedido de antes da importação, ou etapa de versão desfeita)
     sem = {k: sum(g[k] for g in gasto.values()) for k in ("cotando", "comprometido", "realizado")}
+    fora = avulsos.fora_das_etapas
     contratado = sum(e.contratado for e in etapas)
     aditivos = sum(e.aditivos for e in etapas)
     andamento = {k: sum(getattr(e, k) for e in etapas) + sem[k] for k in ("cotando", "comprometido", "realizado")}
+    andamento["comprometido"] += fora
+    andamento["realizado"] += fora
     return OrcamentoObra(
         versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"])} for v in versoes],
         itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
@@ -428,14 +437,28 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                                saldo=contratado + aditivos - andamento["comprometido"],
                                aditivos_pct=pct(aditivos, contratado) if contratado else None,
                                n_itens=sum(x["tipo"] == "item" for x in itens),
-                               n_etapas=len(descricoes), sem_etapa=sem, **andamento))
+                               n_etapas=len(descricoes), sem_etapa=sem,
+                               gastos=GastosNoOrcamentoSaida(total=avulsos.total, nas_etapas=avulsos.nas_etapas,
+                                                             fora_do_orcamento=avulsos.fora_do_orcamento,
+                                                             na_lista_padrao=avulsos.na_lista_padrao,
+                                                             sem_etapa_do_orcamento=avulsos.sem_etapa_do_orcamento),
+                               **andamento))
 
 
-def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: dict[str, int]) -> EtapaOrcamento:
+async def gastos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
+    """Os gastos confirmados e não estornados da obra (o domínio separa os de pedido)."""
+    return await leitor.consultar(Consulta("gastos", tenant_id, [Filtro("obra_id", "==", obra_id),
+                                                                  Filtro("estornado", "==", False)]))
+
+
+def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: dict[str, int],
+           avulsos: int = 0) -> EtapaOrcamento:
     """Saldo e estouro saem daqui prontos: quem lê (tela, agente) só mostra."""
-    atual, comprometido = contratado + aditivos, gasto.get("comprometido", 0)
+    gasto = {"cotando": gasto.get("cotando", 0), "comprometido": gasto.get("comprometido", 0) + avulsos,
+             "realizado": gasto.get("realizado", 0) + avulsos}
+    atual, comprometido = contratado + aditivos, gasto["comprometido"]
     return EtapaOrcamento(etapa=etapa, descricao=descricao, contratado=contratado, aditivos=aditivos, atual=atual,
-                          saldo=atual - comprometido, estourou=comprometido > atual, **gasto)
+                          saldo=atual - comprometido, estourou=comprometido > atual, gastos_avulsos=avulsos, **gasto)
 
 
 CEM = 10000                            # 100% em centésimos de ponto percentual (290 = 2,9%)

@@ -60,7 +60,7 @@ async def test_toda_obra_nasce_com_as_etapas_fixas(vila):
     assert r.status_code == 200, r.text
     a = r.json()
     assert len(a) == 24 and a[0]["chave"] == "terreno" and a[-1]["chave"] == "outros"
-    assert all(e["fixa"] and e["topicos"] == [] for e in a)
+    assert all(e["fixa"] and e["topicos"] == [] and e["origem"] == "padrao" for e in a)
 
 
 async def test_etapa_extra_e_topico_entram_na_arvore_com_desfazer(vila):
@@ -305,11 +305,13 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
     assert conf["gasto"]["favorecido"] == "João da Silva" and conf["comprovante"]["status"] == "confirmado"
 
     resumo = (await vila.http.get(f"/obras/{obra}/gastos/resumo", headers=h)).json()
-    assert resumo == {"total": 35000, "pagamentos_de_pedidos": 0, "a_revisar": 0, "etapas": [
-        {"etapa": "eletrica", "nome": "Instalações elétricas", "total": 35000,
+    assert resumo == {"total": 35000, "pagamentos_de_pedidos": 0, "a_revisar": 0, "tem_orcamento": False,
+                      "fora_do_orcamento": 0, "sem_etapa_do_orcamento": 0, "etapas": [
+        {"etapa": "eletrica", "nome": "Instalações elétricas", "origem": "padrao", "total": 35000,
          "topicos": [{"topico_id": t["id"], "nome": "Quadro", "total": 35000}]}]}
     gastos = (await vila.http.get(f"/obras/{obra}/gastos?etapa=eletrica", headers=h)).json()
-    assert [g["id"] for g in gastos] == [conf["gasto"]["id"]]
+    assert [(g["id"], g["etapa_nome"], g["etapa_origem"]) for g in gastos] == [
+        (conf["gasto"]["id"], "Instalações elétricas", "padrao")]
     entrada = next(e for e in (await vila.http.get(f"/registro?obra_id={obra}", headers=h)).json()
                    if e["id"] == conf["registro_id"])
     assert entrada["texto"] == ("Gasto de R$ 350,00 em Instalações elétricas › Quadro: mão de obra do eletricista "

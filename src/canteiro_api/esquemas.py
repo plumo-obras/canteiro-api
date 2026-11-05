@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from canteiro_dominio.etapas import Origem
 from canteiro_dominio.leitura import LeituraComprovante, Revisao
 from canteiro_dominio.modelos import (
     Comprovante,
@@ -552,6 +553,19 @@ class EtapaOrcamento(_Andamento):
     # Calculados aqui, não em quem lê: o agente só cita, e a tela não refaz a conta.
     saldo: int = Field(0, description="saldo a comprometer = atual − comprometido (negativo = estourou)")
     estourou: bool = Field(False, description="comprometido passou do orçado atual")
+    gastos_avulsos: int = Field(0, description="gastos confirmados por comprovante, sem pedido, nesta etapa; já "
+                                               "somados no comprometido e no realizado")
+
+
+class GastosNoOrcamentoSaida(BaseModel):
+    """Os gastos avulsos (comprovante confirmado, sem pedido) da obra, todos já somados no comprometido e no
+    realizado dos totais. Pagamento de pedido não entra: o custo do pedido já conta pela entrega."""
+    total: int = 0
+    nas_etapas: int = Field(0, description="nas etapas do orçamento (cada etapa traz o seu em gastos_avulsos)")
+    fora_do_orcamento: int = Field(0, description="nas etapas extras da obra: não engordam etapa do orçamento")
+    na_lista_padrao: int = Field(0, description="obra sem orçamento: gastos na lista padrão de etapas")
+    sem_etapa_do_orcamento: int = Field(0, description="numa etapa que não é do orçamento vigente nem extra (lista "
+                                                       "padrão de antes do orçamento): falta reclassificar")
 
 
 class TotaisOrcamento(_Andamento):
@@ -563,6 +577,7 @@ class TotaisOrcamento(_Andamento):
                                                        "2,9%); null sem contrato")
     # gasto sem etapa (obra sem orçamento na hora do pedido); já está somado nos três campos acima
     sem_etapa: _Andamento = Field(default_factory=_Andamento)
+    gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
     n_itens: int
     n_etapas: int
 
@@ -734,6 +749,7 @@ class ResumoFinanceiro(BaseModel):
     realizado: int = 0
     saldo: int = 0
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
+    gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
 
 
 class ItemEntrega(BaseModel):
@@ -1038,8 +1054,10 @@ class EtapaNaArvoreSaida(BaseModel):
     chave: str = Field(description="chave fixa (ex.: 'eletrica') ou 'x-<id>' para etapa extra da obra")
     nome: str
     inclui: str = Field(description="o que entra nela (vazio em etapa extra)")
-    fixa: bool
+    fixa: bool = Field(description="não se renomeia nem se arquiva (etapa do orçamento ou da lista padrão)")
     topicos: list[TopicoNaArvoreSaida] = Field(default_factory=list)
+    origem: Origem = Field(description="'orcamento' (etapa do orçamento vigente; chave = o código), 'padrao' (lista "
+                                       "padrão, só em obra sem orçamento) ou 'extra'")
 
 
 class EtapaExtraCorpo(Entrada):
@@ -1104,7 +1122,17 @@ class DescartarCorpo(Entrada):
 
 
 class GastoSaida(Gasto):
-    pass
+    etapa_nome: str | None = None
+    etapa_origem: Origem | None = None
+
+
+class ReclassificarCorpo(Entrada):
+    etapa: str = Field(min_length=1, max_length=80, description="chave de uma etapa da árvore de hoje")
+    topico_id: str | None = Field(None, max_length=80)
+
+
+class GastoReclassificado(GastoSaida):
+    registro_id: str
 
 
 class Confirmacao(BaseModel):
@@ -1122,12 +1150,16 @@ class TopicoNoResumo(BaseModel):
 class EtapaNoResumo(BaseModel):
     etapa: str
     nome: str
+    origem: Origem
     total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
     topicos: list[TopicoNoResumo]
 
 
 class ResumoGastos(BaseModel):
-    total: int = Field(description="gastos avulsos confirmados (centavos): é o que soma no realizado")
+    total: int = Field(description="gastos avulsos confirmados (centavos): é o que soma no realizado do orçamento")
     pagamentos_de_pedidos: int = Field(description="gastos ligados a pedido: o custo já conta pela entrega")
     a_revisar: int = Field(description="comprovantes esperando revisão (não contam em nada)")
+    tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
+    fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
+    sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
     etapas: list[EtapaNoResumo]
