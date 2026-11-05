@@ -15,7 +15,7 @@ LIMITE_UPLOAD = 6 * MIB
 LIMITE_MENSAGENS = 10 * MIB
 
 _ROTAS: list[tuple[re.Pattern[str], int]] = [
-    (re.compile(r"^/obras/[^/]+/(orcamento/(ler|importar|versoes)|importar)$"), LIMITE_UPLOAD),
+    (re.compile(r"^/obras/[^/]+/(orcamento/(ler|importar|versoes)|importar|comprovantes)$"), LIMITE_UPLOAD),
     (re.compile(r"^/sessoes/[^/]+/mensagens$"), LIMITE_MENSAGENS),
 ]
 
