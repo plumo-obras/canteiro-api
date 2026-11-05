@@ -1,7 +1,7 @@
 [project]
 name = "canteiro-dominio"
-version = "0.2.0"
-description = "Regras do Canteiro sem banco: conta da falta, pedidos, propostas e a porta de armazenamento portável (Mongo hoje, Firestore depois)."
+version = "0.3.0"
+description = "Regras do Canteiro sem banco: conta da falta, pedidos, propostas, gastos (etapas e leitura de comprovante) e a porta de armazenamento portável (Mongo hoje, Firestore depois)."
 requires-python = ">=3.14"
 dependencies = ["pydantic>=2.11"]
 

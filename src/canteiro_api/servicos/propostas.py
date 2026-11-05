@@ -41,7 +41,7 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
-from . import cronograma, fornecedores, obras, pedidos, versoes
+from . import cronograma, fornecedores, gastos, obras, pedidos, versoes
 from .estoque import (
     id_derivado,
     linhas_de,
@@ -313,6 +313,9 @@ _DESFAZER = {
     "reabrir_orcamento": obras.preparar_reabrir,
     "desligar_versao": versoes.preparar_desligar,
     "restaurar_insumos": preparar_restaurar_insumos,
+    "editar_arvore": gastos.preparar_desfazer_arvore,
+    "estornar_gasto": gastos.preparar_estorno_gasto,
+    "reabrir_comprovante": gastos.preparar_reabrir,
 }
 
 

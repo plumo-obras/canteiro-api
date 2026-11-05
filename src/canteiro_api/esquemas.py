@@ -5,9 +5,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from canteiro_dominio.leitura import LeituraComprovante, Revisao
 from canteiro_dominio.modelos import (
+    Comprovante,
     EntradaRegistro,
+    EtapaExtra,
     Fornecedor,
+    Gasto,
     Insumo,
     ItemOrcamento,
     LinhaPedido,
@@ -20,6 +24,7 @@ from canteiro_dominio.modelos import (
     StatusPedido,
     TipoProposta,
     TipoVersao,
+    Topico,
     VersaoOrcamento,
 )
 from canteiro_dominio.regras import falta_na_linha
@@ -842,3 +847,109 @@ class MedicaoSaida(BaseModel):
     medicao: Medicao
     cronograma: CronogramaObra
     registro_id: str | None = None
+
+
+# --- gastos: árvore da obra, comprovantes e gastos ---
+
+class TopicoNaArvoreSaida(BaseModel):
+    id: str
+    nome: str
+
+
+class EtapaNaArvoreSaida(BaseModel):
+    chave: str = Field(description="chave fixa (ex.: 'eletrica') ou 'x-<id>' para etapa extra da obra")
+    nome: str
+    inclui: str = Field(description="o que entra nela (vazio em etapa extra)")
+    fixa: bool
+    topicos: list[TopicoNaArvoreSaida] = Field(default_factory=list)
+
+
+class EtapaExtraCorpo(Entrada):
+    nome: str = Field(min_length=1, max_length=120)
+
+
+class TopicoCorpo(Entrada):
+    etapa: str = Field(min_length=1, max_length=80, description="chave da etapa (fixa ou extra) da árvore da obra")
+    nome: str = Field(min_length=1, max_length=120)
+
+
+class EdicaoArvoreCorpo(Entrada):
+    """Renomear e/ou arquivar (arquivado = sai da árvore e não recebe gasto novo; os antigos continuam)."""
+    nome: str | None = Field(None, min_length=1, max_length=120)
+    arquivado: bool | None = None
+
+
+class EtapaExtraSaida(EtapaExtra):
+    chave: str = ""
+    registro_id: str | None = None
+
+
+class TopicoSaida(Topico):
+    registro_id: str | None = None
+
+
+class ComprovanteSaida(Comprovante):
+    ja_existia: bool = Field(False, description="no envio: o mesmo arquivo já tinha sido enviado nesta obra")
+    registro_id: str | None = Field(None, description="no descarte: a EntradaRegistro (o Desfazer usa)")
+
+
+class ComprovanteDetalhe(Comprovante):
+    revisao: Revisao = Field(description="o formulário de revisão pronto: estado e opções de cada campo")
+
+
+class LeituraCorpo(Entrada):
+    """O que o serviço do agente grava depois de ler: a leitura, ou o erro (frase para a pessoa)."""
+    leitura: LeituraComprovante | None = None
+    erro: str | None = Field(None, min_length=1, max_length=300)
+    modelo: str | None = Field(None, max_length=80)
+
+    @model_validator(mode="after")
+    def _um_dos_dois(self):
+        if (self.leitura is None) == (self.erro is None):
+            raise ValueError("Mande a leitura ou o erro (um dos dois).")
+        return self
+
+
+class ConfirmarCorpo(Entrada):
+    valor: int = Field(ge=1, description="centavos")
+    data_pagamento: str = Field(max_length=10, description="AAAA-MM-DD")
+    favorecido: str = Field(max_length=300)
+    descricao: str = Field(max_length=400)
+    etapa: str = Field(max_length=80)
+    topico_id: str | None = Field(None, max_length=80)
+    fornecedor_id: str | None = Field(None, max_length=80)
+    pedido_id: str | None = Field(None, max_length=80, description="o gasto é o pagamento deste pedido")
+
+
+class DescartarCorpo(Entrada):
+    motivo: str = Field("", max_length=200)
+
+
+class GastoSaida(Gasto):
+    pass
+
+
+class Confirmacao(BaseModel):
+    gasto: GastoSaida
+    comprovante: Comprovante
+    registro_id: str
+
+
+class TopicoNoResumo(BaseModel):
+    topico_id: str | None = Field(description="null = gasto da etapa sem tópico")
+    nome: str
+    total: int
+
+
+class EtapaNoResumo(BaseModel):
+    etapa: str
+    nome: str
+    total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
+    topicos: list[TopicoNoResumo]
+
+
+class ResumoGastos(BaseModel):
+    total: int = Field(description="gastos avulsos confirmados (centavos): é o que soma no realizado")
+    pagamentos_de_pedidos: int = Field(description="gastos ligados a pedido: o custo já conta pela entrega")
+    a_revisar: int = Field(description="comprovantes esperando revisão (não contam em nada)")
+    etapas: list[EtapaNoResumo]

@@ -113,14 +113,19 @@ async def test_consultas_das_rotas_usam_indice_sem_ordenar_em_memoria(espiao, ht
                 f"/pedidos/{pedido}/recebimentos", "/propostas", "/propostas?status=pendente",
                 f"/propostas?obra_id={obra}", f"/propostas?status=pendente&obra_id={obra}", "/fornecedores",
                 f"/obras/{obra}/orcamento", f"/obras/{obra}/etapas", f"/obras/{obra}/cronograma",
-                f"/uso?de={hoje - timedelta(days=30)}&ate={hoje}"]:
+                f"/uso?de={hoje - timedelta(days=30)}&ate={hoje}",
+                f"/obras/{obra}/arvore", f"/obras/{obra}/comprovantes", f"/obras/{obra}/comprovantes?status=a_revisar",
+                f"/obras/{obra}/comprovantes?status=a_revisar&antes_de=2099-01-01T00:00:00Z",
+                f"/obras/{obra}/gastos", f"/obras/{obra}/gastos?etapa=eletrica&antes_de=2099-01-01T00:00:00Z",
+                f"/obras/{obra}/gastos/resumo"]:
         r = await http.get(url, headers=h)
         assert r.status_code < 500, (url, r.text)
     await http.post("/auth/sair", json={"renovacao": vila.sessao["renovacao"]})
     await publicar_pendentes(espiao, PublicadorEmMemoria(), vila.tenant_id)
 
     colecoes = {c.colecao for c in espiao.consultas}
-    assert {"mensagens", "registro", "sessoes", "outbox", "renovacoes"} <= colecoes
+    assert {"mensagens", "registro", "sessoes", "outbox", "renovacoes", "etapas_extras", "topicos", "comprovantes",
+            "gastos"} <= colecoes
     await _conferir(espiao, espiao.consultas)
 
 

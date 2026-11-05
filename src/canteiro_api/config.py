@@ -41,6 +41,10 @@ class Config(BaseSettings):
     # origens (vírgula) que podem chamar a API do navegador — hoje só a lista de espera da landing. Nunca "*".
     cors_origens: str = "http://localhost:4321,http://127.0.0.1:4321"
 
+    # onde ficam os arquivos dos comprovantes: memoria | disco (depois: bucket privado)
+    arquivos: str = "disco"
+    arquivos_dir: str = str(_RAIZ / ".arquivos")
+
     # créditos iniciais de um tenant novo (microdólares; 1 US$ = 1.000.000)
     franquia_padrao_microdolares: int = 20_000_000
 

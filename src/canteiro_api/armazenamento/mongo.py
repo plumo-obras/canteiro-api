@@ -50,6 +50,12 @@ INDICES: dict[str, list[list[str]]] = {
     "mensagens": [["tenant_id", "sessao_id", "seq", "_id"]],
     "cronogramas": [["tenant_id", "_id"]],
     "fornecedores": [["tenant_id", "_id"]],
+    "etapas_extras": [["tenant_id", "obra_id", "_id"]],
+    "topicos": [["tenant_id", "obra_id", "_id"]],
+    "comprovantes": [["tenant_id", "obra_id", "status", "criado_em", "_id"],
+                     ["tenant_id", "obra_id", "criado_em", "_id"], ["tenant_id", "obra_id", "status", "_id"]],
+    "gastos": [["tenant_id", "obra_id", "estornado", "etapa", "criado_em", "_id"],
+               ["tenant_id", "obra_id", "estornado", "criado_em", "_id"], ["tenant_id", "obra_id", "estornado", "_id"]],
 }
 
 # Coleções que se apagam sozinhas: o campo guarda o INSTANTE em que o documento vence (data BSON, nunca texto: o TTL
