@@ -52,7 +52,7 @@ def config():
     from canteiro_api.config import Config
     return Config(jwt_segredo=secrets.token_urlsafe(48), token_servico_agente=secrets.token_urlsafe(32),
                   chave_cifra=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(), armazenamento="memoria",
-                  _env_file=None)
+                  arquivos="banco", _env_file=None)
 
 
 # --- app + cliente HTTP (ASGI) ---
@@ -92,6 +92,7 @@ async def http(arm, config):
 
     from canteiro_api.main import create_app
 
+    # ARQUIVOS=banco: os comprovantes vão para o mesmo armazenamento do teste (Mongo descartável ou memória)
     app = create_app(config, arm)
     ip = f"10.{secrets.randbelow(255)}.{secrets.randbelow(255)}.{secrets.randbelow(255)}"
     transporte = httpx.ASGITransport(app=app, client=(ip, 5555))

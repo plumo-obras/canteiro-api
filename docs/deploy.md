@@ -54,6 +54,9 @@ python3 -c "import base64, os; print('CHAVE_CIFRA', base64.b64encode(os.urandom(
      (`JWT_SEGREDO` o Render gera sozinho.)
    - `canteiro-agente`: `API_URL` = `https://canteiro-api.onrender.com` (a URL que o Render mostrar), o mesmo
      `TOKEN_SERVICO_AGENTE`. `MODELO_ROTEIRO=1` já vem ligado (demo sem chave, 0 tokens).
+   - Já vêm no `render.yaml` (sem segredo): `AMBIENTE=producao` e `ARQUIVOS=banco` (veja a seção 9). O serviço atual
+     foi criado pela API, não como Blueprint: **antes de publicar a leitura de comprovantes**, acrescente as duas no
+     painel (Environment), senão a API sobe com o padrão `ARQUIVOS=banco` mas sem a trava de produção.
 3. Depois do deploy: `https://canteiro-api.onrender.com/saude` e `https://canteiro-agente.onrender.com/saude` devem responder `{"ok":true}`.
 
 ## 4. Dados de exemplo (seed) no Atlas
@@ -113,3 +116,38 @@ done
 O Firestore apaga em até ~24 h depois do vencimento (o Mongo, em minutos): o código continua conferindo a validade
 ao ler, então o atraso não muda comportamento. Os índices compostos de `INDICES` viram declarações em
 `firestore.indexes.json` (o `_id` do fim corresponde ao `__name__`, que o Firestore já acrescenta sozinho).
+
+## 9. Arquivos dos comprovantes (no próprio Atlas, em pedaços)
+
+Os comprovantes de gasto (foto até 3,5 MB, PDF até 4 MiB) ficam **no mesmo banco** do Atlas, pela mesma porta de
+armazenamento do resto (abordagem do João Sotto): cada arquivo vira pedaços de 512 KiB, um documento cada, na coleção
+`arquivos_pedacos`, e um documento-índice em `arquivos` (quantos pedaços, tamanho, sha256), gravado **por último na
+mesma transação**: sem índice o arquivo não existe, nunca pela metade. A leitura é por ID (sem consulta nem índice
+novo) e confere o sha256. O disco do Render não serve: ele é recriado a cada deploy e quando o serviço gratuito dorme,
+e o comprovante enviado de manhã sumiria antes da revisão.
+
+- **Configuração:** `ARQUIVOS=banco` (padrão) usa a mesma `MONGO_URL`; não há serviço nem segredo novo.
+  `ARQUIVOS=disco` (pasta `.arquivos/`, fora do git) e `memoria` são só para desenvolvimento e testes.
+- **Trava de produção:** com `AMBIENTE=producao`, a API **recusa subir** se `ARQUIVOS` não for `banco` ou
+  `ARMAZENAMENTO` não for `mongo` (`Config.conferir`). Regra escolhida por ser explícita: produção se declara, e
+  nenhuma combinação de variáveis esquecida faz o envio "funcionar" gravando num lugar que some.
+- **Portável para o Firestore:** nada aqui é exclusivo do Mongo (por isso não é GridFS). O pedaço de 512 KiB fica
+  abaixo do 1 MiB por documento do Firestore, e o ID (sha256 de `tenant|caminho`, sem `/`) é válido nos dois.
+  O maior arquivo (4 MiB) = 8 pedaços + o índice = **9 escritas e ~4 MiB numa transação**: no Mongo cabe com folga
+  (16 MB por documento; transação sem teto de tamanho desde o 4.2, só o tempo de 60 s); no Firestore, o commit aceita
+  até 500 escritas (o teto que a porta já impõe) e 10 MiB por requisição (mesmo em base64, ~5,4 MiB). A porta recusa arquivo acima de 4 MiB (`MAX_TAMANHO` em `src/canteiro_api/arquivos.py`)
+  para essa conta nunca deixar de fechar.
+- **Isolamento:** o `tenant_id` vai em todo documento e em toda leitura, e entra no hash do ID (o `_id` é único na
+  coleção inteira, não por cliente). O caminho é `<obra_id>/<nome>` e a porta recusa qualquer outra forma (`..`,
+  barra invertida, caminho absoluto, subpasta, arquivo oculto). Arquivo de outro tenant volta como inexistente. O
+  arquivo só sai pela rota `GET /comprovantes/{id}/arquivo`, com login.
+- **Espaço (M0 = 512 MB para dados + índices + arquivos):** a web reduz cada foto para ~1 MB; 200 comprovantes ≈
+  100–400 MB. Acompanhe no Atlas (Cluster → Metrics → *Logical Data Size*, ou Collections → banco `canteiro` →
+  `arquivos_pedacos`) ou no `mongosh`: `db.stats().dataSize` e `db.arquivos_pedacos.stats().storageSize`. Passou de
+  ~350 MB: hora de subir o plano (M10/Flex) ou mover os arquivos para um bucket privado (a porta `Arquivos` já isola a
+  troca; o GCS vem junto com o Firestore). Arquivo duplicado não ocupa espaço de novo (o nome sai do sha256 do
+  conteúdo), e como pedaços e índice vão na mesma transação, envio interrompido não deixa sobra.
+- **Retenção — decisão pendente (LGPD):** hoje nenhum arquivo é apagado. Estornar/desfazer um gasto ou descartar um
+  comprovante mantém o arquivo de propósito (é a prova do pagamento e o Desfazer precisa dele). Falta decidir o prazo
+  (ex.: descartados apagados após N dias; confirmados enquanto a obra existir + prazo fiscal) e o pedido de exclusão
+  do titular.

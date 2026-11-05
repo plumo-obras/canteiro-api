@@ -9,6 +9,9 @@ _RAIZ = Path(__file__).resolve().parents[2]  # raiz do repositório (src/canteir
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_file=_RAIZ / ".env", extra="ignore")
 
+    # desenvolvimento | producao. Em produção a API recusa subir com o que perderia dado (veja `conferir`).
+    ambiente: str = "desenvolvimento"
+
     armazenamento: str = "mongo"                 # mongo | memoria
     mongo_url: str = "mongodb://localhost:27017/?replicaSet=rs0&directConnection=true"
     mongo_db: str = "canteiro"
@@ -45,6 +48,11 @@ class Config(BaseSettings):
     # origens (vírgula) que podem chamar a API do navegador — hoje só a lista de espera da landing. Nunca "*".
     cors_origens: str = "http://localhost:4321,http://127.0.0.1:4321"
 
+    # Onde ficam os arquivos dos comprovantes: banco (padrão e o único aceito em produção; pedaços no próprio banco),
+    # disco (pasta local, só desenvolvimento: o disco do contêiner some a cada deploy) ou memoria (testes).
+    arquivos: str = "banco"
+    arquivos_dir: str = str(_RAIZ / ".arquivos")
+
     # créditos iniciais de um tenant novo (microdólares; 1 US$ = 1.000.000)
     franquia_padrao_microdolares: int = 20_000_000
 
@@ -58,3 +66,10 @@ class Config(BaseSettings):
     def conferir(self) -> None:
         if len(self.jwt_segredo) < 32:
             raise RuntimeError("JWT_SEGREDO ausente ou curto: defina no .env (veja .env.exemplo).")
+        if self.ambiente not in ("desenvolvimento", "producao"):
+            raise RuntimeError(f"AMBIENTE desconhecido: {self.ambiente!r} (use desenvolvimento ou producao).")
+        if self.ambiente == "producao" and (self.arquivos != "banco" or self.armazenamento != "mongo"):
+            # Comprovante é a prova do gasto: no disco do Render ele some no próximo deploy ou quando o serviço dorme.
+            # Melhor não subir do que aceitar o envio e perder o arquivo antes da revisão.
+            raise RuntimeError("Em produção, ARQUIVOS tem de ser banco e ARMAZENAMENTO tem de ser mongo (disco e "
+                               "memória perdem os comprovantes a cada deploy).")

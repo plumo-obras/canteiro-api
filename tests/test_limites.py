@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from canteiro_api.auth import _ids_tentativa
-from canteiro_api.limite_corpo import LIMITE_PADRAO, LIMITE_UPLOAD
+from canteiro_api.limite_corpo import LIMITE_COMPROVANTE, LIMITE_PADRAO, LIMITE_UPLOAD, limite_da_rota
 from canteiro_api.modelos import RETENCAO_OUTBOX, TENANT_SISTEMA
 from canteiro_api.servicos.sessoes import MAX_BYTES_LOTE
 from canteiro_dominio.armazenamento import Consulta, Filtro
@@ -82,6 +82,16 @@ async def test_corpo_grande_recusado_pelo_content_length_antes_do_login(http):
     r = await http.post("/auth/entrar", content=b"{" + b" " * LIMITE_PADRAO + b"}",
                         headers={"Content-Type": "application/json"})
     assert r.status_code == 413
+
+
+def test_comprovante_tem_limite_proprio_abaixo_do_da_planilha():
+    from canteiro_api.servicos.gastos import MAX_ARQUIVO
+
+    assert limite_da_rota("/obras/x/comprovantes") == LIMITE_COMPROVANTE
+    assert MAX_ARQUIVO < LIMITE_COMPROVANTE < LIMITE_UPLOAD
+    # a função da Vercel que repassa o envio recusa corpo acima de 4,5 MB
+    assert MAX_ARQUIVO + 64 * 1024 < 4_500_000
+    assert limite_da_rota("/obras/x/comprovantes/y") == LIMITE_PADRAO
 
 
 async def test_upload_aceita_mais_que_o_limite_padrao(vila):

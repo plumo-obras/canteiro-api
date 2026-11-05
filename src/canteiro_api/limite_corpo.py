@@ -11,11 +11,15 @@ MIB = 1024 * 1024
 LIMITE_PADRAO = 1 * MIB
 # arquivo de até 5 MB (`_ler_arquivo` em rotas/obras.py) + o envelope do multipart e os outros campos do formulário
 LIMITE_UPLOAD = 6 * MIB
+# comprovante de até 4 MiB (`MAX_ARQUIVO` em servicos/gastos.py) + o envelope e a legenda. Folga de 1 MiB de propósito:
+# entre 4 e 5 MiB o corpo chega na rota, que responde 413 dizendo o limite do arquivo (e não o do corpo).
+LIMITE_COMPROVANTE = 5 * MIB
 # lote de mensagens: até 9 MiB de conteúdo (`MAX_BYTES_LOTE` em servicos/sessoes.py) + o JSON em volta
 LIMITE_MENSAGENS = 10 * MIB
 
 _ROTAS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"^/obras/[^/]+/(orcamento/(ler|importar|versoes)|importar)$"), LIMITE_UPLOAD),
+    (re.compile(r"^/obras/[^/]+/comprovantes$"), LIMITE_COMPROVANTE),
     (re.compile(r"^/sessoes/[^/]+/mensagens$"), LIMITE_MENSAGENS),
 ]
 

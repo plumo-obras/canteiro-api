@@ -10,11 +10,12 @@ from canteiro_dominio.armazenamento import ConflitoDeId
 from canteiro_dominio.regras import RegraViolada
 
 from .armazenamento import criar_armazenamento
+from .arquivos import criar_arquivos
 from .cofre import criar_cofre
 from .config import Config
 from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
-from .rotas import auth, fornecedores, lista_espera, obras, propostas, sessoes
+from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, sessoes
 
 
 def create_app(config: Config | None = None, arm=None) -> FastAPI:
@@ -28,6 +29,8 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
                                                 mongo_db=config.mongo_db)
             if hasattr(app.state.arm, "garantir_indices"):
                 await app.state.arm.garantir_indices()
+            if app.state.arquivos is None:
+                app.state.arquivos = criar_arquivos(config.arquivos, config.arquivos_dir, app.state.arm)
             yield
             await app.state.arm.fechar()
         else:
@@ -38,6 +41,9 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.config = config
     app.state.arm = arm
     app.state.cofre = criar_cofre(config.chave_cifra)
+    # no banco, os arquivos dependem do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
+    adiar = config.arquivos == "banco" and arm is None
+    app.state.arquivos = None if adiar else criar_arquivos(config.arquivos, config.arquivos_dir, arm)
 
     @app.exception_handler(ErroNegocio)
     async def _erro_negocio(_: Request, e: ErroNegocio):
@@ -59,6 +65,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.include_router(obras.r)
     app.include_router(fornecedores.r)
     app.include_router(propostas.r)
+    app.include_router(gastos.r)
     app.include_router(sessoes.r)
     app.include_router(lista_espera.r)
     # o limite fica dentro do CORS: o 413 da lista de espera ainda leva o cabeçalho e o navegador consegue lê-lo

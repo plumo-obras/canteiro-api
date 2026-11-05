@@ -198,6 +198,9 @@ class Pedido(Documento):
     rastreio: str | None = None
     # Quantas entregas já entraram: numera a próxima e trava o desfazer (só a última entrega pode ser desfeita).
     recebimentos: int = 0
+    # Soma dos gastos confirmados como pagamento deste pedido. Só informa: o custo do pedido já conta no realizado
+    # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.soma_nos_gastos_avulsos`).
+    pago: Centavos = 0
 
     @model_validator(mode="before")
     @classmethod
@@ -311,6 +314,73 @@ class EntradaRegistro(Documento):
     proposta_id: str | None = None
     desfazer: dict[str, Any] | None = None
     desfeito: bool = False
+
+
+class EtapaExtra(Documento):
+    """Etapa que a obra cria além das fixas (`etapas.ETAPAS_FIXAS`). Na árvore e no gasto ela aparece como
+    `etapas.chave_extra(id)`. Não se apaga (a porta não apaga): arquivada, sai da árvore e não recebe gasto novo."""
+    obra_id: str
+    nome: str
+    arquivado: bool = False
+    atualizado_em: datetime = Field(default_factory=agora)
+
+
+class Topico(Documento):
+    """Subdivisão de uma etapa (fixa ou extra) dentro de uma obra: "Bloco B", "Mão de obra", "Quadro geral"."""
+    obra_id: str
+    etapa: str                             # chave fixa ou "x-<id da etapa extra>"
+    nome: str
+    arquivado: bool = False
+    atualizado_em: datetime = Field(default_factory=agora)
+
+
+class StatusComprovante(StrEnum):
+    A_REVISAR = "a_revisar"                # enviado; não conta em nenhuma conta até alguém confirmar
+    CONFIRMADO = "confirmado"              # virou `Gasto`
+    DESCARTADO = "descartado"              # não era gasto da obra, foto repetida… O arquivo continua guardado.
+
+
+class Comprovante(Documento):
+    """Arquivo de um gasto (foto, PDF) esperando revisão. A IA lê e sugere; só a confirmação de uma pessoa cria o
+    `Gasto`. A leitura é ajuda, não condição: sem ela (erro, recusa, sem crédito) a revisão abre em branco."""
+    obra_id: str
+    arquivo: str                           # caminho no armazenamento de arquivos privado; só sai por rota com login
+    tipo_conteudo: str                     # image/jpeg, image/png, image/webp, application/pdf
+    tamanho: int                           # bytes
+    sha256: str                            # o mesmo arquivo enviado duas vezes vira o mesmo comprovante
+    # "Do que é?" escrito por quem enviou ("empreiteiro, alvenaria"): o Pix sozinho não diz para que foi
+    legenda: str = ""
+    quem: str = ""
+    usuario_id: str | None = None
+    status: StatusComprovante = StatusComprovante.A_REVISAR
+    leitura: dict[str, Any] | None = None  # `leitura.LeituraComprovante` como o agente devolveu (já validada)
+    erro_leitura: str | None = None        # por que a leitura não saiu, em frase para a pessoa
+    lido_em: datetime | None = None
+    modelo_leitura: str | None = None
+    gasto_id: str | None = None
+    motivo_descarte: str = ""
+    atualizado_em: datetime = Field(default_factory=agora)
+
+
+class Gasto(Documento):
+    """Dinheiro que saiu, numa data, numa etapa da obra. Nota a prazo ou boleto em aberto não é gasto: cada parcela
+    paga entra pelo próprio comprovante.
+
+    Ligado a um pedido (`pedido_id`), o gasto só registra o pagamento daquele pedido: o custo já conta no realizado
+    pela entrega, e somar de novo contaria duas vezes (`gastos.soma_nos_gastos_avulsos`)."""
+    obra_id: str
+    comprovante_id: str | None = None
+    valor: Centavos
+    data_pagamento: str                    # "AAAA-MM-DD", dia puro, sem hora
+    favorecido: str                        # quem recebeu o dinheiro, como no comprovante
+    fornecedor_id: str | None = None
+    descricao: str
+    etapa: str                             # etapa DE GASTO (chave fixa ou "x-<id>"), não a da EAP do orçamento
+    topico_id: str | None = None
+    pedido_id: str | None = None
+    quem: str = ""
+    usuario_id: str | None = None
+    estornado: bool = False                # desfeito pelo registro: sai das contas, o documento fica
 
 
 class UsoIA(Documento):
