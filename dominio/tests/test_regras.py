@@ -177,3 +177,68 @@ def test_falta_na_linha_nao_fica_negativa():
     assert falta_na_linha({"quantidade": 25, "recebida": 18}) == 7
     assert falta_na_linha({"quantidade": 25, "recebida": 30}) == 0
     assert falta_na_linha({"quantidade": 25}) == 25
+
+
+# --- linha de conta honesta, entrega proposta e situação da etapa (teste do agente com o modelo real) ---
+
+def test_texto_da_conta_tres_formas():
+    from canteiro_dominio.regras import texto_da_conta
+
+    falta = conta_de_falta(precisa=qtd(200), saldo=qtd(46), a_caminho=qtd(120))
+    assert texto_da_conta(falta, "sc") == ("precisa 200 sc − saldo 46 sc − a caminho 120 sc − em cotação 0 sc − "
+                                           "transferência 0 sc = falta 34 sc")
+    sobra = conta_de_falta(precisa=qtd(10), saldo=qtd(18), a_caminho=qtd(7))
+    assert (sobra.falta, sobra.sobra, sobra.sem_previsao) == (0, qtd(15), False)
+    assert texto_da_conta(sobra, "m³") == ("saldo 18 m³ + a caminho 7 m³ + em cotação 0 m³ + transferência 0 m³ = "
+                                           "25 m³ para precisa 10 m³: sobra 15 m³, falta 0")
+    sem = conta_de_falta(precisa=0, saldo=qtd(60))
+    assert (sem.falta, sem.sobra, sem.sem_previsao) == (0, 0, True)
+    t = texto_da_conta(sem, "sc")
+    assert t.startswith("sem previsão lançada para a obra") and "saldo 60 sc" in t and "falta 0" not in t
+    negativo = conta_de_falta(precisa=qtd(10), saldo=qtd(-5))
+    assert "saldo 0 un (o livro está em -5 un; conta como zero)" in texto_da_conta(negativo, "un")
+    assert texto_da_conta(negativo, "un").endswith("= falta 10 un")
+
+
+def test_previa_e_validacao_da_entrega():
+    from canteiro_dominio.regras import previa_entrega, texto_da_entrega, validar_entrega
+
+    linhas = [{"nome": "Brita 1", "unidade": "m³", "quantidade": qtd(25), "recebida": qtd(18)},
+              {"nome": "Areia", "unidade": "m³", "quantidade": qtd(10), "recebida": 0}]
+    p = previa_entrega(linhas, [(0, qtd(7))])
+    assert (p.linhas[0].recebida_depois, p.linhas[0].falta_depois, p.completa) == (qtd(25), 0, False)
+    assert texto_da_entrega(p) == ("Brita 1: recebido 18 m³ + esta entrega 7 m³ = 25 de 25 m³ · o pedido continua "
+                                   "parcial")
+    tudo = previa_entrega(linhas, [(0, qtd(7)), (1, qtd(10))])
+    assert tudo.completa and texto_da_entrega(tudo).endswith("· pedido completo")
+    with pytest.raises(RegraViolada, match="passa do que falta"):
+        validar_entrega(StatusPedido.PARCIAL, linhas, [(0, qtd(9))])
+    assert validar_entrega(StatusPedido.PARCIAL, linhas, [(0, qtd(9))], confirmar_excesso=True).linhas[0].excesso \
+        == qtd(2)
+    for ruim in ([(2, 1)], [(0, 0)], [(0, 1), (0, 1)], []):
+        with pytest.raises(RegraViolada):
+            previa_entrega(linhas, ruim)
+    with pytest.raises(RegraViolada, match="não recebe entrega"):
+        validar_entrega(StatusPedido.CONFERIDO, linhas, [(0, 1)])
+
+
+def test_encerrar_parcial_nao_aceita_entrada():
+    with pytest.raises(RegraViolada, match="só encerra o resto"):
+        validar_conferencia(StatusPedido.CONFERIDO, nf="4410", de=StatusPedido.PARCIAL)
+    validar_conferencia(StatusPedido.CONFERIDO, de=StatusPedido.PARCIAL)
+    validar_conferencia(StatusPedido.CONFERIDO, nf="1", de=StatusPedido.RECEBIDO)
+
+
+@pytest.mark.parametrize("ps,medido,ref,esperado", [
+    ([10000, 0], 8886, 0, ("atrasada", 10000, 1114)),
+    ([0, 5000, 5000], 0, 0, ("nao_comecou", 0, 0)),
+    ([1500, 8500], 2483, 0, ("adiantada", 1500, 0)),
+    ([5000, 5000], 5000, 0, ("em_dia", 5000, 0)),
+    ([5000, 5000], 10000, 0, ("concluida", 5000, 0)),
+    ([5000, 5000], 0, None, ("nao_comecou", 0, 0)),
+])
+def test_situacao_etapa(ps, medido, ref, esperado):
+    from canteiro_dominio.regras import situacao_etapa
+
+    s = situacao_etapa(ps, medido, ref)
+    assert (s.situacao, s.previsto, s.falta) == esperado

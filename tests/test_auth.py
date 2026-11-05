@@ -57,16 +57,67 @@ async def test_janela_de_tentativas_expira(vila, config):
     assert r.status_code == 200
 
 
-async def test_renovar_troca_o_token_e_reuso_derruba_a_familia(vila):
+async def test_renovar_troca_o_token_e_reuso_derruba_a_familia(vila, config):
     velho = vila.sessao["renovacao"]
     r = await vila.http.post("/auth/renovar", json={"renovacao": velho})
     assert r.status_code == 200
     novo = r.json()["renovacao"]
     assert r.json()["usuario"] == vila.sessao["usuario"]
     assert novo != velho
-    # o token velho reaparece (vazou?): recusa e revoga também o novo
+    # o token velho reaparece depois da janela de recarga (vazou?): recusa e revoga também o novo
+    await _envelhecer_uso(vila, velho, config.janela_reuso_renovacao_segundos + 1)
     assert (await vila.http.post("/auth/renovar", json={"renovacao": velho})).status_code == 401
     assert (await vila.http.post("/auth/renovar", json={"renovacao": novo})).status_code == 401
+
+
+async def _envelhecer_uso(vila, token: str, segundos: int) -> None:
+    import hashlib
+    await vila.arm.atualizar("renovacoes", TENANT_SISTEMA, hashlib.sha256(token.encode()).hexdigest(),
+                             {"usado_em": agora() - timedelta(seconds=segundos)})
+
+
+async def test_reuso_dentro_da_janela_responde_409_sem_derrubar_a_familia(vila):
+    """Recarga com renovação no ar: o token velho volta segundos depois. Nada de token novo, nada de revogação."""
+    velho = vila.sessao["renovacao"]
+    r = await vila.http.post("/auth/renovar", json={"renovacao": velho})
+    assert r.status_code == 200
+    sucessor = r.json()["renovacao"]
+    for _ in range(2):      # repetir dentro da janela não muda nada
+        again = await vila.http.post("/auth/renovar", json={"renovacao": velho})
+        assert again.status_code == 409
+        assert again.json() == {"detail": "Renovação em andamento; tente de novo."}
+        assert "acesso" not in again.text and "renovacao" not in again.json()
+    # a família segue viva: o sucessor renova normalmente
+    r = await vila.http.post("/auth/renovar", json={"renovacao": sucessor})
+    assert r.status_code == 200 and r.json()["renovacao"] not in (velho, sucessor)
+
+
+async def test_reuso_depois_da_janela_derruba_a_familia(vila, config):
+    velho = vila.sessao["renovacao"]
+    sucessor = (await vila.http.post("/auth/renovar", json={"renovacao": velho})).json()["renovacao"]
+    await _envelhecer_uso(vila, velho, config.janela_reuso_renovacao_segundos + 1)
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": velho})).status_code == 401
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": sucessor})).status_code == 401
+
+
+async def test_reuso_sem_usado_em_derruba_a_familia(vila):
+    """Token trocado antes de existir `usado_em` não ganha a janela."""
+    velho = vila.sessao["renovacao"]
+    sucessor = (await vila.http.post("/auth/renovar", json={"renovacao": velho})).json()["renovacao"]
+    import hashlib
+    await vila.arm.atualizar("renovacoes", TENANT_SISTEMA, hashlib.sha256(velho.encode()).hexdigest(),
+                             {"usado_em": None})
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": velho})).status_code == 401
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": sucessor})).status_code == 401
+
+
+async def test_janela_de_reuso_vem_da_config(vila, config, monkeypatch):
+    monkeypatch.setattr(config, "janela_reuso_renovacao_segundos", 0)
+    velho = vila.sessao["renovacao"]
+    sucessor = (await vila.http.post("/auth/renovar", json={"renovacao": velho})).json()["renovacao"]
+    await _envelhecer_uso(vila, velho, 1)
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": velho})).status_code == 401
+    assert (await vila.http.post("/auth/renovar", json={"renovacao": sucessor})).status_code == 401
 
 
 async def test_renovacao_guardada_so_como_hash(vila):

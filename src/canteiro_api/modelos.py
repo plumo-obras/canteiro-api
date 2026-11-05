@@ -73,6 +73,8 @@ class Renovacao(BaseModel):
     tenant_usuario: str
     expira_em: datetime
     usado: bool = False
+    # quando foi trocado: reaparecer logo depois é a corrida de uma recarga de página, não vazamento (ver auth.renovar)
+    usado_em: datetime | None = None
     revogado: bool = False
     criado_em: datetime = Field(default_factory=agora)
 

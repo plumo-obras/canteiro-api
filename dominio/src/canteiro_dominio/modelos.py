@@ -277,6 +277,7 @@ class TipoProposta(StrEnum):
     CRIAR_PEDIDO = "criar_pedido"
     AVANCAR_PEDIDO = "avancar_pedido"
     AJUSTE_ESTOQUE = "ajuste_estoque"
+    REGISTRAR_ENTREGA = "registrar_entrega"   # entrada de uma entrega num pedido (o "Registrar entrega" da tela)
 
 
 class Proposta(Documento):
@@ -299,6 +300,9 @@ class Proposta(Documento):
     # `dados_originais` guarda o que o agente propôs, para a auditoria mostrar a diferença.
     ajustada: bool = False
     dados_originais: dict[str, Any] | None = None
+    # O que aprovar faz, decidido pela API ao criar (compra | entrada | encerramento | cancelamento | status | ajuste).
+    # O botão da tela diz a consequência por ele: "conferido" num pedido parcial encerra, num recebido dá entrada.
+    efeito: str | None = None
 
 
 class EntradaRegistro(Documento):

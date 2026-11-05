@@ -16,6 +16,10 @@ class Config(BaseSettings):
     jwt_segredo: str = ""
     acesso_minutos: int = 15
     renovacao_dias: int = 30
+    # Token de renovação já trocado que reaparece dentro desta janela recebe 409 em vez de derrubar a família: é a
+    # renovação que estava no ar quando a página recarregou (o navegador não guardou o cookie novo). Curta de
+    # propósito: depois dela, reuso volta a ser tratado como vazamento.
+    janela_reuso_renovacao_segundos: int = 10
 
     # token com que o serviço do agente fala com as rotas internas (POST /uso, GET /interno/chave-anthropic)
     token_servico_agente: str = ""

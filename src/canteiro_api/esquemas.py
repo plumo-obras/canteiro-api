@@ -64,11 +64,26 @@ class ContaSaida(BaseModel):
     transferencia: int
     falta: int
     comprar: int
+    sobra: int = Field(0, description="milésimos que já tem ou vêm além do que precisa (0 sem previsão)")
+    sem_previsao: bool = Field(False, description="precisa = 0: ninguém lançou a previsão; NÃO quer dizer que não "
+                                                  "precisa")
+    texto: str = Field("", description="a linha de conta pronta (regras.texto_da_conta), sempre aritmética verdadeira")
+
+
+class UltimoPreco(BaseModel):
+    """Preço unitário da última compra do insumo nesta obra (pedido não cancelado mais novo)."""
+    valor_unitario: int = Field(description="centavos por unidade do insumo")
+    pedido_id: str
+    numero: str
+    fornecedor: str
+    data: str = Field(description="AAAA-MM-DD em que o pedido foi criado")
+    status: StatusPedido
 
 
 class InsumoComConta(BaseModel):
     insumo: Insumo
     conta: ContaSaida
+    ultimo_preco: UltimoPreco | None = Field(None, description="null = nunca comprado nesta obra")
 
 
 class InsumoCorpo(Entrada):
@@ -238,10 +253,34 @@ class AjusteEstoqueDados(Entrada):
     motivo: str = Field(min_length=1, max_length=500)
 
 
+class RegistrarEntregaDados(Entrada):
+    """A entrega proposta: o mesmo corpo do `POST /pedidos/{id}/recebimentos`, sem a chave (a aprovação deriva uma do
+    ID da proposta) e com a confirmação de "chegou a mais" que a tela pede."""
+    pedido_id: str
+    linhas: list[LinhaEntrega] = Field(min_length=1, max_length=50)
+    nf_numero: str = Field("", max_length=60)
+    nf_data: str | None = Field(None, pattern=_DATA)
+    nf_valor: int | None = Field(None, ge=0, description="centavos, como está na nota")
+    confirmar_excesso: bool = Field(False, description="a pessoa confirmou que chegou mais do que faltava")
+
+    @field_validator("nf_numero")
+    @classmethod
+    def _nf(cls, v: str | None) -> str:
+        return (v or "").strip()
+
+    @field_validator("linhas")
+    @classmethod
+    def _uma_vez(cls, v: list[LinhaEntrega]) -> list[LinhaEntrega]:
+        if len({x.indice for x in v}) != len(v):
+            raise ValueError("a mesma linha do pedido aparece duas vezes na entrega")
+        return v
+
+
 DADOS_POR_TIPO: dict[TipoProposta, type[Entrada]] = {
     TipoProposta.CRIAR_PEDIDO: PedidoDados,
     TipoProposta.AVANCAR_PEDIDO: AvancarPedidoDados,
     TipoProposta.AJUSTE_ESTOQUE: AjusteEstoqueDados,
+    TipoProposta.REGISTRAR_ENTREGA: RegistrarEntregaDados,
 }
 
 # O que quem aprova pode corrigir antes de aprovar. Fora daqui (insumo, pedido, destino do status) já é outra proposta.
@@ -249,6 +288,7 @@ AJUSTAVEIS: dict[TipoProposta, set[str]] = {
     TipoProposta.CRIAR_PEDIDO: {"quantidade", "fornecedor", "valor", "previsao"},
     TipoProposta.AVANCAR_PEDIDO: {"quantidade_recebida", "nf"},
     TipoProposta.AJUSTE_ESTOQUE: {"quantidade", "motivo"},
+    TipoProposta.REGISTRAR_ENTREGA: {"linhas", "nf_numero", "nf_data", "nf_valor", "confirmar_excesso"},
 }
 
 
@@ -619,6 +659,128 @@ class ResumoObra(BaseModel):
     prazo: Prazo | None = Field(None, description="o mesmo do GET /obras/{id}/cronograma; null sem cronograma")
 
 
+
+# --- resumo de UMA obra ("como está a obra?"): tudo pronto para citar, cada bloco diz se o dado existe ---
+
+class EtapaNoMes(BaseModel):
+    etapa: str
+    descricao: str
+    pct_no_mes: int = Field(description="% da etapa previsto no mês (centésimos)")
+    valor_no_mes: int = Field(description="R$ previsto da etapa no mês (centavos)")
+    previsto_ate_referencia: int = 0
+    medido_acumulado: int = 0
+    situacao: str | None = None
+    comeca: bool = Field(False, description="começa neste mês: sem medição e sem % previsto antes dele")
+
+
+class EtapaAtrasada(BaseModel):
+    etapa: str
+    descricao: str
+    medido_acumulado: int
+    previsto_ate_referencia: int
+    atraso_pct: int
+
+
+class ResumoCronograma(BaseModel):
+    cadastrado: bool
+    mes_corrente: str = Field(description="AAAA-MM de hoje, no fuso de São Paulo")
+    termino_contratual: str | None = None
+    termino_projetado: str | None = None
+    termino_original: str | None = None
+    atraso_decimos: int | None = Field(None, description="contra o cronograma atual; null sem medição")
+    atraso_base_decimos: int | None = Field(None, description="contra o original (linha de base)")
+    revisoes: int = 0
+    mes_ultima_medicao: str | None = None
+    medicoes: int = 0
+    pct_previsto_na_medicao: int | None = None
+    pct_medido: int | None = None
+    previsto_no_mes: int | None = Field(None, description="R$ previsto no mês corrente (null fora do cronograma)")
+    pct_previsto_acumulado_no_mes: int | None = None
+    etapas_do_mes: list[EtapaNoMes] = Field(default_factory=list, description="com % previsto no mês corrente, "
+                                                                              "maior valor primeiro")
+    proximo_mes: str | None = Field(None, description="AAAA-MM do mês seguinte ao corrente (null fora do cronograma)")
+    previsto_no_proximo_mes: int | None = None
+    pct_previsto_acumulado_no_proximo_mes: int | None = None
+    etapas_do_proximo_mes: list[EtapaNoMes] = Field(
+        default_factory=list,
+        description="todas com % previsto no mês seguinte (as que continuam e as que começam), maior valor primeiro")
+    proximo_mes_com_inicio: str | None = Field(None, description="o próximo mês em que alguma etapa começa (sem "
+                                                                 "medição: a que já foi medida não começa de novo)")
+    proximas_etapas: list[EtapaNoMes] = Field(default_factory=list, description="as que começam nesse mês")
+    etapas_atrasadas: list[EtapaAtrasada] = Field(default_factory=list, description="maior atraso primeiro")
+
+
+class EtapaEstourada(BaseModel):
+    etapa: str
+    descricao: str
+    saldo: int
+
+
+class ResumoFinanceiro(BaseModel):
+    tem_orcamento: bool
+    contratado: int = 0
+    aditivos: int = 0
+    aditivos_pct: int | None = None
+    orcado_atual: int = 0
+    cotando: int = 0
+    comprometido: int = 0
+    realizado: int = 0
+    saldo: int = 0
+    etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
+
+
+class ItemEntrega(BaseModel):
+    nome: str
+    unidade: str
+    falta_entregar: int
+
+
+class EntregaResumo(BaseModel):
+    pedido_id: str
+    numero: str
+    fornecedor: str
+    status: StatusPedido
+    previsao: str | None
+    itens: list[ItemEntrega]
+
+
+class ResumoEntregas(BaseModel):
+    hoje: list[EntregaResumo] = Field(default_factory=list)
+    atrasadas: list[EntregaResumo] = Field(default_factory=list, description="previsão antes de hoje e ainda a caminho")
+    proximos_7_dias: list[EntregaResumo] = Field(default_factory=list)
+    sem_previsao: int = Field(0, description="pedidos a caminho sem data (ou com data fora de AAAA-MM-DD)")
+    nf_para_conferir: int = 0
+
+
+class FaltaResumo(BaseModel):
+    insumo_id: str
+    nome: str
+    unidade: str
+    falta: int
+    texto: str
+
+
+class ResumoAlmoxarifado(BaseModel):
+    insumos: int = 0
+    falta_comprar: list[FaltaResumo] = Field(default_factory=list)
+    sem_previsao: int = Field(0, description="insumos sem quantidade prevista: a falta deles não é calculada")
+    consumo_projetado: bool = Field(False, description="o sistema ainda não projeta consumo por semana")
+
+
+class ResumoPendencias(BaseModel):
+    propostas: int = 0
+    titulos: list[str] = Field(default_factory=list, description="até 5, as mais novas primeiro")
+
+
+class ResumoDaObra(BaseModel):
+    obra: Obra
+    hoje: str = Field(description="AAAA-MM-DD, fuso de São Paulo")
+    cronograma: ResumoCronograma
+    financeiro: ResumoFinanceiro
+    entregas: ResumoEntregas
+    almoxarifado: ResumoAlmoxarifado
+    pendencias: ResumoPendencias
+
 # --- sessões de conversa ---
 
 _ID = r"^[A-Za-z0-9_-]{8,64}$"
@@ -799,6 +961,15 @@ class EtapaCronograma(BaseModel):
     atual: int
     percentuais: list[int]
     medido_acumulado: int = 0
+    # Contas prontas para a tela e o agente (o Gantt calculava a situação no navegador; o agente não tinha como).
+    valores_mes: list[int] = Field(default_factory=list, description="R$ previsto de cada mês (centavos), o mesmo "
+                                                                     "arredondamento do mensal")
+    medido_mes: list[int] = Field(default_factory=list, description="% medido em cada mês (centésimos), alinhado "
+                                                                    "com `mensal`; 0 em mês sem medição")
+    previsto_ate_referencia: int = Field(0, description="% previsto acumulado até o mês da última medição")
+    situacao: Literal["concluida", "atrasada", "adiantada", "em_dia", "nao_comecou"] | None = Field(
+        None, description="no mês da última medição (regras.situacao_etapa); null sem cronograma")
+    atraso_pct: int = Field(0, description="centésimos que o medido está abaixo do previsto (0 se não atrasada)")
 
 
 class MesCronograma(BaseModel):
