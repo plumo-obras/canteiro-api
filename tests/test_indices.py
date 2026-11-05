@@ -113,6 +113,7 @@ async def test_consultas_das_rotas_usam_indice_sem_ordenar_em_memoria(espiao, ht
                 f"/pedidos/{pedido}/recebimentos", "/propostas", "/propostas?status=pendente",
                 f"/propostas?obra_id={obra}", f"/propostas?status=pendente&obra_id={obra}", "/fornecedores",
                 f"/obras/{obra}/orcamento", f"/obras/{obra}/etapas", f"/obras/{obra}/cronograma",
+                f"/obras/{obra}/resumo",
                 f"/uso?de={hoje - timedelta(days=30)}&ate={hoje}"]:
         r = await http.get(url, headers=h)
         assert r.status_code < 500, (url, r.text)

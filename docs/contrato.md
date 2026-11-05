@@ -65,9 +65,19 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   ainda vão custar (centavos): o `valor` inteiro em cotação; depois, só a parte que falta entregar de cada linha · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
   nova do registro da obra, ou `null`. Somado na API: uma consulta por coleção para o tenant inteiro (sem agregação no
   banco) e uma leitura de 1 documento do registro por obra.
-- `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta}]`, onde
-  `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar}` calculada por `regras.conta_de_falta`
-  (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
+- `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta, ultimo_preco}]`, onde
+  `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar, sobra, sem_previsao, texto}` calculada
+  por `regras.conta_de_falta` (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
+  - `sem_previsao` = `precisa` 0: ninguém lançou a previsão (a falta não é calculada; **não** quer dizer "não precisa").
+    `sobra` (milésimos) = o que tem e vem além do que precisa (0 sem previsão).
+  - `texto` = a linha de conta pronta (`regras.texto_da_conta`, domínio ≥ 0.3.0), sempre aritmética verdadeira, em três
+    formas: com falta `"precisa 200 sc − saldo 46 sc − a caminho 120 sc − em cotação 0 sc − transferência 0 sc = falta
+    34 sc"`; com sobra `"saldo 32 m³ + a caminho 40 m³ + em cotação 0 m³ + transferência 0 m³ = 72 m³ para precisa
+    60 m³: sobra 12 m³, falta 0"`; sem previsão `"sem previsão lançada para a obra (…) · saldo 60 sc · a caminho 0 sc
+    · …"`. Saldo negativo aparece como 0 com o valor do livro entre parênteses.
+  - `ultimo_preco` = `{valor_unitario (centavos por unidade), pedido_id, numero, fornecedor, data ("AAAA-MM-DD", dia de
+    criação no fuso de São Paulo), status}` da linha do pedido **não cancelado** mais novo desse insumo na obra, ou
+    `null` se nunca foi comprado. É o "quanto custa 10 sacos a mais?" sem dividir total por quantidade.
 - `Insumo.valor_unitario` (centavos, 0 = sem preço) é o preço unitário do orçamento.
 - `Insumo.tipo` ∈ `material | servico` (padrão `material`). Serviço (terraplanagem, aterro, empreiteiro) não tem
   estoque: movimento de entrada/saída/ajuste nele → 422, saldo sempre 0, e "a caminho" na Conta é o contratado ainda
@@ -270,6 +280,9 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
   `voltar_pedido`); de `recebido`, recebe tudo o que falta numa entrega só (o caminho que o agente usa), com
   `quantidade_recebida` (só em pedido de uma linha) e `nf` — vira um `Recebimento` igual ao de cima.
   `quantidade_recebida`/`nf` com outro destino → 422.
+- **De `parcial`, `para = conferido` só encerra:** `quantidade_recebida` ou `nf` junto → 422 ("De parcial, conferir só
+  encerra o resto…"); antes eram descartados em silêncio. O que chegou entra por `POST …/recebimentos` (ou proposta
+  `registrar_entrega`).
 - `GET /fornecedores` → `[Fornecedor]` por nome; `Fornecedor` = `{id, nome, cnpj, contato, telefone, email}` (cnpj só
   dígitos ou `""`). São do tenant, valem para todas as obras.
 - `POST /fornecedores` (admin) `{nome, cnpj?, contato?, telefone?, email?}` → `Fornecedor + registro_id` (201). CNPJ
@@ -286,7 +299,13 @@ atual de cada etapa (contrato + aditivos vigentes).
 - `GET /obras/{obra_id}/cronograma` → `{inicio, meses, base, revisoes, etapas, mensal, medicoes, prazo}`. Sem cronograma: `inicio`
   `null`, `meses` 0, as etapas do orçamento com `percentuais: []` e `prazo.termino_contratual` pelo `inicio` +
   `prazo_meses` da obra (ou `null`).
-  - `etapas`: `[{etapa, descricao, atual, percentuais, medido_acumulado}]`, todas as do orçamento vigente.
+  - `etapas`: `[{etapa, descricao, atual, percentuais, medido_acumulado, valores_mes, medido_mes,
+    previsto_ate_referencia, situacao, atraso_pct}]`, todas as do orçamento vigente. Contas prontas (aditivas):
+    `valores_mes` = R$ previsto de cada mês (centavos, o mesmo arredondamento do `mensal`); `medido_mes` = % medido em
+    cada mês (centésimos, alinhado com `mensal`); `previsto_ate_referencia` = % previsto acumulado até o mês da última
+    medição (0 sem medição); `situacao` (`regras.situacao_etapa`) ∈ `concluida | atrasada | adiantada | em_dia |
+    nao_comecou` nesse mês (`null` sem cronograma) — a mesma regra que o Gantt da web calcula hoje no navegador, com
+    "adiantada" separado de "em dia"; `atraso_pct` = centésimos que o medido está abaixo do previsto (0 se não atrasada).
   - `mensal`: `[{mes, previsto, previsto_acumulado, pct_previsto_acumulado, medido, medido_acumulado,
     pct_medido_acumulado}]`, do início ao fim do cronograma (ou até a última medição, se for depois). `previsto` = Σ
     orçado atual × % da etapa no mês. Os campos de medido são `null` depois da última medição.
@@ -313,6 +332,28 @@ atual de cada etapa (contrato + aditivos vigentes).
   pct_obra_acumulado, observacao, quem, criado_em}`; `valor_periodo` = orçado atual × % do período. Registro "3ª
   medição (2026-03): R$ X no mês · Y% da obra executada"; desfazer `desfazer_medicao` só da última.
 
+## Resumo de uma obra ("como está a obra?")
+
+- `GET /obras/{obra_id}/resumo?hoje=AAAA-MM-DD` (qualquer papel; `hoje` padrão = hoje em São Paulo) → `ResumoDaObra` =
+  `{obra: Obra, hoje, cronograma, financeiro, entregas, almoxarifado, pendencias}`, tudo somado na API a partir do que
+  as outras rotas já calculam. Cada bloco diz quando o dado não existe.
+  - `cronograma`: `{cadastrado, mes_corrente, termino_contratual, termino_projetado, termino_original, atraso_decimos,
+    atraso_base_decimos, revisoes, mes_ultima_medicao, medicoes, pct_previsto_na_medicao, pct_medido, previsto_no_mes,
+    pct_previsto_acumulado_no_mes, etapas_do_mes, proximo_mes_com_inicio, proximas_etapas, etapas_atrasadas}`.
+    `etapas_do_mes` = etapas com % previsto no mês corrente (`{etapa, descricao, pct_no_mes, valor_no_mes,
+    previsto_ate_referencia, medido_acumulado, situacao}`); `proximas_etapas` = as que **começam** no primeiro mês
+    depois do corrente em que alguma começa; `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
+    previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
+    `termino_contratual` pela obra).
+  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
+    saldo, etapas_estouradas: [{etapa, descricao, saldo}]}` (os totais de `GET …/orcamento`).
+  - `entregas`: `{hoje, atrasadas, proximos_7_dias, sem_previsao, nf_para_conferir}`; cada entrega =
+    `{pedido_id, numero, fornecedor, status, previsao, itens: [{nome, unidade, falta_entregar}]}`, só pedidos de
+    aprovado a parcial, pela `previsao` "AAAA-MM-DD" (outro formato conta em `sem_previsao`).
+  - `almoxarifado`: `{insumos, falta_comprar: [{insumo_id, nome, unidade, falta, texto}], sem_previsao,
+    consumo_projetado: false}` (materiais; o consumo por semana ainda não é projetado).
+  - `pendencias`: `{propostas, titulos}` (até 5 títulos, as mais novas primeiro).
+
 ## Propostas, aprovação e registro
 
 - `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados, chave_idempotencia?}` → `Proposta +
@@ -327,7 +368,22 @@ atual de cada etapa (contrato + aditivos vigentes).
     tipo e dados}` aponta para a pendente, e aprovar/recusar o solta na mesma transação.
   `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, previsao?}` (o corpo do POST
   de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
-  `POST …/avancar`) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}`.
+  `POST …/avancar`; de `parcial`, sem quantidade/NF) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}` ·
+  `registrar_entrega` = `{pedido_id, linhas: [{indice, quantidade}], nf_numero?, nf_data? ("AAAA-MM-DD"), nf_valor?
+  (centavos), confirmar_excesso?=false}` (o corpo de `POST /pedidos/{id}/recebimentos` sem a chave).
+  - **`registrar_entrega`** (domínio ≥ 0.3.0, `regras.validar_entrega`): o pedido tem de estar de aprovado a parcial,
+    as linhas existir e não repetir; quantidade acima do que falta na linha → 422 "A entrega passa do que falta…" a
+    menos que `confirmar_excesso: true` (o "chegou a mais" da tela). A API **preenche a `conta`** com a prévia do
+    domínio (`regras.texto_da_entrega`): `"PED-0170 · Brita 1: recebido 18 m³ + esta entrega 7 m³ = 25 de 25 m³ ·
+    pedido completo"`. Aprovar revalida contra o pedido de agora (outra entrega no meio → 422, proposta continua
+    pendente) e roda o **mesmo** `preparar_receber` do `POST …/recebimentos` (entrada no almoxarifado, NF, status
+    parcial/conferido; o ID da entrega sai da proposta); o registro tem `desfazer` `desfazer_recebimento` (só a última
+    entrega, como na tela).
+  - **`efeito`** (novo campo da `Proposta`, decidido pela API ao criar): `compra` (criar_pedido) · `entrada`
+    (registrar_entrega, ou avancar_pedido `conferido` de um pedido que não está parcial) · `encerramento`
+    (avancar_pedido `conferido` de parcial) · `cancelamento` · `status` (outros avanços) · `ajuste`. É o que o botão da
+    tela diz ("Aprovar entrada" × "Aprovar encerramento"). Aprovar um `avancar_pedido` cujo pedido mudou a ponto de o
+    efeito ser outro (era entrada, virou encerramento) → 409 "mudou desde a proposta". Proposta antiga vem sem o campo.
 - `GET /propostas?status=pendente&obra_id=…&limite=100&antes_de=…` → `[Proposta]` (mais novas primeiro)
 - `POST /propostas/{id}/aprovar` `{ajustes?}` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o
   Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro` com `desfazer`
@@ -336,7 +392,8 @@ atual de cada etapa (contrato + aditivos vigentes).
   compra. O texto do registro termina em `· aprovado`.
 - **Ajustar e aprovar**: `ajustes` corrige campos de `dados` antes de executar. Chaves aceitas por tipo:
   `criar_pedido` → `quantidade, fornecedor, valor, previsao` (só em proposta de uma linha) · `avancar_pedido` → `quantidade_recebida, nf` (só se
-  `dados.para = conferido`, senão 422) · `ajuste_estoque` → `quantidade, motivo`. Chave fora da lista → 422. Os dados
+  `dados.para = conferido`, senão 422) · `ajuste_estoque` → `quantidade, motivo` · `registrar_entrega` → `linhas,
+  nf_numero, nf_data, nf_valor, confirmar_excesso`. Chave fora da lista → 422. Os dados
   mesclados são revalidados com as regras da criação (ex.: ajuste de zero → 422); erro deixa a proposta pendente.
   Na mesma transação a proposta grava `dados` (o que foi executado), `dados_originais` (o que o agente propôs) e
   `ajustada: true`, e o texto do registro ganha o sufixo `· ajustado: quantidade 34 → 30 sc; fornecedor A → B`
@@ -431,21 +488,27 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 | Ferramenta | Nível | Chama |
 |---|---|---|
 | `listar_obras()` | consulta | `GET /obras` |
-| `consultar_estoque(obra_id, busca?)` | consulta | `GET /obras/{id}/insumos` |
+| `resumo_obra(obra_id)` | consulta | `GET /obras/{id}/resumo` (o "como está a obra?"; usado primeiro em pergunta aberta) |
+| `consultar_estoque(obra_id, busca?)` | consulta | `GET /obras/{id}/insumos` (conta, sem previsão, último preço) |
 | `historico_movimentos(obra_id, insumo_id, limite?=20)` | consulta | `GET …/movimentos` |
-| `listar_pedidos(obra_id, status?)` | consulta | `GET /obras/{id}/pedidos` |
+| `listar_pedidos(obra_id, status?, abertos?, busca?)` | consulta | `GET /obras/{id}/pedidos` (`abertos` = `?status=` em cotação a parcial; `busca` por fornecedor ou insumo, filtrada no agente) |
 | `consultar_orcamento(obra_id, busca?)` | consulta | `GET /obras/{id}/orcamento` |
-| `consultar_cronograma(obra_id)` | consulta | `GET /obras/{id}/cronograma` |
+| `consultar_cronograma(obra_id, mes?)` | consulta | `GET /obras/{id}/cronograma` (por etapa; `mes` detalha o que está previsto no mês) |
 | `listar_fornecedores(busca?)` | consulta | `GET /fornecedores` |
+| `calcular(expressao, unidade_resultado?)` | consulta | nenhuma (calculadora local em Decimal, sem `eval`) |
 | `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido) |
-| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa, quantidade_recebida?, nf?)` | propõe | `POST /propostas` (avancar_pedido) |
-| `propor_ajuste_estoque(obra_id, insumo_id, quantidade, motivo)` | propõe | `POST /propostas` (ajuste_estoque) |
+| `propor_entrega(obra_id, pedido_id, linhas, justificativa, nf_numero?, nf_data?, nf_valor?, confirmar_excesso?)` | propõe | `POST /propostas` (registrar_entrega) |
+| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido; `conferido` só de parcial = encerrar) |
+| `propor_ajuste_estoque(obra_id, insumo_id, motivo, contagem? \| quantidade?)` | propõe | `GET …/insumos` + `POST /propostas` (ajuste_estoque; com `contagem`, a diferença contra o saldo sai da calculadora) |
 
 - `propor_pedido` confere a `etapa` contra `GET …/etapas` antes de propor: etapa que não existe, ou obra com orçamento
   e etapa omitida → erro para o modelo (que pergunta à pessoa), sem criar proposta.
 
-- As ferramentas devolvem números já formatados **e** brutos; o agente nunca faz conta, ele cita a `Conta` da API
-  (falta, `falta_entregar` do pedido, saldo/estouro da etapa e `aditivos_pct` vêm prontos). As de `propor_*` mandam
+- As ferramentas devolvem números já formatados **e** brutos e datas para gente ("16/11/2026", "ago/2027"); o agente
+  nunca faz conta de cabeça: cita a `Conta` da API (falta, `falta_entregar` do pedido, saldo/estouro da etapa,
+  `aditivos_pct`, situação da etapa vêm prontos) e qualquer outra conta passa por `calcular`.
+- A data de hoje (Brasília) vai como bloco de contexto na mensagem do usuário ("(Hoje é quinta-feira, 05/11/2026, …)"),
+  nunca na instrução nem nas ferramentas, que continuam byte a byte iguais entre conversas (cache). As de `propor_*` mandam
   `chave_idempotencia` = `"{sessao_id}:{tool_use_id}"` e, com `ja_existia`, dizem ao modelo que nada novo foi criado.
 
 ## Dados de exemplo (seed)

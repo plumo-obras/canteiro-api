@@ -7,7 +7,7 @@ engenheiro faz na curva S, sem prometer mais precisão do que a medição tem.
 """
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import Cronograma, Medicao
-from canteiro_dominio.regras import RegraViolada
+from canteiro_dominio.regras import RegraViolada, situacao_etapa
 from canteiro_dominio.tipos import fmt_reais
 
 from ..auth import UsuarioAtual
@@ -335,6 +335,17 @@ async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObr
             linha.pct_medido_acumulado = m["pct_obra_acumulado"] if m else (
                 mensal[-1].pct_medido_acumulado if mensal else 0)
         mensal.append(linha)
+    # por etapa: o R$ e o % medido de cada mês e a situação no mês da última medição, prontos para a tela e o agente
+    medido_mes = {e.etapa: [0] * len(mensal) for e in etapas}
+    for m in meds:
+        k = _mes_idx(m["mes"]) - ini
+        for x in m["etapas"]:
+            if x["etapa"] in medido_mes and 0 <= k < len(mensal):
+                medido_mes[x["etapa"]][k] += x["pct_periodo"]
+    for e, v in zip(etapas, valores, strict=True):
+        sit = situacao_etapa(e.percentuais, e.medido_acumulado, ref)
+        e.valores_mes, e.medido_mes = v, medido_mes[e.etapa]
+        e.previsto_ate_referencia, e.situacao, e.atraso_pct = sit.previsto, sit.situacao, sit.falta
     base = c.get("base") or {"inicio": c["inicio"], "meses": c["meses"], "etapas": c["etapas"]}
     b_ini = _mes_idx(base["inicio"])
     serie_base = _serie({e["etapa"]: e["percentuais"] for e in base["etapas"]}, orcadas, base["meses"])

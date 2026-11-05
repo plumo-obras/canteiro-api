@@ -17,7 +17,12 @@ from pydantic import ValidationError
 
 from canteiro_dominio.armazenamento import ConflitoDeId
 from canteiro_dominio.modelos import Proposta, StatusPedido, StatusProposta, TipoMovimento, TipoProposta, agora
-from canteiro_dominio.regras import validar_conferencia, validar_transicao
+from canteiro_dominio.regras import (
+    texto_da_entrega,
+    validar_conferencia,
+    validar_entrega,
+    validar_transicao,
+)
 from canteiro_dominio.tipos import fmt_qtd, fmt_reais
 
 from ..auth import UsuarioAtual
@@ -28,6 +33,7 @@ from ..esquemas import (
     AvancarPedidoDados,
     PedidoDados,
     PropostaCorpo,
+    RegistrarEntregaDados,
 )
 from ..modelos import doc
 from ..nucleo import (
@@ -50,7 +56,14 @@ from .estoque import (
     preparar_restaurar_insumos,
     recusar_se_ha_pedido_aberto,
 )
-from .pedidos import preparar_avancar, preparar_cancelar_criado, preparar_criar_pedido, preparar_voltar
+from .pedidos import (
+    id_recebimento,
+    preparar_avancar,
+    preparar_cancelar_criado,
+    preparar_criar_pedido,
+    preparar_receber,
+    preparar_voltar,
+)
 
 
 def _dados(tipo: TipoProposta, dados: dict):
@@ -59,6 +72,40 @@ def _dados(tipo: TipoProposta, dados: dict):
     except ValidationError as e:
         campos = ", ".join(".".join(map(str, err["loc"])) or "dados" for err in e.errors())
         raise ErroNegocio(f"Dados da proposta '{tipo.value}' inválidos ({campos}).") from None
+
+
+# O que aprovar faz, para o botão da tela dizer a consequência ("Aprovar entrada", "Aprovar encerramento").
+EFEITO_POR_TIPO = {TipoProposta.CRIAR_PEDIDO: "compra", TipoProposta.AJUSTE_ESTOQUE: "ajuste",
+                   TipoProposta.REGISTRAR_ENTREGA: "entrada"}
+
+
+def efeito_do_avanco(de: StatusPedido, para: StatusPedido) -> str:
+    """"conferido" tem dois sentidos: de parcial ENCERRA o resto (nada entra); de recebido dá entrada do que falta."""
+    if para == StatusPedido.CONFERIDO:
+        return "encerramento" if de == StatusPedido.PARCIAL else "entrada"
+    return "cancelamento" if para == StatusPedido.CANCELADO else "status"
+
+
+def _entregas(dados: RegistrarEntregaDados) -> list[tuple[int, int]]:
+    return [(x.indice, x.quantidade) for x in dados.linhas]
+
+
+async def _pedido_da_obra(leitor, u: UsuarioAtual, pedido_id: str, obra_id: str) -> dict:
+    p = await leitor.obter("pedidos", u.tenant_id, pedido_id)
+    if not p or p["obra_id"] != obra_id:
+        raise NaoEncontrado("Pedido não encontrado nesta obra.")
+    return p
+
+
+async def _linhas_com_nome(leitor, u: UsuarioAtual, p: dict) -> list[dict]:
+    """As linhas do pedido com nome e unidade: o gravado antes das linhas não guardava a cópia do insumo, e a conta da
+    entrega sem eles sairia ": recebido 0 + …"."""
+    linhas = [dict(x) for x in linhas_de(p)]
+    for x in linhas:
+        if not x.get("nome"):
+            ins = await insumo_da_obra(leitor, u.tenant_id, p["obra_id"], x["insumo_id"])
+            x |= {"nome": ins["nome"], "unidade": ins["unidade"]}
+    return linhas
 
 
 def _regras_dos_dados(dados) -> None:
@@ -102,6 +149,7 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> tuple[di
     dados = _dados(corpo.tipo, corpo.dados)
     _regras_dos_dados(dados)
     await obra_do_tenant(arm, u.tenant_id, corpo.obra_id)
+    conta, efeito = corpo.conta, EFEITO_POR_TIPO.get(corpo.tipo)
     match dados:
         case PedidoDados():
             for x in dados.linhas:
@@ -111,13 +159,20 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> tuple[di
         case AjusteEstoqueDados():
             await insumo_da_obra(arm, u.tenant_id, corpo.obra_id, dados.insumo_id)
         case AvancarPedidoDados():
-            p = await arm.obter("pedidos", u.tenant_id, dados.pedido_id)
-            if not p or p["obra_id"] != corpo.obra_id:
-                raise NaoEncontrado("Pedido não encontrado nesta obra.")
-            validar_transicao(StatusPedido(p["status"]), dados.para)
+            p = await _pedido_da_obra(arm, u, dados.pedido_id, corpo.obra_id)
+            de = StatusPedido(p["status"])
+            validar_transicao(de, dados.para)
+            validar_conferencia(dados.para, quantidade_recebida=dados.quantidade_recebida, nf=dados.nf, de=de)
+            efeito = efeito_do_avanco(de, dados.para)
+        case RegistrarEntregaDados():
+            p = await _pedido_da_obra(arm, u, dados.pedido_id, corpo.obra_id)
+            previa = validar_entrega(StatusPedido(p["status"]), await _linhas_com_nome(arm, u, p), _entregas(dados),
+                                     confirmar_excesso=dados.confirmar_excesso)
+            # a conta da entrega sai do domínio, não de quem propõe: "recebido 18 + esta entrega 7 = 25 de 25"
+            conta = f"{p['numero']} · {texto_da_entrega(previa)}"
     chave = corpo.chave_idempotencia
     p = Proposta(tenant_id=u.tenant_id, obra_id=corpo.obra_id, tipo=corpo.tipo, titulo=corpo.titulo,
-                 conta=corpo.conta, justificativa=corpo.justificativa, fonte=corpo.fonte,
+                 conta=conta, justificativa=corpo.justificativa, fonte=corpo.fonte, efeito=efeito,
                  dados=_guardado(corpo.tipo, dados.model_dump(mode="json")),
                  **({"id": id_derivado(u.tenant_id, "proposta-chave", chave)} if chave else {}))
     d = doc(p)
@@ -163,11 +218,29 @@ async def _preparar_proposta(tx, u: UsuarioAtual, prop: dict) -> Operacao:
             # aprovar a proposta É a aprovação da compra: o pedido nasce aprovado, sem pedir um segundo "sim"
             return await preparar_criar_pedido(tx, u, prop["obra_id"], dados, status=StatusPedido.APROVADO)
         case TipoProposta.AVANCAR_PEDIDO:
-            op = await preparar_avancar(tx, u, dados.pedido_id, dados.para, origem="agente",
-                                        quantidade_recebida=dados.quantidade_recebida, nf=dados.nf)
-            if op.obra_id != prop["obra_id"]:
-                raise NaoEncontrado("Pedido não encontrado nesta obra.")
-            return op
+            atual = await _pedido_da_obra(tx, u, dados.pedido_id, prop["obra_id"])
+            # o cartão prometeu uma consequência; se o pedido andou e "conferido" passou a significar outra coisa
+            # (era entrada, virou encerramento), aprovar faria o que ninguém viu
+            if prop.get("efeito") and efeito_do_avanco(StatusPedido(atual["status"]), dados.para) != prop["efeito"]:
+                raise Conflito(f"{atual['numero']} mudou desde a proposta (está {atual['status']}); recuse e peça "
+                               "outra.")
+            return await preparar_avancar(tx, u, dados.pedido_id, dados.para, origem="agente",
+                                          quantidade_recebida=dados.quantidade_recebida, nf=dados.nf)
+        case TipoProposta.REGISTRAR_ENTREGA:
+            atual = await _pedido_da_obra(tx, u, dados.pedido_id, prop["obra_id"])
+            # revalida contra o pedido de agora: outra entrega no meio pode ter tornado esta um excesso
+            validar_entrega(StatusPedido(atual["status"]), linhas_de(atual), _entregas(dados),
+                            confirmar_excesso=dados.confirmar_excesso)
+            # o mesmo serviço do "Registrar entrega" da tela; o ID da entrega sai da proposta (aprovar de novo depois
+            # de desfazer é outra proposta, outra entrega)
+            op = await preparar_receber(
+                tx, u, dados.pedido_id, _entregas(dados), nf_numero=dados.nf_numero, nf_data=dados.nf_data,
+                nf_valor=dados.nf_valor, origem="agente",
+                recebimento_id=id_recebimento(u.tenant_id, dados.pedido_id, f"proposta-{prop['id']}"))
+            receber, texto_rec, desfazer_rec = op.aplicar, op.texto, op.desfazer
+            # o registro guarda a entrega; quem aprova recebe o pedido como nas outras propostas de pedido
+            return replace(op, aplicar=lambda: (lambda r: {**r["pedido"], "_entrega": r})(receber()),
+                           texto=lambda d: texto_rec(d["_entrega"]), desfazer=lambda d: desfazer_rec(d["_entrega"]))
         case TipoProposta.AJUSTE_ESTOQUE:
             op = await preparar_movimento(
                 tx, u, obra_id=prop["obra_id"], insumo_id=dados.insumo_id, tipo=TipoMovimento.AJUSTE,
@@ -244,8 +317,10 @@ def _descrever_ajuste(mudou: dict, unidade: str) -> str:
             return "—"
         if campo in ("quantidade", "quantidade_recebida"):
             return fmt_qtd(v)
-        if campo == "valor":
+        if campo in ("valor", "nf_valor"):
             return fmt_reais(v)
+        if campo == "linhas":
+            return ", ".join(f"linha {x['indice'] + 1}: {fmt_qtd(x['quantidade'])}" for x in v)
         return str(v)
 
     partes = []

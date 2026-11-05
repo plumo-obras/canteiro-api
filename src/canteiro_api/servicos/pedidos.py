@@ -209,7 +209,7 @@ async def preparar_avancar(tx, u: UsuarioAtual, pedido_id: str, para: StatusPedi
     p = _normalizado(await _pedido(tx, u.tenant_id, pedido_id))
     de = StatusPedido(p["status"])
     validar_transicao(de, para)
-    validar_conferencia(para, quantidade_recebida=quantidade_recebida, nf=nf)
+    validar_conferencia(para, quantidade_recebida=quantidade_recebida, nf=nf, de=de)
     if para == StatusPedido.CONFERIDO and de != StatusPedido.PARCIAL:
         if quantidade_recebida is not None and len(p["linhas"]) > 1:
             raise RegraViolada(f"{p['numero']} tem {len(p['linhas'])} linhas: registre a entrega linha a linha.")

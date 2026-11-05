@@ -1,6 +1,8 @@
 """Almoxarifado: livro-razão de movimentos + projeção de saldo, sempre gravados juntos."""
 import uuid
 from dataclasses import asdict
+from datetime import UTC
+from zoneinfo import ZoneInfo
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import Insumo, Movimento, Pedido, Saldo, StatusPedido, TipoInsumo, TipoMovimento, agora
@@ -11,6 +13,7 @@ from canteiro_dominio.regras import (
     conta_de_falta,
     efeito_no_saldo,
     falta_na_linha,
+    texto_da_conta,
     validar_saida,
 )
 from canteiro_dominio.tipos import fmt_qtd
@@ -146,20 +149,52 @@ def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) 
         for x in linhas_de(p):
             q = x["quantidade"] if cotacao else falta_na_linha(x)
             alvo[x["insumo_id"]] = alvo.get(x["insumo_id"], 0) + q
-    return [{"insumo": i, "conta": asdict(conta_de_falta(
-        precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0), a_caminho=a_caminho.get(i["id"], 0),
-        cotando=cotando.get(i["id"], 0), transferencia=0))} for i in insumos]
+    saida = []
+    for i in insumos:
+        c = conta_de_falta(precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0),
+                           a_caminho=a_caminho.get(i["id"], 0), cotando=cotando.get(i["id"], 0), transferencia=0)
+        saida.append({"insumo": i, "conta": {**asdict(c), "texto": texto_da_conta(c, i.get("unidade", ""))}})
+    return saida
+
+
+FUSO = ZoneInfo("America/Sao_Paulo")
+
+
+def dia_local(quando) -> str:
+    """O dia de um instante gravado em UTC, no fuso da obra: pedido das 22h de 05/11 é de 05/11, não de 06/11."""
+    q = normalizar(quando)
+    return (q if q.tzinfo else q.replace(tzinfo=UTC)).astimezone(FUSO).date().isoformat()
+
+
+def ultimos_precos(pedidos: list[dict]) -> dict[str, dict]:
+    """Preço unitário da compra mais nova de cada insumo, entre os pedidos não cancelados. É o que responde "quanto
+    custa 10 sacos a mais?" sem o modelo dividir o total do pedido pela quantidade."""
+    precos: dict[str, dict] = {}
+    for p in sorted(pedidos, key=lambda p: normalizar(p["criado_em"])):
+        if p["status"] == StatusPedido.CANCELADO.value:
+            continue
+        for x in linhas_de(p):
+            if not x.get("quantidade"):
+                continue
+            # pedido antigo sem unitário gravado: o total da linha pelo que foi pedido, arredondado ao centavo
+            unitario = x.get("valor_unitario") or (x.get("total", 0) * 1000 + x["quantidade"] // 2) // x["quantidade"]
+            precos[x["insumo_id"]] = {"valor_unitario": unitario, "pedido_id": p["id"], "numero": p["numero"],
+                                      "fornecedor": p.get("fornecedor", ""), "status": p["status"],
+                                      "data": dia_local(p["criado_em"])}
+    return precos
 
 
 async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
-    """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra."""
+    """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra; e o preço
+    da última compra. Uma consulta de pedidos só (todos os da obra) serve às duas coisas."""
     insumos = ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
                                                   [("nome", "asc")])))
     saldos = {s["id"]: s["saldo"] for s in
               await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
-    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                  Filtro("status", "in", PEDIDOS_ABERTOS)]))
-    return com_conta(insumos, saldos, pedidos)
+    todos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    abertos = [p for p in todos if p["status"] in PEDIDOS_ABERTOS]
+    precos = ultimos_precos(todos)
+    return [{**x, "ultimo_preco": precos.get(x["insumo"]["id"])} for x in com_conta(insumos, saldos, abertos)]
 
 
 def _nome_chave(nome: str) -> str:

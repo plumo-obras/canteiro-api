@@ -1,6 +1,6 @@
 """Obras, almoxarifado (insumos com a Conta, movimentos, importação) e pedidos."""
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from pydantic import ValidationError
@@ -36,6 +36,7 @@ from ..esquemas import (
     PreviaVersao,
     RecebimentoCorpo,
     RecebimentoSaida,
+    ResumoDaObra,
     ResumoObra,
 )
 from ..modelos import Papel
@@ -164,6 +165,13 @@ async def _ler_arquivo(arquivo: UploadFile) -> bytes:
 @r.get("/obras/resumo", response_model=list[ResumoObra])
 async def resumo_obras(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await resumo.resumo_obras(arm, u.tenant_id)
+
+
+@r.get("/obras/{obra_id}/resumo", response_model=ResumoDaObra)
+async def resumo_da_obra(obra_id: str, hoje: date | None = Query(None, description="AAAA-MM-DD; padrão: hoje em São "
+                                                                                  "Paulo"),
+                         u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await resumo.resumo_da_obra(arm, u.tenant_id, obra_id, hoje or datetime.now(estoque.FUSO).date())
 
 
 @r.get("/obras/{obra_id}/insumos", response_model=list[InsumoComConta])
