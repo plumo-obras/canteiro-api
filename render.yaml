@@ -16,6 +16,10 @@ services:
         sync: false
       - key: MONGO_DB
         value: canteiro
+      - key: AMBIENTE             # producao: a API recusa subir com ARQUIVOS/ARMAZENAMENTO que perdem dado
+        value: producao
+      - key: ARQUIVOS             # comprovantes no GridFS do mesmo Atlas (o disco do Render some a cada deploy)
+        value: mongo
       - key: JWT_SEGREDO
         generateValue: true
       - key: TOKEN_SERVICO_AGENTE # o MESMO valor no canteiro-agente

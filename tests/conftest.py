@@ -93,6 +93,10 @@ async def http(arm, config):
     from canteiro_api.main import create_app
 
     app = create_app(config, arm)
+    # com o Mongo, os comprovantes vão para o GridFS do mesmo banco descartável (como em produção). Troca no app, e não
+    # na config: os testes mexem na config da sessão (monkeypatch) e o app tem de continuar vendo a mesma.
+    if not isinstance(arm, ArmazenamentoMemoria):
+        app.state.arquivos = arm.arquivos()
     ip = f"10.{secrets.randbelow(255)}.{secrets.randbelow(255)}.{secrets.randbelow(255)}"
     transporte = httpx.ASGITransport(app=app, client=(ip, 5555))
     async with httpx.AsyncClient(transport=transporte, base_url="http://teste") as c:

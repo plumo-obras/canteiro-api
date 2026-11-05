@@ -29,6 +29,8 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
                                                 mongo_db=config.mongo_db)
             if hasattr(app.state.arm, "garantir_indices"):
                 await app.state.arm.garantir_indices()
+            if app.state.arquivos is None:
+                app.state.arquivos = criar_arquivos(config.arquivos, config.arquivos_dir, app.state.arm)
             yield
             await app.state.arm.fechar()
         else:
@@ -39,7 +41,9 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.config = config
     app.state.arm = arm
     app.state.cofre = criar_cofre(config.chave_cifra)
-    app.state.arquivos = criar_arquivos(config.arquivos, config.arquivos_dir)
+    # GridFS usa o cliente do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
+    adiar = config.arquivos == "mongo" and arm is None
+    app.state.arquivos = None if adiar else criar_arquivos(config.arquivos, config.arquivos_dir, arm)
 
     @app.exception_handler(ErroNegocio)
     async def _erro_negocio(_: Request, e: ErroNegocio):
