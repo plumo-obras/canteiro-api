@@ -199,7 +199,7 @@ class Pedido(Documento):
     # Quantas entregas já entraram: numera a próxima e trava o desfazer (só a última entrega pode ser desfeita).
     recebimentos: int = 0
     # Soma dos gastos confirmados como pagamento deste pedido. Só informa: o custo do pedido já conta no realizado
-    # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.conta_no_realizado`).
+    # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.soma_nos_gastos_avulsos`).
     pago: Centavos = 0
 
     @model_validator(mode="before")
@@ -367,7 +367,7 @@ class Gasto(Documento):
     paga entra pelo próprio comprovante.
 
     Ligado a um pedido (`pedido_id`), o gasto só registra o pagamento daquele pedido: o custo já conta no realizado
-    pela entrega, e somar de novo contaria duas vezes (`gastos.conta_no_realizado`)."""
+    pela entrega, e somar de novo contaria duas vezes (`gastos.soma_nos_gastos_avulsos`)."""
     obra_id: str
     comprovante_id: str | None = None
     valor: Centavos
@@ -375,7 +375,7 @@ class Gasto(Documento):
     favorecido: str                        # quem recebeu o dinheiro, como no comprovante
     fornecedor_id: str | None = None
     descricao: str
-    etapa: str                             # chave fixa ou "x-<id>"; todo gasto tem etapa
+    etapa: str                             # etapa DE GASTO (chave fixa ou "x-<id>"), não a da EAP do orçamento
     topico_id: str | None = None
     pedido_id: str | None = None
     quem: str = ""

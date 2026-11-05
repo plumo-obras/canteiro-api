@@ -134,6 +134,44 @@ def montar_arvore(extras: Iterable[dict], topicos: Iterable[dict]) -> list[Etapa
     return arvore
 
 
+# --- índice da árvore: o que está ativo, num documento só por obra ---
+#
+# Limite (20 extras, 30 tópicos por etapa) e nome sem repetir dependem de TODOS os irmãos ativos, e a transação não
+# pode consultar (regra da porta). Por isso cada obra tem um documento com as extras e os tópicos ativos
+# (`{"extras": {id: nome}, "topicos": {id: {"etapa", "nome"}}}`): a transação lê esse documento, confere aqui e grava
+# a mudança nele junto com a da etapa/tópico. Duas criações ao mesmo tempo gravam o mesmo documento, então uma delas
+# é repetida pelo banco e já vê a outra. O tamanho tem teto pelos próprios limites.
+
+
+def ativar_extra(extras: dict[str, str], *, id_: str | None, nome: str) -> str:
+    """Confere que a etapa extra `id_` (None = nova) pode ficar ativa com `nome` e devolve o nome arrumado. Só conta
+    no limite quem ainda não está ativa: renomear uma ativa nunca esbarra nele."""
+    if id_ not in extras and len(extras) >= MAX_EXTRAS_POR_OBRA:
+        raise RegraViolada(f"A obra já tem {MAX_EXTRAS_POR_OBRA} etapas extras. Arquive uma antes.")
+    usados = [e.nome for e in ETAPAS_FIXAS] + [n for i, n in extras.items() if i != id_]
+    return validar_nome(nome, ja_usados=usados)
+
+
+def ativar_topico(extras: dict[str, str], topicos: dict[str, dict], *, id_: str | None, etapa: str,
+                  nome: str) -> str:
+    """O mesmo para tópico: etapa ativa da obra (só para criar ou reativar), até 30 por etapa, nome único nela."""
+    ja_ativo = id_ in topicos
+    if not ja_ativo:
+        if etapa not in CHAVES_FIXAS and etapa.removeprefix(PREFIXO_EXTRA) not in extras:
+            raise RegraViolada("Escolha uma etapa da obra." if id_ is None
+                               else "A etapa deste tópico está arquivada: reative a etapa antes.")
+        if sum(1 for t in topicos.values() if t["etapa"] == etapa) >= MAX_TOPICOS_POR_ETAPA:
+            raise RegraViolada(f"A etapa já tem {MAX_TOPICOS_POR_ETAPA} tópicos. Arquive um antes.")
+    usados = [t["nome"] for i, t in topicos.items() if i != id_ and t["etapa"] == etapa]
+    return validar_nome(nome, ja_usados=usados)
+
+
+def indice_da_arvore(extras: Iterable[dict], topicos: Iterable[dict]) -> dict:
+    """Índice a partir dos documentos (para a obra que ainda não tem um)."""
+    return {"extras": {x["id"]: x["nome"] for x in extras if not x.get("arquivado")},
+            "topicos": {t["id"]: {"etapa": t["etapa"], "nome": t["nome"]} for t in topicos if not t.get("arquivado")}}
+
+
 def validar_classificacao(arvore: list[EtapaNaArvore], etapa: str, topico_id: str | None) -> None:
     """Etapa obrigatória e da árvore da obra; tópico opcional, mas, se vier, tem de ser daquela etapa."""
     no = next((e for e in arvore if e.chave == etapa), None)

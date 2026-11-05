@@ -1,9 +1,15 @@
 """Gastos da obra: árvore com etapas fixas, extras e tópicos; comprovante → leitura → revisão → gasto, com Desfazer."""
+import asyncio
 import secrets
 
-from canteiro_api.servicos.gastos import hoje
+from canteiro_api.limite_corpo import LIMITE_COMPROVANTE
+from canteiro_api.servicos.gastos import MAX_ARQUIVO, MAX_LEGENDA, hoje
+from canteiro_dominio.etapas import MAX_EXTRAS_POR_OBRA, MAX_TOPICOS_POR_ETAPA
 
 JPEG = b"\xff\xd8\xff\xe0" + b"comprovante de teste "
+PNG = b"\x89PNG\r\n\x1a\n" + b"comprovante de teste "
+WEBP = b"RIFF\x00\x10\x00\x00WEBPVP8 " + b"comprovante de teste "
+PDF = b"%PDF-1.7 comprovante de teste "
 
 
 def _foto() -> bytes:
@@ -99,6 +105,51 @@ async def test_renomear_e_arquivar_topico(vila):
     assert next(e for e in a if e["chave"] == "pisos")["topicos"][0]["nome"] == "Térreo e garagem"
 
 
+async def test_criacoes_simultaneas_nao_furam_limite_nem_nome(vila):
+    h, obra = vila.h, vila.obra
+
+    async def extra(nome):
+        return await vila.http.post(f"/obras/{obra}/etapas-extras", headers=h, json={"nome": nome})
+
+    # o mesmo nome cinco vezes ao mesmo tempo: só uma nasce
+    rs = await asyncio.gather(*[extra("Muro") for _ in range(5)])
+    assert sorted(r.status_code for r in rs) == [201, 422, 422, 422, 422], [r.text for r in rs]
+    for i in range(MAX_EXTRAS_POR_OBRA - 2):
+        assert (await extra(f"Extra {i}")).status_code == 201
+    # falta uma vaga: cinco nomes diferentes ao mesmo tempo, só uma entra
+    rs = await asyncio.gather(*[extra(f"Última {i}") for i in range(5)])
+    assert sorted(r.status_code for r in rs) == [201, 422, 422, 422, 422], [r.text for r in rs]
+    a = (await vila.http.get(f"/obras/{obra}/arvore", headers=h)).json()
+    assert sum(1 for e in a if not e["fixa"]) == MAX_EXTRAS_POR_OBRA
+
+    async def topico(nome):
+        return await vila.http.post(f"/obras/{obra}/topicos", headers=h, json={"etapa": "pisos", "nome": nome})
+
+    for i in range(MAX_TOPICOS_POR_ETAPA - 1):
+        assert (await topico(f"Tópico {i}")).status_code == 201
+    rs = await asyncio.gather(*[topico(f"Último {i}") for i in range(5)])
+    assert sorted(r.status_code for r in rs) == [201, 422, 422, 422, 422], [r.text for r in rs]
+
+
+async def test_refazer_e_desfazer_respeitam_limite_e_nome(vila):
+    h, obra = vila.h, vila.obra
+    t = (await vila.http.post(f"/obras/{obra}/topicos", headers=h, json={"etapa": "pintura", "nome": "Fachada"})).json()
+    desfeito = await _desfazer(vila, t["registro_id"])          # arquivou
+    # enquanto estava arquivado, outro nasceu com o mesmo nome: refazer (reativar) é recusado
+    assert (await vila.http.post(f"/obras/{obra}/topicos", headers=h,
+                                 json={"etapa": "pintura", "nome": "fachada"})).status_code == 201
+    r = await vila.http.post(f"/registro/{desfeito['id']}/desfazer", headers=h)
+    assert r.status_code == 422 and "Já existe" in r.json()["detail"], r.text
+
+    # desfazer um renomear devolve o nome antigo, que outro pode ter pegado
+    a = (await vila.http.post(f"/obras/{obra}/topicos", headers=h, json={"etapa": "pisos", "nome": "Térreo"})).json()
+    r = await vila.http.patch(f"/topicos/{a['id']}", headers=h, json={"nome": "Garagem"})
+    assert (await vila.http.post(f"/obras/{obra}/topicos", headers=h,
+                                 json={"etapa": "pisos", "nome": "Terreo"})).status_code == 201
+    r = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=h)
+    assert r.status_code == 422 and "Já existe" in r.json()["detail"], r.text
+
+
 async def test_viewer_ve_a_arvore_mas_nao_cria(vila):
     hv, _ = await vila.usuario("viewer")
     assert (await vila.http.get(f"/obras/{vila.obra}/arvore", headers=hv)).status_code == 200
@@ -128,8 +179,40 @@ async def test_envio_fica_a_revisar_e_o_mesmo_arquivo_nao_duplica(vila):
 
 async def test_formato_e_tamanho_do_arquivo(vila):
     assert (await _enviar(vila, b"oi", tipo="text/plain")).status_code == 422
-    assert (await _enviar(vila, b"x" * (5 * 1024 * 1024 + 1))).status_code == 422
-    assert (await _enviar(vila, b"%PDF-1.7 teste", tipo="application/pdf")).status_code == 201
+    # passou de 4 MiB: a rota responde 413 dizendo o limite do arquivo
+    r = await _enviar(vila, JPEG + b"x" * (MAX_ARQUIVO + 1 - len(JPEG)))
+    assert r.status_code == 413 and "4 MB" in r.json()["detail"], r.text
+    assert (await _enviar(vila, JPEG + secrets.token_bytes(MAX_ARQUIVO - len(JPEG)))).status_code == 201
+    assert (await _enviar(vila, PDF + secrets.token_bytes(8), tipo="application/pdf")).status_code == 201
+
+
+async def test_tipo_vem_dos_bytes_e_nao_do_que_o_cliente_diz(vila):
+    for conteudo, tipo in [(PNG, "image/png"), (WEBP, "image/webp"), (JPEG, "image/jpeg; charset=x")]:
+        r = await _enviar(vila, conteudo + secrets.token_bytes(8), tipo=tipo)
+        assert r.status_code == 201, r.text
+        assert r.json()["tipo_conteudo"] == tipo.split(";")[0]
+    # PNG que diz ser JPEG, HTML que diz ser PDF, RIFF que não é WEBP (um WAV)
+    r = await _enviar(vila, PNG + secrets.token_bytes(8), tipo="image/jpeg")
+    assert r.status_code == 422 and "diz ser JPG" in r.json()["detail"] and "é PNG" in r.json()["detail"]
+    r = await _enviar(vila, b"<html><script>alert(1)</script>", tipo="application/pdf")
+    assert r.status_code == 422 and "não é uma foto" in r.json()["detail"]
+    assert (await _enviar(vila, b"RIFF\x00\x10\x00\x00WAVEfmt " + secrets.token_bytes(8),
+                          tipo="image/webp")).status_code == 422
+    fila = (await vila.http.get(f"/obras/{vila.obra}/comprovantes", headers=vila.h)).json()
+    assert len(fila) == 3
+
+
+async def test_legenda_ate_300_caracteres(vila):
+    r = await _enviar(vila, legenda="a" * MAX_LEGENDA)
+    assert r.status_code == 201 and len(r.json()["legenda"]) == MAX_LEGENDA
+    assert (await _enviar(vila, legenda="a" * (MAX_LEGENDA + 1))).status_code == 422
+
+
+async def test_envio_grande_demais_e_recusado_antes_do_login(http):
+    # o corpo passa do limite da rota: 413 sem ler o corpo nem chegar na autenticação (seria 401)
+    r = await http.post("/obras/x/comprovantes", content=b"0" * (LIMITE_COMPROVANTE + 1),
+                        headers={"Content-Type": "multipart/form-data; boundary=x"})
+    assert r.status_code == 413
 
 
 async def test_comprovante_de_outro_cliente_nao_aparece(vila, http, arm, config):
@@ -223,6 +306,11 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
     assert r.status_code == 201, r.text
 
 
+async def _pago(vila, pedido_id):
+    pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()
+    return next(p for p in pedidos if p["id"] == pedido_id)
+
+
 async def test_gasto_de_pedido_nao_soma_no_realizado_e_marca_o_pedido(vila):
     h = vila.h
     pedido_id = vila.pedido["PED-0158"]       # aço em trânsito (semeado)
@@ -232,12 +320,39 @@ async def test_gasto_de_pedido_nao_soma_no_realizado_e_marca_o_pedido(vila):
     assert r.status_code == 201, r.text
     resumo = (await vila.http.get(f"/obras/{vila.obra}/gastos/resumo", headers=h)).json()
     assert (resumo["total"], resumo["pagamentos_de_pedidos"]) == (0, 35000)
-    pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=h)).json()
-    assert next(p for p in pedidos if p["id"] == pedido_id)["pago"] == 35000
+    assert (await _pago(vila, pedido_id))["pago"] == 35000
 
+    # segundo pagamento do mesmo pedido; o estorno do primeiro devolve só o valor dele
+    c2 = (await _enviar(vila)).json()
+    r2 = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=h,
+                              json=_confirmacao(valor=12000, etapa="estrutura", pedido_id=pedido_id))
+    assert r2.status_code == 201, r2.text
+    assert (await _pago(vila, pedido_id))["pago"] == 47000
     await _desfazer(vila, r.json()["registro_id"])
-    pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=h)).json()
-    assert next(p for p in pedidos if p["id"] == pedido_id)["pago"] == 0
+    assert (await _pago(vila, pedido_id))["pago"] == 12000
+    await _desfazer(vila, r2.json()["registro_id"])
+    assert (await _pago(vila, pedido_id))["pago"] == 0
+
+
+async def test_pago_nao_passa_do_valor_do_pedido(vila):
+    pedido = await _pago(vila, vila.pedido["PED-0158"])
+    c = (await _enviar(vila)).json()
+    url = f"/comprovantes/{c['id']}/confirmar"
+    r = await vila.http.post(url, headers=vila.h,
+                             json=_confirmacao(valor=pedido["valor"] + 1, etapa="estrutura", pedido_id=pedido["id"]))
+    assert r.status_code == 409 and "passaria do valor do pedido" in r.json()["detail"], r.text
+    assert (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["status"] == "a_revisar"
+    # o valor exato fecha o pedido; mais um centavo, em outro comprovante, não entra
+    r = await vila.http.post(url, headers=vila.h,
+                             json=_confirmacao(valor=pedido["valor"], etapa="estrutura", pedido_id=pedido["id"]))
+    assert r.status_code == 201, r.text
+    c2 = (await _enviar(vila)).json()
+    r = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=vila.h,
+                             json=_confirmacao(valor=1, etapa="estrutura", pedido_id=pedido["id"]))
+    assert r.status_code == 409
+    # sem o pedido, o mesmo gasto entra como avulso
+    r = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=vila.h, json=_confirmacao(valor=1))
+    assert r.status_code == 201, r.text
 
 
 async def test_pedido_em_cotacao_nao_recebe_pagamento(vila):

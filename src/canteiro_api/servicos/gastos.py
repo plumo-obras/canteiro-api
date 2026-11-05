@@ -10,15 +10,16 @@ from zoneinfo import ZoneInfo
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.etapas import (
     ETAPAS_FIXAS,
-    MAX_EXTRAS_POR_OBRA,
-    MAX_TOPICOS_POR_ETAPA,
     PREFIXO_EXTRA,
     EtapaNaArvore,
+    ativar_extra,
+    ativar_topico,
     chave_extra,
+    indice_da_arvore,
     montar_arvore,
     validar_nome,
 )
-from canteiro_dominio.gastos import conta_no_realizado, validar_gasto
+from canteiro_dominio.gastos import soma_nos_gastos_avulsos, validar_gasto
 from canteiro_dominio.leitura import LeituraComprovante, montar_revisao
 from canteiro_dominio.modelos import (
     Comprovante,
@@ -38,6 +39,7 @@ from ..modelos import doc
 from ..nucleo import (
     Conflito,
     ErroNegocio,
+    GrandeDemais,
     NaoEncontrado,
     Operacao,
     evento,
@@ -53,7 +55,10 @@ from .estoque import id_derivado
 _SP = ZoneInfo("America/Sao_Paulo")
 # O Claude lê estes formatos; HEIC (foto de iPhone) a tela converte para JPEG antes de enviar.
 TIPOS_ACEITOS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf"}
-MAX_ARQUIVO = 5 * 1024 * 1024
+_NOME_TIPO = {"image/jpeg": "JPG", "image/png": "PNG", "image/webp": "WEBP", "application/pdf": "PDF"}
+# 4 MiB: a web repassa o envio por uma função da Vercel, que recusa corpo acima de 4,5 MB com um 413 sem explicação.
+# Com 4 MiB de arquivo + o envelope do multipart, o corpo cabe lá e quem passa do limite recebe a nossa mensagem.
+MAX_ARQUIVO = 4 * 1024 * 1024
 MAX_LEGENDA = 300
 _NOMES_FIXOS = {e.chave: e.nome for e in ETAPAS_FIXAS}
 
@@ -87,16 +92,54 @@ def _nome_etapa(chave: str, extras: dict[str, dict]) -> str:
     return x["nome"] if x else chave
 
 
+def _id_indice(tenant_id: str, obra_id: str) -> str:
+    return id_derivado(tenant_id, "arvore", obra_id)
+
+
+async def _indice_inicial(arm, tenant_id: str, obra_id: str) -> dict | None:
+    """Fora da transação: o índice montado das coleções, só para a obra que ainda não tem um (None se já tem). Se
+    outro pedido criar o índice no meio do caminho, a transação lê o dele e ignora este."""
+    if await arm.obter("arvores", tenant_id, _id_indice(tenant_id, obra_id)):
+        return None
+    return indice_da_arvore(*await _extras_e_topicos(arm, tenant_id, obra_id))
+
+
+async def _indice_na_tx(tx, tenant_id: str, obra_id: str, inicial: dict | None) -> dict | None:
+    d = await tx.obter("arvores", tenant_id, _id_indice(tenant_id, obra_id))
+    if d:
+        return {"extras": dict(d.get("extras") or {}), "topicos": dict(d.get("topicos") or {})}
+    return inicial
+
+
+def _gravar_indice(tx, tenant_id: str, obra_id: str, indice: dict) -> None:
+    # gravado sempre que lido para decidir: é o que serializa duas mudanças na árvore ao mesmo tempo
+    tx.salvar("arvores", {"id": _id_indice(tenant_id, obra_id), "tenant_id": tenant_id, "obra_id": obra_id,
+                          "extras": indice["extras"], "topicos": indice["topicos"], "atualizado_em": _agora()})
+
+
+async def _exigir_indice(tx, tenant_id: str, obra_id: str, inicial: dict | None) -> dict:
+    indice = await _indice_na_tx(tx, tenant_id, obra_id, inicial)
+    if indice is None:      # só se o índice sumisse entre a leitura de fora e a transação (a porta não apaga)
+        raise Conflito("A árvore da obra mudou agora há pouco; tente de novo.")
+    return indice
+
+
 async def criar_etapa_extra(arm, u: UsuarioAtual, obra_id: str, nome: str) -> dict:
-    arvore = await arvore_da_obra(arm, u.tenant_id, obra_id)
-    if sum(1 for e in arvore if not e.fixa) >= MAX_EXTRAS_POR_OBRA:
-        raise ErroNegocio(f"A obra já tem {MAX_EXTRAS_POR_OBRA} etapas extras. Arquive uma antes.")
-    limpo = validar_nome(nome, ja_usados=[e.nome for e in arvore])
-    d = doc(EtapaExtra(tenant_id=u.tenant_id, obra_id=obra_id, nome=limpo))
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
 
     async def corpo(tx):
-        op = Operacao(obra_id=obra_id, aplicar=lambda: (tx.criar("etapas_extras", d), d)[1],
-                      texto=lambda r: f"Criou a etapa {limpo}",
+        # limite e nome conferidos DENTRO da transação, contra o índice: duas criações simultâneas não furam
+        indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
+        limpo = ativar_extra(indice["extras"], id_=None, nome=nome)
+        d = doc(EtapaExtra(tenant_id=u.tenant_id, obra_id=obra_id, nome=limpo))
+
+        def aplicar():
+            tx.criar("etapas_extras", d)
+            _gravar_indice(tx, u.tenant_id, obra_id, {**indice, "extras": {**indice["extras"], d["id"]: limpo}})
+            return d
+
+        op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=lambda r: f"Criou a etapa {limpo}",
                       desfazer=lambda r: _receita_criacao("etapas_extras", d["id"]))
         _, reg = executar_e_registrar(tx, u, op)
         return {**d, "chave": chave_extra(d["id"]), "registro_id": reg["id"]}
@@ -105,18 +148,22 @@ async def criar_etapa_extra(arm, u: UsuarioAtual, obra_id: str, nome: str) -> di
 
 
 async def criar_topico(arm, u: UsuarioAtual, obra_id: str, etapa: str, nome: str) -> dict:
-    arvore = await arvore_da_obra(arm, u.tenant_id, obra_id)
-    no = next((e for e in arvore if e.chave == etapa), None)
-    if no is None:
-        raise ErroNegocio("Escolha uma etapa da obra.")
-    if len(no.topicos) >= MAX_TOPICOS_POR_ETAPA:
-        raise ErroNegocio(f"{no.nome} já tem {MAX_TOPICOS_POR_ETAPA} tópicos. Arquive um antes.")
-    limpo = validar_nome(nome, ja_usados=[t.nome for t in no.topicos])
-    d = doc(Topico(tenant_id=u.tenant_id, obra_id=obra_id, etapa=etapa, nome=limpo))
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
 
     async def corpo(tx):
-        op = Operacao(obra_id=obra_id, aplicar=lambda: (tx.criar("topicos", d), d)[1],
-                      texto=lambda r: f"Criou o tópico {limpo} em {no.nome}",
+        indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
+        limpo = ativar_topico(indice["extras"], indice["topicos"], id_=None, etapa=etapa, nome=nome)
+        nome_etapa = _nome_etapa(etapa, {i: {"nome": n} for i, n in indice["extras"].items()})
+        d = doc(Topico(tenant_id=u.tenant_id, obra_id=obra_id, etapa=etapa, nome=limpo))
+
+        def aplicar():
+            tx.criar("topicos", d)
+            topicos = {**indice["topicos"], d["id"]: {"etapa": etapa, "nome": limpo}}
+            _gravar_indice(tx, u.tenant_id, obra_id, {**indice, "topicos": topicos})
+            return d
+
+        op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=lambda r: f"Criou o tópico {limpo} em {nome_etapa}",
                       desfazer=lambda r: _receita_criacao("topicos", d["id"]))
         _, reg = executar_e_registrar(tx, u, op)
         return {**d, "registro_id": reg["id"]}
@@ -145,40 +192,51 @@ def _texto_edicao(colecao: str, antigo: dict, mudou: dict) -> str:
     return " ".join(partes)
 
 
+def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict) -> dict:
+    """O índice depois de `item` receber `mudou` ({nome?, arquivado?}). Confere limite e nome quando o item termina
+    ativo (criado, renomeado ou reativado); arquivado só sai do índice."""
+    final = {**item, **mudou}
+    extras, topicos = dict(indice["extras"]), dict(indice["topicos"])
+    alvo = extras if colecao == "etapas_extras" else topicos
+    if final.get("arquivado"):
+        if "nome" in mudou:     # renomear um arquivado: sem irmãos para comparar, mas o nome continua com regra
+            validar_nome(final["nome"])
+        alvo.pop(item["id"], None)
+    elif colecao == "etapas_extras":
+        extras[item["id"]] = ativar_extra(extras, id_=item["id"], nome=final["nome"])
+    else:
+        nome = ativar_topico(extras, topicos, id_=item["id"], etapa=item["etapa"], nome=final["nome"])
+        topicos[item["id"]] = {"etapa": item["etapa"], "nome": nome}
+    return {"extras": extras, "topicos": topicos}
+
+
 async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo: EdicaoArvoreCorpo) -> dict:
     atual = await arm.obter(colecao, u.tenant_id, id_)
     if not atual:
         raise NaoEncontrado("Etapa não encontrada." if colecao == "etapas_extras" else "Tópico não encontrado.")
+    obra_id = atual["obra_id"]
     mudancas = corpo.model_dump(exclude_none=True)
-    arvore = await arvore_da_obra(arm, u.tenant_id, atual["obra_id"])
-    if colecao == "etapas_extras":
-        irmaos = [e.nome for e in arvore if e.chave != chave_extra(id_)]
-        cheio = sum(1 for e in arvore if not e.fixa) >= MAX_EXTRAS_POR_OBRA
-    else:
-        no = next((e for e in arvore if e.chave == atual["etapa"]), None)
-        if no is None and mudancas.get("arquivado") is False:
-            raise ErroNegocio("A etapa deste tópico está arquivada: reative a etapa antes.")
-        irmaos = [t.nome for t in (no.topicos if no else ()) if t.id != id_]
-        cheio = no is not None and len(no.topicos) >= MAX_TOPICOS_POR_ETAPA
-    reativando = mudancas.get("arquivado") is False and atual.get("arquivado")
-    if reativando and cheio:
-        raise ErroNegocio("Limite atingido: arquive outro antes de reativar este.")
-    if "nome" in mudancas or reativando:
-        # reativar também confere o nome: enquanto estava arquivado, outro pode ter nascido com ele
-        mudancas["nome"] = validar_nome(mudancas.get("nome", atual["nome"]), ja_usados=irmaos)
+    inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
 
     async def corpo_tx(tx):
         d = await tx.obter(colecao, u.tenant_id, id_)
-        mudou = {k: v for k, v in mudancas.items() if d.get(k) != v}
+        indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
+        pedido = dict(mudancas)
+        if "nome" in pedido:
+            pedido["nome"] = " ".join(pedido["nome"].split())
+        mudou = {k: v for k, v in pedido.items() if d.get(k) != v}
         if not mudou:
             raise ErroNegocio("Nada mudou.")
+        # reativar também confere o nome: enquanto estava arquivado, outro pode ter nascido com ele
+        novo_indice = _indice_com(indice, colecao, d, mudou)
         antes = {k: d.get(k) for k in mudou}
 
         def aplicar():
             tx.atualizar(colecao, u.tenant_id, id_, {**mudou, "atualizado_em": _agora()})
+            _gravar_indice(tx, u.tenant_id, obra_id, novo_indice)
             return {**d, **mudou}
 
-        op = Operacao(obra_id=d["obra_id"], aplicar=aplicar, texto=lambda r: _texto_edicao(colecao, d, mudou),
+        op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=lambda r: _texto_edicao(colecao, d, mudou),
                       desfazer=lambda r: {"op": "editar_arvore", "colecao": colecao, "id": id_, "antes": antes,
                                           "depois": mudou})
         novo, reg = executar_e_registrar(tx, u, op)
@@ -195,9 +253,16 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict) -> Operac
         raise NaoEncontrado("Não encontrado.")
     if any(d.get(k) != v for k, v in receita["depois"].items()):
         raise Conflito(f"{d['nome']} foi editado de novo depois; não dá para desfazer esta mudança.")
+    # Refazer uma criação reativa, e desfazer um renomear devolve o nome antigo: os dois passam pelas mesmas regras
+    # (limite e nome único). Obra sem índice (gravada antes dele) só acontece em dado antigo de desenvolvimento: aplica
+    # sem conferir, e o índice nasce na próxima criação.
+    indice = await _indice_na_tx(tx, u.tenant_id, d["obra_id"], None)
+    novo_indice = _indice_com(indice, colecao, d, receita["antes"]) if indice is not None else None
 
     def aplicar():
         tx.atualizar(colecao, u.tenant_id, d["id"], {**receita["antes"], "atualizado_em": _agora()})
+        if novo_indice is not None:
+            _gravar_indice(tx, u.tenant_id, d["obra_id"], novo_indice)
         return {**d, **receita["antes"]}
 
     return Operacao(obra_id=d["obra_id"], aplicar=aplicar,
@@ -206,6 +271,19 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict) -> Operac
 
 
 # --- comprovantes ---
+
+def tipo_pelo_conteudo(conteudo: bytes) -> str | None:
+    """O tipo pela assinatura dos primeiros bytes (os "números mágicos" de cada formato)."""
+    if conteudo.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if conteudo.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if conteudo[:4] == b"RIFF" and conteudo[8:12] == b"WEBP":
+        return "image/webp"
+    if conteudo.startswith(b"%PDF-"):
+        return "application/pdf"
+    return None
+
 
 def id_comprovante(tenant_id: str, obra_id: str, sha256: str) -> str:
     """O mesmo arquivo na mesma obra é o mesmo comprovante: foto enviada duas vezes não vira dois gastos."""
@@ -221,7 +299,16 @@ async def enviar_comprovante(arm, arquivos, u: UsuarioAtual, obra_id: str, conte
     if not conteudo:
         raise ErroNegocio("O arquivo chegou vazio. Tente de novo.")
     if len(conteudo) > MAX_ARQUIVO:
-        raise ErroNegocio("Arquivo maior que 5 MB.")
+        raise GrandeDemais("Arquivo maior que 4 MB. Tire a foto de novo com menos resolução ou envie o PDF.")
+    real = tipo_pelo_conteudo(conteudo)
+    if real != tipo:
+        # o tipo declarado vem do cliente; o que vai para a leitura e para o navegador é o que os bytes dizem ser
+        raise ErroNegocio(f"O arquivo diz ser {_NOME_TIPO[tipo]}, mas o conteúdo "
+                          + (f"é {_NOME_TIPO[real]}." if real else "não é uma foto (JPG, PNG, WEBP) nem um PDF.")
+                          + " Envie o arquivo original.")
+    legenda = " ".join(legenda.split())
+    if len(legenda) > MAX_LEGENDA:
+        raise ErroNegocio(f"A legenda pode ter até {MAX_LEGENDA} caracteres.")
     sha = hashlib.sha256(conteudo).hexdigest()
     id_ = id_comprovante(u.tenant_id, obra_id, sha)
     if ja := await arm.obter("comprovantes", u.tenant_id, id_):
@@ -230,7 +317,7 @@ async def enviar_comprovante(arm, arquivos, u: UsuarioAtual, obra_id: str, conte
     # o arquivo antes do documento: documento sem arquivo quebraria a revisão; arquivo sem documento é só sobra
     await arquivos.salvar(u.tenant_id, obra_id, caminho, conteudo, tipo)
     d = doc(Comprovante(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, arquivo=caminho, tipo_conteudo=tipo,
-                        tamanho=len(conteudo), sha256=sha, legenda=" ".join(legenda.split())[:MAX_LEGENDA],
+                        tamanho=len(conteudo), sha256=sha, legenda=legenda,
                         quem=u.nome, usuario_id=u.id))
 
     async def corpo(tx):
@@ -329,6 +416,13 @@ async def confirmar(arm, u: UsuarioAtual, comprovante_id: str, corpo: ConfirmarC
             if pedido["status"] in (StatusPedido.CANCELADO.value, StatusPedido.EM_COTACAO.value):
                 raise ErroNegocio(f"O {pedido['numero']} não foi comprado (está "
                                   f"{'cancelado' if pedido['status'] == 'cancelado' else 'em cotação'}).")
+            ja_pago = pedido.get("pago", 0)
+            if ja_pago + corpo.valor > pedido["valor"]:
+                # pagar mais que o pedido é engano (comprovante de outro pedido, valor digitado errado) ou um acréscimo
+                # que ainda não está no pedido: nos dois casos, quem decide é a pessoa, não a soma
+                raise Conflito(f"Com este gasto, o pago do {pedido['numero']} passaria do valor do pedido "
+                               f"({fmt_reais(ja_pago)} já pagos de {fmt_reais(pedido['valor'])}). Confira o valor, "
+                               "ligue a outro pedido ou confirme sem pedido.")
 
         def aplicar():
             tx.criar("gastos", g)
@@ -453,7 +547,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     por_etapa: dict[str, dict[str | None, int]] = {}
     pedidos = 0
     for g in gastos:
-        if not conta_no_realizado(g):
+        if not soma_nos_gastos_avulsos(g):
             pedidos += g["valor"]
             continue
         t = por_etapa.setdefault(g["etapa"], {})

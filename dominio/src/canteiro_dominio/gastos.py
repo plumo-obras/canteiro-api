@@ -39,7 +39,11 @@ def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao
     return GastoValidado(favorecido=fav, descricao=desc)
 
 
-def conta_no_realizado(gasto: dict) -> bool:
-    """Gasto avulso soma no realizado (e no comprometido) da etapa. Gasto de um pedido não: o pedido já soma pela
-    entrega, e o gasto só registra que ele foi pago. Estornado não conta em nada."""
+def soma_nos_gastos_avulsos(gasto: dict) -> bool:
+    """Se o gasto entra no total da árvore de gastos (`GET …/gastos/resumo`). Gasto de um pedido não: o custo do
+    pedido já conta pela entrega, e o gasto só registra que ele foi pago (`Pedido.pago`). Estornado não conta em nada.
+
+    Atenção: a árvore de gastos é OUTRA árvore que a EAP do orçamento. Gasto avulso não muda o "realizado" do
+    orçamento (`GET …/orcamento`), que vem só das entregas e medições dos pedidos; o de-para entre as duas vem depois.
+    """
     return not gasto.get("estornado") and not gasto.get("pedido_id")

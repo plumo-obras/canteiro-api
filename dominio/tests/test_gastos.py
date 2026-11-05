@@ -5,15 +5,20 @@ import pytest
 from canteiro_dominio.etapas import (
     CHAVES_FIXAS,
     ETAPAS_FIXAS,
+    MAX_EXTRAS_POR_OBRA,
     MAX_NOME,
+    MAX_TOPICOS_POR_ETAPA,
     OUTROS,
     PREFIXO_EXTRA,
+    ativar_extra,
+    ativar_topico,
     chave_extra,
+    indice_da_arvore,
     montar_arvore,
     validar_classificacao,
     validar_nome,
 )
-from canteiro_dominio.gastos import conta_no_realizado, validar_gasto
+from canteiro_dominio.gastos import soma_nos_gastos_avulsos, validar_gasto
 from canteiro_dominio.leitura import (
     AVISO_A_PAGAR,
     AVISO_INCERTO,
@@ -262,10 +267,50 @@ def test_gasto_invalido_e_recusado(mudanca, mensagem):
         confirmar(**mudanca)
 
 
-def test_so_gasto_avulso_soma_no_realizado():
-    assert conta_no_realizado({"pedido_id": None})
-    assert not conta_no_realizado({"pedido_id": "p1"})         # o pedido já soma pela entrega
-    assert not conta_no_realizado({"pedido_id": None, "estornado": True})
+def test_indice_so_guarda_o_que_esta_ativo():
+    extras = [{"id": "e1", "nome": "Muro"}, {"id": "e2", "nome": "Velha", "arquivado": True}]
+    topicos = [{"id": "t1", "etapa": "pisos", "nome": "Térreo"},
+               {"id": "t2", "etapa": "pisos", "nome": "Velho", "arquivado": True}]
+    assert indice_da_arvore(extras, topicos) == {"extras": {"e1": "Muro"},
+                                                 "topicos": {"t1": {"etapa": "pisos", "nome": "Térreo"}}}
+
+
+def test_ativar_extra_confere_limite_e_nome():
+    assert ativar_extra({}, id_=None, nome=" Muro  de arrimo ") == "Muro de arrimo"
+    with pytest.raises(RegraViolada, match="Já existe"):
+        ativar_extra({}, id_=None, nome="fundação")                  # nome de etapa fixa
+    with pytest.raises(RegraViolada, match="Já existe"):
+        ativar_extra({"e1": "Muro"}, id_=None, nome="MURO")
+    cheio = {f"e{i}": f"Extra {i}" for i in range(MAX_EXTRAS_POR_OBRA)}
+    with pytest.raises(RegraViolada, match="Arquive"):
+        ativar_extra(cheio, id_=None, nome="Nova")
+    with pytest.raises(RegraViolada, match="Arquive"):
+        ativar_extra(cheio, id_="arquivada", nome="Nova")              # reativar também conta
+    # renomear uma ativa não esbarra no limite, e o próprio nome não conta como repetido
+    assert ativar_extra(cheio, id_="e0", nome="extra 0") == "extra 0"
+
+
+def test_ativar_topico_confere_etapa_limite_e_nome():
+    extras = {"e1": "Muro"}
+    topicos = {"t1": {"etapa": "pisos", "nome": "Térreo"}, "t2": {"etapa": "pintura", "nome": "Garagem"}}
+    assert ativar_topico(extras, topicos, id_=None, etapa="pisos", nome="Garagem") == "Garagem"   # outra etapa
+    assert ativar_topico(extras, topicos, id_=None, etapa=chave_extra("e1"), nome="X") == "X"
+    with pytest.raises(RegraViolada, match="Já existe"):
+        ativar_topico(extras, topicos, id_=None, etapa="pisos", nome="terreo")
+    with pytest.raises(RegraViolada, match="Escolha uma etapa"):
+        ativar_topico(extras, topicos, id_=None, etapa=chave_extra("e9"), nome="X")
+    with pytest.raises(RegraViolada, match="reative a etapa"):
+        ativar_topico(extras, topicos, id_="t9", etapa=chave_extra("e9"), nome="X")
+    cheio = {f"t{i}": {"etapa": "pisos", "nome": f"T{i}"} for i in range(MAX_TOPICOS_POR_ETAPA)}
+    with pytest.raises(RegraViolada, match="Arquive"):
+        ativar_topico(extras, cheio, id_=None, etapa="pisos", nome="Novo")
+    assert ativar_topico(extras, cheio, id_="t0", etapa="pisos", nome="Novo") == "Novo"
+
+
+def test_so_gasto_avulso_soma_no_total_de_gastos():
+    assert soma_nos_gastos_avulsos({"pedido_id": None})
+    assert not soma_nos_gastos_avulsos({"pedido_id": "p1"})         # o pedido já soma pela entrega
+    assert not soma_nos_gastos_avulsos({"pedido_id": None, "estornado": True})
 
 
 def test_documentos_novos_nascem_com_padrao_certo():
@@ -273,4 +318,4 @@ def test_documentos_novos_nascem_com_padrao_certo():
     assert c.status == StatusComprovante.A_REVISAR and c.leitura is None and c.gasto_id is None
     g = Gasto(tenant_id="t", obra_id="o", valor=1, data_pagamento="2026-11-03", favorecido="x", descricao="y",
               etapa="outros")
-    assert conta_no_realizado(g.model_dump())
+    assert soma_nos_gastos_avulsos(g.model_dump())

@@ -366,12 +366,19 @@ atual de cada etapa (contrato + aditivos vigentes).
 
 ## Gastos da obra: comprovantes, leitura por IA e revisão
 
-Gasto é **dinheiro que saiu**, numa data, numa etapa. A pessoa envia o comprovante (Pix, NF paga, boleto pago, recibo,
-papel à mão), o serviço do agente lê com IA e preenche o máximo, e uma pessoa (admin) confere e confirma. Só a
-confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não conta em nada. Regras em
+Gasto é **dinheiro que saiu**, numa data, numa etapa de gasto. A pessoa envia o comprovante (Pix, NF paga, boleto
+pago, recibo, papel à mão), o serviço do agente lê com IA e preenche o máximo, e uma pessoa (admin) confere e confirma.
+Só a confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não conta em nada. Regras em
 `dominio/src/canteiro_dominio/{etapas,leitura,gastos}.py`.
 
-**Árvore de gasto** (outra árvore que a EAP do orçamento; o de-para entre as duas vem depois):
+**Duas árvores, duas "etapas".** Nesta seção, **etapa** é sempre a **etapa de gasto** (as 24 fixas + as extras da
+obra, chave como `eletrica` ou `x-<id>`), que é OUTRA árvore que a **EAP do orçamento** (as etapas numeradas da
+planilha de cada construtora, `etapa: "3"` em `GET …/orcamento`, no cronograma e na apropriação de pedidos). O de-para
+entre as duas vem depois. Por isso **gasto avulso não mexe no orçamento**: o `realizado`/`comprometido` de
+`GET …/orcamento` e do resumo da obra continuam vindo só das entregas e medições de pedidos; o total dos gastos avulsos
+aparece só em `GET …/gastos/resumo`.
+
+**Árvore de gasto:**
 
 - `GET /obras/{obra_id}/arvore` (qualquer papel) → `[{chave, nome, inclui, fixa, topicos: [{id, nome}]}]`. As 24
   **etapas fixas** (iguais em toda obra; chave estável como `fundacao`, `eletrica`, `pessoal`), as **etapas extras** da
@@ -379,6 +386,8 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
 - `POST /obras/{obra_id}/etapas-extras` `{nome}` e `POST /obras/{obra_id}/topicos` `{etapa, nome}` (admin) → 201 +
   `registro_id`. Nome até 60, sem repetir (sem diferenciar acento e maiúscula) entre as etapas da obra / os tópicos da
   etapa → 422. Até 20 etapas extras por obra e 30 tópicos por etapa. Desfazer a criação arquiva; refazer reativa.
+  Limite e nome único valem também com pedidos simultâneos e no Desfazer/Refazer (reativar ou voltar o nome antigo
+  que outro pegou nesse meio-tempo → 422 "Já existe: …").
 - `PATCH /etapas-extras/{id}` e `PATCH /topicos/{id}` `{nome?, arquivado?}` (admin) → renomeia e/ou arquiva/reativa,
   com Desfazer e Refazer. Nada mudou → 422. Arquivado sai da árvore e não recebe gasto novo; gasto antigo fica.
 
@@ -386,14 +395,20 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
 
 - `POST /obras/{obra_id}/comprovantes` (multipart `arquivo` + `legenda?`, **qualquer papel**) → `Comprovante` (201;
   200 com `ja_existia: true` se o mesmo arquivo já foi enviado nesta obra: o ID sai do sha256). JPG, PNG, WEBP ou PDF
-  até 5 MB (outro formato → 422; a tela converte HEIC para JPEG). `legenda` = "do que é?" de quem enviou (até 300).
+  até **4 MB** (4 × 1024 × 1024 bytes; a função da Vercel que repassa o envio recusa corpo acima de 4,5 MB). Arquivo
+  maior → **413** com a mensagem do limite; corpo inteiro acima de 5 MiB → 413 antes do login. O tipo é conferido
+  **pelos bytes** (JPEG `FF D8 FF`, PNG `89 50 4E 47…`, WEBP `RIFF….WEBP`, PDF `%PDF-`): formato fora da lista ou
+  conteúdo que não bate com o `Content-Type` declarado → 422 com a explicação ("O arquivo diz ser JPG, mas o conteúdo é
+  PNG…"); a tela converte HEIC para JPEG. `legenda` = "do que é?" de quem enviou, **até 300 caracteres** (mais → 422).
   Nasce `a_revisar` e grava o evento `comprovante.recebido`.
 - `Comprovante` = `{id, obra_id, arquivo, tipo_conteudo, tamanho, sha256, legenda, quem, usuario_id, status:
   a_revisar | confirmado | descartado, leitura, erro_leitura, lido_em, modelo_leitura, gasto_id, motivo_descarte,
   criado_em, atualizado_em}`.
 - `GET /obras/{obra_id}/comprovantes?status=a_revisar&limite=100&antes_de=…` → a fila (mais novos primeiro).
 - `GET /comprovantes/{id}/arquivo` → o arquivo (`Cache-Control: private, no-store`). Só do tenant; o armazenamento é
-  privado (`ARQUIVOS=disco` em desenvolvimento; bucket privado em produção).
+  privado e confere o tenant de novo: GridFS no mesmo banco (`ARQUIVOS=mongo`, padrão e o único aceito em produção);
+  `disco` só em desenvolvimento. Estornar ou desfazer um gasto e descartar um comprovante **não apagam o arquivo** (é a
+  prova do pagamento). Política de retenção (LGPD) ainda a decidir: hoje nada se apaga.
 - `PUT /interno/comprovantes/{id}/leitura` (**só o serviço do agente**: token de serviço + `X-Canteiro-Usuario`, como o
   `POST /uso`) `{leitura?, erro?, modelo?}` (um dos dois) → `Comprovante`. `leitura` = `LeituraComprovante`
   (`dominio/.../leitura.py`, o esquema da saída estruturada do modelo): `{tipo_documento, situacao_pagamento: pago |
@@ -417,7 +432,9 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
   Quadro: mão de obra (João da Silva)", desfazer `estornar_gasto`: o gasto sai das contas (`estornado`) e o
   comprovante volta para a fila.
   - **Com `pedido_id`** (pedido da obra, de aprovado em diante): o gasto é o pagamento do pedido. Soma em
-    `Pedido.pago` e **não** no total da etapa, porque o custo do pedido já conta pela entrega.
+    `Pedido.pago` e **não** no total da etapa, porque o custo do pedido já conta pela entrega. `pago` nunca passa do
+    `valor` do pedido: confirmar um gasto que passaria → **409** (o comprovante continua na fila; a pessoa corrige o
+    valor, liga a outro pedido ou confirma sem pedido). O estorno tira de `pago` só o valor daquele gasto.
 - `POST /comprovantes/{id}/descartar` `{motivo?}` (admin) → `Comprovante + registro_id`. O arquivo fica guardado.
   Desfazer `reabrir_comprovante` volta para a fila.
 
@@ -427,8 +444,8 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
   topico_id, pedido_id, quem, usuario_id, estornado, criado_em}`.
 - `GET /obras/{obra_id}/gastos?etapa=…&limite=100&antes_de=…` → confirmados e não estornados (mais novos primeiro).
 - `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, etapas: [{etapa, nome, total,
-  topicos: [{topico_id, nome, total}]}]}`. `total` = gastos avulsos (o que soma no realizado); `topico_id: null` =
-  "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já arquivados.
+  topicos: [{topico_id, nome, total}]}]}`. `total` = gastos avulsos (não entra no realizado do orçamento);
+  `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já arquivados.
 
 ## Propostas, aprovação e registro
 
