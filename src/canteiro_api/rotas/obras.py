@@ -197,6 +197,17 @@ async def movimentos(obra_id: str, insumo_id: str, limite: int = Query(50, ge=1,
     return await listar_pagina(arm, consulta, "criado_em", antes_de)
 
 
+@r.get("/obras/{obra_id}/movimentos", response_model=list[Movimento])
+async def movimentos_da_obra(obra_id: str, limite: int = Query(50, ge=1, le=200), antes_de: datetime | None = None,
+                             u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    # O "histórico do almoxarifado" sem insumo: um insumo por vez obrigava o agente a escolher quais consultar, e ele
+    # escolhia só os que já tinham aparecido na conversa (a brita ficou de fora no teste de 05/11).
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    consulta = Consulta("movimentos", u.tenant_id, [Filtro("obra_id", "==", obra_id)], [("criado_em", "desc")],
+                        limite=limite)
+    return await listar_pagina(arm, consulta, "criado_em", antes_de)
+
+
 @r.post("/obras/{obra_id}/movimentos", response_model=MovimentoSaida, status_code=status.HTTP_201_CREATED,
         responses={200: {"description": "repetição da mesma chave: devolve o movimento já gravado"}})
 async def lancar_movimento(obra_id: str, corpo: MovimentoCorpo, response: Response,

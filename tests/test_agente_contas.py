@@ -180,8 +180,11 @@ async def test_resumo_da_obra_com_cronograma(vila):
     assert [(e["etapa"], e["atraso_pct"]) for e in c["etapas_atrasadas"]] == [("1", 5000)]
     assert (c["proximo_mes_com_inicio"], c["proximas_etapas"]) == (None, [])
     antes = (await vila.http.get(f"/obras/{obra}/resumo?hoje=2025-12-20", headers=vila.h)).json()["cronograma"]
-    assert (antes["etapas_do_mes"], antes["proximo_mes_com_inicio"]) == ([], "2026-01")
-    assert [e["etapa"] for e in antes["proximas_etapas"]] == ["1"]
+    # a etapa 1 já tem medição (jan): não "começa" de novo; a próxima a começar é a 2, em fevereiro
+    assert (antes["etapas_do_mes"], antes["proximo_mes_com_inicio"]) == ([], "2026-02")
+    assert [e["etapa"] for e in antes["proximas_etapas"]] == ["2"]
+    assert antes["proximo_mes"] == "2026-01"
+    assert [(e["etapa"], e["comeca"]) for e in antes["etapas_do_proximo_mes"]] == [("1", False)]
     f = s["financeiro"]
     assert (f["tem_orcamento"], f["orcado_atual"], f["comprometido"]) == (True, 2107596, 0)
 
@@ -204,3 +207,72 @@ async def test_resumo_da_obra_sem_cronograma_nem_orcamento(vila):
     assert (p["propostas"], p["titulos"]) == (1, ["Comprar 34 sc de cimento"])
     h, _ = await vila.usuario("viewer")
     assert (await vila.http.get(f"/obras/{vila.obra}/resumo", headers=h)).status_code == 200
+
+
+# --- resumo: o mês seguinte (segundo teste com o modelo real, 05/11/2026) ---
+
+def _cronograma_emei():
+    """A EMEI do teste: novembro medido, dezembro com cinco frentes. Fundações já têm 4,51% medidos (adiantadas)
+    embora o primeiro % previsto delas seja dezembro."""
+    from canteiro_api.esquemas import CronogramaObra, EtapaCronograma, MesCronograma, Prazo
+
+    def etapa(n, nome, pcts, valores, medido, previsto, situacao):
+        pcts, valores = pcts + [0] * (10 - len(pcts)), valores + [0] * (10 - len(valores))
+        return EtapaCronograma(etapa=n, descricao=nome, atual=sum(valores), percentuais=pcts, valores_mes=valores,
+                               medido_acumulado=medido, previsto_ate_referencia=previsto, situacao=situacao)
+
+    etapas = [
+        etapa("1", "SERVIÇOS PRELIMINARES", [10000], [6117367], 8886, 10000, "atrasada"),
+        etapa("2", "MOVIMENTO DE TERRA", [1500, 8500], [999754, 5665273], 2483, 1500, "adiantada"),
+        etapa("3", "FUNDAÇÕES", [0, 7000, 3000], [0, 7411960, 3176554], 451, 0, "adiantada"),
+        etapa("4", "SUPERESTRUTURA", [0, 1000, 9000], [0, 1129568, 10166112], 0, 0, "nao_comecou"),
+        etapa("21", "SPDA", [0, 1500, 8500], [0, 266679, 1511181], 0, 0, "nao_comecou"),
+        etapa("23", "SERVIÇOS COMPLEMENTARES", [1500, 2500, 6000], [1078387, 1797312, 4313549], 1000, 1500,
+              "atrasada"),
+        etapa("9", "REVESTIMENTOS", [0, 0, 0, 10000], [0, 0, 0, 29974323], 0, 0, "nao_comecou"),
+    ]
+    mensal = [MesCronograma(mes=f"2026-{11 + i}" if i < 2 else f"2027-{i - 1:02d}", previsto=sum(
+        e.valores_mes[i] for e in etapas), previsto_acumulado=0, pct_previsto_acumulado=0) for i in range(10)]
+    return CronogramaObra(inicio="2026-11", meses=10, etapas=etapas, mensal=mensal,
+                          prazo=Prazo(mes_referencia="2026-11", pct_medido=396, pct_previsto_na_medicao=391))
+
+
+def test_resumo_lista_o_mes_seguinte_inteiro_e_nao_reinicia_etapa_ja_medida():
+    from datetime import date
+
+    from canteiro_api.servicos.resumo import _resumo_cronograma
+
+    r = _resumo_cronograma(_cronograma_emei(), date(2026, 11, 5))
+    # dezembro inteiro, maior valor primeiro: o movimento de terra (2ª frente) entra, e cada uma diz se começa
+    assert r.proximo_mes == "2026-12" and r.previsto_no_proximo_mes == 16270792
+    assert [(e.etapa, e.valor_no_mes, e.comeca) for e in r.etapas_do_proximo_mes] == [
+        ("3", 7411960, False), ("2", 5665273, False), ("23", 1797312, False), ("4", 1129568, True),
+        ("21", 266679, True)]
+    # Fundações já foram medidas: não "começam em dezembro"
+    assert r.proximo_mes_com_inicio == "2026-12"
+    assert [e.etapa for e in r.proximas_etapas] == ["4", "21"]
+    assert [e.etapa for e in r.etapas_do_mes] == ["1", "23", "2"]          # novembro, maior valor primeiro
+    # depois de dezembro, a próxima a começar é a que não tem medição nenhuma
+    jan = _resumo_cronograma(_cronograma_emei(), date(2026, 12, 10))
+    assert (jan.proximo_mes_com_inicio, [e.etapa for e in jan.proximas_etapas]) == ("2027-02", ["9"])
+    # último mês do cronograma: não há mês seguinte
+    fim = _resumo_cronograma(_cronograma_emei(), date(2027, 8, 1))
+    assert (fim.proximo_mes, fim.etapas_do_proximo_mes) == (None, [])
+
+
+async def test_historico_da_obra_traz_todos_os_insumos_mais_novos_primeiro(vila):
+    brita = (await vila.http.post(f"/obras/{vila.obra}/insumos", headers=vila.h,
+                                  json={"nome": "Brita 1", "unidade": "m³"})).json()["id"]
+    await vila.http.post(f"/obras/{vila.obra}/movimentos", headers=vila.h, json={
+        "insumo_id": brita, "tipo": "entrada", "quantidade": qtd(18), "chave_idempotencia": uuid.uuid4().hex})
+    r = await vila.http.get(f"/obras/{vila.obra}/movimentos?limite=200", headers=vila.h)
+    assert r.status_code == 200, r.text
+    movs = r.json()
+    assert movs[0]["insumo_id"] == brita                                   # o mais novo primeiro
+    assert len({m["insumo_id"] for m in movs}) > 1                         # não só um insumo
+    assert [m["criado_em"] for m in movs] == sorted((m["criado_em"] for m in movs), reverse=True)
+    pagina = (await vila.http.get(f"/obras/{vila.obra}/movimentos?limite=1", headers=vila.h)).json()
+    assert [m["id"] for m in pagina] == [movs[0]["id"]]
+    h, _ = await vila.usuario("viewer")
+    assert (await vila.http.get(f"/obras/{vila.obra}/movimentos", headers=h)).status_code == 200
+    assert (await vila.http.get("/obras/nao-existe/movimentos", headers=vila.h)).status_code == 404

@@ -500,14 +500,14 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 | `listar_obras()` | consulta | `GET /obras` |
 | `resumo_obra(obra_id)` | consulta | `GET /obras/{id}/resumo` (o "como está a obra?"; usado primeiro em pergunta aberta) |
 | `consultar_estoque(obra_id, busca?)` | consulta | `GET /obras/{id}/insumos` (conta, sem previsão, último preço) |
-| `historico_movimentos(obra_id, insumo_id, limite?=20)` | consulta | `GET …/movimentos` |
+| `historico_movimentos(obra_id, insumo_id?, limite?=30)` | consulta | sem insumo: `GET /obras/{id}/movimentos` (todos os insumos, mais novos primeiro, diz se cortou) + `GET …/insumos` (nomes); com insumo: `GET …/insumos/{id}/movimentos` |
 | `listar_pedidos(obra_id, status?, abertos?, busca?)` | consulta | `GET /obras/{id}/pedidos` (`abertos` = `?status=` em cotação a parcial; `busca` por fornecedor ou insumo, filtrada no agente) |
 | `consultar_orcamento(obra_id, busca?)` | consulta | `GET /obras/{id}/orcamento` |
 | `consultar_cronograma(obra_id, mes?)` | consulta | `GET /obras/{id}/cronograma` (por etapa; `mes` detalha o que está previsto no mês) |
 | `listar_fornecedores(busca?)` | consulta | `GET /fornecedores` |
 | `calcular(expressao, unidade_resultado?)` | consulta | nenhuma (calculadora local em Decimal, sem `eval`) |
-| `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, valor, justificativa, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido) |
-| `propor_entrega(obra_id, pedido_id, linhas, justificativa, nf_numero?, nf_data?, nf_valor?, confirmar_excesso?)` | propõe | `POST /propostas` (registrar_entrega) |
+| `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, justificativa, valor? \| preco_unitario?, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido; com `preco_unitario` o total sai da calculadora e volta em `conta_do_valor`) |
+| `propor_entrega(obra_id, pedido_id, linhas, justificativa, nf_numero?, nf_data?, nf_valor?, confirmar_excesso?)` | propõe | `POST /propostas` (registrar_entrega; `nf_data` aceita "hoje"/"ontem", resolvido no fuso de Brasília, e com número de nota sem data fica hoje) |
 | `propor_avanco_pedido(obra_id, pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido; `conferido` só de parcial = encerrar) |
 | `propor_ajuste_estoque(obra_id, insumo_id, motivo, contagem? \| quantidade?)` | propõe | `GET …/insumos` + `POST /propostas` (ajuste_estoque; com `contagem`, a diferença contra o saldo sai da calculadora) |
 
@@ -517,6 +517,9 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 - As ferramentas devolvem números já formatados **e** brutos e datas para gente ("16/11/2026", "ago/2027"); o agente
   nunca faz conta de cabeça: cita a `Conta` da API (falta, `falta_entregar` do pedido, saldo/estouro da etapa,
   `aditivos_pct`, situação da etapa vêm prontos) e qualquer outra conta passa por `calcular`.
+- Lembretes de "uma vez por conversa" (falta de previsão ou de cadastro, data futura num documento) vão em
+  `lembretes: {chave: texto}` na primeira vez e só como `lembretes_ja_ditos: {chaves, nota}` depois; o agente lê do
+  histórico guardado da sessão o que já foi dito.
 - A data de hoje (Brasília) vai como bloco de contexto na mensagem do usuário ("(Hoje é quinta-feira, 05/11/2026, …)"),
   nunca na instrução nem nas ferramentas, que continuam byte a byte iguais entre conversas (cache). As de `propor_*` mandam
   `chave_idempotencia` = `"{sessao_id}:{tool_use_id}"` e, com `ja_existia`, dizem ao modelo que nada novo foi criado.

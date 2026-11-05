@@ -665,6 +665,7 @@ class EtapaNoMes(BaseModel):
     previsto_ate_referencia: int = 0
     medido_acumulado: int = 0
     situacao: str | None = None
+    comeca: bool = Field(False, description="começa neste mês: sem medição e sem % previsto antes dele")
 
 
 class EtapaAtrasada(BaseModel):
@@ -690,8 +691,16 @@ class ResumoCronograma(BaseModel):
     pct_medido: int | None = None
     previsto_no_mes: int | None = Field(None, description="R$ previsto no mês corrente (null fora do cronograma)")
     pct_previsto_acumulado_no_mes: int | None = None
-    etapas_do_mes: list[EtapaNoMes] = Field(default_factory=list, description="com % previsto no mês corrente")
-    proximo_mes_com_inicio: str | None = Field(None, description="o próximo mês em que alguma etapa começa")
+    etapas_do_mes: list[EtapaNoMes] = Field(default_factory=list, description="com % previsto no mês corrente, "
+                                                                              "maior valor primeiro")
+    proximo_mes: str | None = Field(None, description="AAAA-MM do mês seguinte ao corrente (null fora do cronograma)")
+    previsto_no_proximo_mes: int | None = None
+    pct_previsto_acumulado_no_proximo_mes: int | None = None
+    etapas_do_proximo_mes: list[EtapaNoMes] = Field(
+        default_factory=list,
+        description="todas com % previsto no mês seguinte (as que continuam e as que começam), maior valor primeiro")
+    proximo_mes_com_inicio: str | None = Field(None, description="o próximo mês em que alguma etapa começa (sem "
+                                                                 "medição: a que já foi medida não começa de novo)")
     proximas_etapas: list[EtapaNoMes] = Field(default_factory=list, description="as que começam nesse mês")
     etapas_atrasadas: list[EtapaAtrasada] = Field(default_factory=list, description="maior atraso primeiro")
 

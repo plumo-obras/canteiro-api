@@ -91,23 +91,47 @@ def _resumo_cronograma(c, hoje: date) -> ResumoCronograma:
     if 0 <= k < len(c.mensal):
         r.previsto_no_mes, r.pct_previsto_acumulado_no_mes = c.mensal[k].previsto, c.mensal[k].pct_previsto_acumulado
 
+    def primeiro_mes(e) -> int | None:
+        return next((j for j, x in enumerate(e.percentuais) if x > 0), None)
+
+    def comecou(e) -> bool:
+        # Pela medição, não só pelo cronograma: na EMEI as Fundações tinham 4,51% medidos (adiantadas) com o primeiro
+        # % previsto só em dezembro, e o resumo anunciava "em dezembro começam as Fundações".
+        return e.medido_acumulado > 0 or e.situacao not in (None, "nao_comecou")
+
     def no_mes(e, j: int) -> EtapaNoMes:
         return EtapaNoMes(etapa=e.etapa, descricao=e.descricao, pct_no_mes=e.percentuais[j],
                           valor_no_mes=e.valores_mes[j], previsto_ate_referencia=e.previsto_ate_referencia,
-                          medido_acumulado=e.medido_acumulado, situacao=e.situacao)
+                          medido_acumulado=e.medido_acumulado, situacao=e.situacao,
+                          comeca=not comecou(e) and primeiro_mes(e) == j)
+
+    def do_mes(j: int) -> list[EtapaNoMes]:
+        # maior valor primeiro: o panorama cita as primeiras, e a frente que mais pesa não pode ficar de fora
+        return sorted((no_mes(e, j) for e in c.etapas if j < len(e.percentuais) and e.percentuais[j] > 0),
+                      key=lambda x: -x.valor_no_mes)
 
     if 0 <= k < c.meses:
-        r.etapas_do_mes = [no_mes(e, k) for e in c.etapas if k < len(e.percentuais) and e.percentuais[k] > 0]
-    # a próxima: o primeiro mês depois do corrente em que alguma etapa COMEÇA (a que já está andando não é próxima)
+        r.etapas_do_mes = do_mes(k)
+    # O mês seguinte inteiro (as que continuam E as que começam): só as que começavam deixava de fora o movimento de
+    # terra de dezembro na EMEI (85%, a 2ª maior frente do mês).
+    j = k + 1
+    if 0 <= j < c.meses:
+        r.proximo_mes = _mes(_mes_idx(c.inicio) + j)
+        if j < len(c.mensal):
+            r.previsto_no_proximo_mes = c.mensal[j].previsto
+            r.pct_previsto_acumulado_no_proximo_mes = c.mensal[j].pct_previsto_acumulado
+        r.etapas_do_proximo_mes = do_mes(j)
+    # a próxima: o primeiro mês depois do corrente em que alguma etapa COMEÇA (a que já está andando, pelo
+    # cronograma ou pela medição, não é próxima)
     inicios = {}
     for e in c.etapas:
-        primeiro = next((j for j, x in enumerate(e.percentuais) if x > 0), None)
-        if primeiro is not None and primeiro > k:
+        primeiro = primeiro_mes(e)
+        if primeiro is not None and primeiro > k and not comecou(e):
             inicios.setdefault(primeiro, []).append(e)
     if inicios:
         j = min(inicios)
         r.proximo_mes_com_inicio = _mes(_mes_idx(c.inicio) + j)
-        r.proximas_etapas = [no_mes(e, j) for e in inicios[j]]
+        r.proximas_etapas = sorted((no_mes(e, j) for e in inicios[j]), key=lambda x: -x.valor_no_mes)
     atrasadas = [e for e in c.etapas if e.situacao == "atrasada"]
     r.etapas_atrasadas = [EtapaAtrasada(etapa=e.etapa, descricao=e.descricao, medido_acumulado=e.medido_acumulado,
                                         previsto_ate_referencia=e.previsto_ate_referencia, atraso_pct=e.atraso_pct)

@@ -108,6 +108,7 @@ async def test_consultas_das_rotas_usam_indice_sem_ordenar_em_memoria(espiao, ht
                 f"/registro?obra_id={obra}&antes_de=2099-01-01T00:00:00Z&limite=1",
                 "/sessoes", f"/sessoes?obra_id={obra}", "/sessoes?antes_de=2099-01-01T00:00:00Z",
                 "/obras", "/obras/resumo", f"/obras/{obra}/insumos", f"/obras/{obra}/insumos/{insumo}/movimentos",
+                f"/obras/{obra}/movimentos", f"/obras/{obra}/movimentos?limite=2&antes_de=2099-01-01T00:00:00Z",
                 f"/obras/{obra}/pedidos", f"/obras/{obra}/pedidos?status=em_cotacao",
                 f"/obras/{obra}/pedidos?status=em_cotacao&status=enviado&antes_de=2099-01-01T00:00:00Z",
                 f"/pedidos/{pedido}/recebimentos", "/propostas", "/propostas?status=pendente",
