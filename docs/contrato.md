@@ -393,7 +393,8 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
   criado_em, atualizado_em}`.
 - `GET /obras/{obra_id}/comprovantes?status=a_revisar&limite=100&antes_de=…` → a fila (mais novos primeiro).
 - `GET /comprovantes/{id}/arquivo` → o arquivo (`Cache-Control: private, no-store`). Só do tenant; o armazenamento é
-  privado (`ARQUIVOS=disco` em desenvolvimento; bucket privado em produção).
+  privado: no próprio banco (`ARQUIVOS=banco`, o padrão), em pedaços de 512 KiB por documento, com um índice que
+  confere o sha256 ao ler; `disco` só para desenvolvimento (o disco do Render some a cada deploy).
 - `PUT /interno/comprovantes/{id}/leitura` (**só o serviço do agente**: token de serviço + `X-Canteiro-Usuario`, como o
   `POST /uso`) `{leitura?, erro?, modelo?}` (um dos dois) → `Comprovante`. `leitura` = `LeituraComprovante`
   (`dominio/.../leitura.py`, o esquema da saída estruturada do modelo): `{tipo_documento, situacao_pagamento: pago |

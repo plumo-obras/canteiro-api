@@ -45,8 +45,8 @@ class Config(BaseSettings):
     # origens (vírgula) que podem chamar a API do navegador — hoje só a lista de espera da landing. Nunca "*".
     cors_origens: str = "http://localhost:4321,http://127.0.0.1:4321"
 
-    # onde ficam os arquivos dos comprovantes: memoria | disco (depois: bucket privado)
-    arquivos: str = "disco"
+    # onde ficam os arquivos dos comprovantes: banco (padrão; o disco do Render some a cada deploy) | memoria | disco
+    arquivos: str = "banco"
     arquivos_dir: str = str(_RAIZ / ".arquivos")
 
     # créditos iniciais de um tenant novo (microdólares; 1 US$ = 1.000.000)

@@ -26,6 +26,8 @@ services:
         sync: false
       - key: SEED_ADMIN_EMAIL
         sync: false
+      - key: ARQUIVOS             # fotos dos comprovantes no próprio Mongo: o disco do plano gratuito some a cada deploy
+        value: banco
       - key: IP_CABECALHO         # o Render põe a Cloudflare na frente e não limpa o X-Forwarded-For do cliente
         value: cf-connecting-ip
       - key: CORS_ORIGENS         # quem chama POST /lista-espera do navegador (a landing da Plumo). Nunca "*".

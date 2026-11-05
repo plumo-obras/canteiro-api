@@ -52,7 +52,7 @@ def config():
     from canteiro_api.config import Config
     return Config(jwt_segredo=secrets.token_urlsafe(48), token_servico_agente=secrets.token_urlsafe(32),
                   chave_cifra=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(), armazenamento="memoria",
-                  arquivos="memoria", _env_file=None)
+                  arquivos="banco", _env_file=None)
 
 
 # --- app + cliente HTTP (ASGI) ---

@@ -226,9 +226,9 @@ async def enviar_comprovante(arm, arquivos, u: UsuarioAtual, obra_id: str, conte
     id_ = id_comprovante(u.tenant_id, obra_id, sha)
     if ja := await arm.obter("comprovantes", u.tenant_id, id_):
         return ja, True
-    caminho = f"{u.tenant_id}/{obra_id}/{id_}.{TIPOS_ACEITOS[tipo]}"
+    caminho = f"{obra_id}/{id_}.{TIPOS_ACEITOS[tipo]}"
     # o arquivo antes do documento: documento sem arquivo quebraria a revisão; arquivo sem documento é só sobra
-    await arquivos.salvar(caminho, conteudo)
+    await arquivos.salvar(u.tenant_id, caminho, conteudo)
     d = doc(Comprovante(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, arquivo=caminho, tipo_conteudo=tipo,
                         tamanho=len(conteudo), sha256=sha, legenda=" ".join(legenda.split())[:MAX_LEGENDA],
                         quem=u.nome, usuario_id=u.id))
@@ -253,7 +253,7 @@ async def comprovante_do_tenant(leitor, tenant_id: str, comprovante_id: str) -> 
 
 async def arquivo_do_comprovante(arm, arquivos, u: UsuarioAtual, comprovante_id: str) -> tuple[bytes, str]:
     c = await comprovante_do_tenant(arm, u.tenant_id, comprovante_id)
-    conteudo = await arquivos.ler(c["arquivo"])
+    conteudo = await arquivos.ler(u.tenant_id, c["arquivo"])
     if conteudo is None:
         raise NaoEncontrado("O arquivo deste comprovante não foi encontrado.")
     return conteudo, c["tipo_conteudo"]
