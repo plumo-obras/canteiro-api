@@ -200,18 +200,27 @@ async def renovar(arm, cfg: Config, token: str) -> dict:
         if r is None or r["revogado"] or r["expira_em"] < agora():
             return None, r
         if r["usado"]:
+            # Recarregar a página com uma renovação no ar: o servidor trocou o token, mas o cookie novo não chegou ao
+            # navegador e a página seguinte renova com o velho, segundos depois. Dentro da janela não emite nada
+            # (o token velho nunca rende sessão) e não derruba a família: o cliente espera o cookie novo e tenta de
+            # novo. Sem `usado_em` (documento anterior à janela) segue o caminho do reuso.
+            usado_em = r.get("usado_em")
+            if usado_em and agora() - usado_em <= timedelta(seconds=cfg.janela_reuso_renovacao_segundos):
+                return "em_andamento", r
             return "reuso", r
         u = await tx.obter("usuarios", r["tenant_usuario"], r["usuario_id"])
         if not u or not u["ativo"]:
             return None, r
         novo, doc_novo = _nova_renovacao(cfg, u["id"], u["tenant_id"], r["familia"])
-        tx.atualizar("renovacoes", TENANT_SISTEMA, id_, {"usado": True})
+        tx.atualizar("renovacoes", TENANT_SISTEMA, id_, {"usado": True, "usado_em": agora()})
         tx.criar("renovacoes", doc_novo)
         return _resposta(cfg, u, novo), r
 
     resultado, r = await arm.em_transacao(corpo)
+    if resultado == "em_andamento":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Renovação em andamento; tente de novo.")
     if resultado == "reuso":
-        # Token já trocado apareceu de novo: provavelmente vazou. Derruba a família inteira.
+        # Token já trocado apareceu de novo fora da janela: provavelmente vazou. Derruba a família inteira.
         await _revogar_familia(arm, r["familia"])
         raise _negado("Sessão encerrada por segurança. Entre de novo.")
     if resultado is None:

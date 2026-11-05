@@ -10,6 +10,10 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
 - `POST /auth/entrar` `{email, senha}` → `{acesso, renovacao, usuario:{id, nome, tenant_id, papel}}`.
   Acesso: JWT curto (15 min). Renovação: opaco, guardado no banco (hash), revogável, troca a cada uso.
 - `POST /auth/renovar` `{renovacao}` → novo par **e** `usuario` (mesmo corpo do `/auth/entrar`). `POST /auth/sair` revoga.
+  Token já trocado que reaparece: até `JANELA_REUSO_RENOVACAO_SEGUNDOS` (10 s) depois da troca → **409**
+  `{detail: "Renovação em andamento; tente de novo."}`, sem emitir token e sem revogar nada (é a renovação que estava
+  no ar quando a página recarregou; o cliente espera o cookie novo e tenta de novo). Depois disso → 401 e a família
+  inteira é revogada (reuso = vazamento). 401 também para token desconhecido, revogado ou vencido.
 - Senha com argon2. Limite de tentativas por e-mail e por IP. O IP só vem do `X-Forwarded-For` quando quem chama está
   em `TRUSTED_PROXIES` (IPs/redes separados por vírgula no `.env`, vazio por padrão); vale o último endereço da cadeia
   que não é proxy de confiança. Papéis no banco: `viewer` (lê), `admin` (aprova e
@@ -94,6 +98,8 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   reaproveita o documento arquivado (o ID sai do nome).
 - `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50&antes_de=…` → `[Movimento]` (mais novos primeiro;
   paginação em "Listagens paginadas")
+- `GET /obras/{obra_id}/movimentos?limite=50&antes_de=…` (qualquer papel) → `[Movimento]` de **todos** os insumos da
+  obra, mais novos primeiro (o "histórico do almoxarifado" sem insumo; mesma paginação)
 - `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, etapa?, origem_doc?, chave_idempotencia}` →
   `Movimento + registro_id` (o ID da `EntradaRegistro` criada: é o que o Desfazer usa logo depois da ação; derivado
   do movimento, então a repetição da chave devolve o mesmo `registro_id`). Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
@@ -339,10 +345,14 @@ atual de cada etapa (contrato + aditivos vigentes).
   as outras rotas já calculam. Cada bloco diz quando o dado não existe.
   - `cronograma`: `{cadastrado, mes_corrente, termino_contratual, termino_projetado, termino_original, atraso_decimos,
     atraso_base_decimos, revisoes, mes_ultima_medicao, medicoes, pct_previsto_na_medicao, pct_medido, previsto_no_mes,
-    pct_previsto_acumulado_no_mes, etapas_do_mes, proximo_mes_com_inicio, proximas_etapas, etapas_atrasadas}`.
-    `etapas_do_mes` = etapas com % previsto no mês corrente (`{etapa, descricao, pct_no_mes, valor_no_mes,
-    previsto_ate_referencia, medido_acumulado, situacao}`); `proximas_etapas` = as que **começam** no primeiro mês
-    depois do corrente em que alguma começa; `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
+    pct_previsto_acumulado_no_mes, etapas_do_mes, proximo_mes, previsto_no_proximo_mes,
+    pct_previsto_acumulado_no_proximo_mes, etapas_do_proximo_mes, proximo_mes_com_inicio, proximas_etapas,
+    etapas_atrasadas}`. `etapas_do_mes` = etapas com % previsto no mês corrente (`{etapa, descricao, pct_no_mes,
+    valor_no_mes, previsto_ate_referencia, medido_acumulado, situacao, comeca}`), maior valor primeiro;
+    `etapas_do_proximo_mes` = **todas** as etapas com % previsto no mês seguinte (as que continuam e as que começam),
+    maior valor primeiro; `comeca` = a etapa começa naquele mês (sem medição e sem % previsto antes dele);
+    `proximas_etapas` = as que **começam** no primeiro mês depois do corrente em que alguma começa (etapa já medida,
+    ou com situação diferente de `nao_comecou`, nunca "começa"); `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
   - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
