@@ -39,6 +39,13 @@ class EntrarCorpo(Entrada):
     senha: str = Field(min_length=1, max_length=256)
 
 
+class TrocarSenhaCorpo(Entrada):
+    # Os limites de verdade (8 a 256, diferente da atual, não é o e-mail) são conferidos em auth.trocar_senha, com
+    # mensagem em português; aqui só o teto que impede mandar meio megabyte para o argon2.
+    senha_atual: str = Field(max_length=1024)
+    senha_nova: str = Field(max_length=1024)
+
+
 class RenovarCorpo(Entrada):
     renovacao: str = Field(min_length=10, max_length=200)
 

@@ -45,7 +45,7 @@ INDICES: dict[str, list[list[str]]] = {
     "registro": [["tenant_id", "obra_id", "criado_em", "_id"], ["tenant_id", "criado_em", "_id"]],
     "uso_ia": [["tenant_id", "dia", "_id"]],
     "outbox": [["tenant_id", "publicado", "criado_em", "_id"]],
-    "renovacoes": [["tenant_id", "familia", "_id"]],
+    "renovacoes": [["tenant_id", "familia", "_id"], ["tenant_id", "usuario_id", "revogado", "usado", "_id"]],
     "sessoes": [["tenant_id", "dono", "atualizado_em", "_id"],
                 ["tenant_id", "dono", "obra_id", "atualizado_em", "_id"]],
     "mensagens": [["tenant_id", "sessao_id", "seq", "_id"]],

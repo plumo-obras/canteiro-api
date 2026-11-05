@@ -122,6 +122,10 @@ async def test_consultas_das_rotas_usam_indice_sem_ordenar_em_memoria(espiao, ht
                 f"/obras/{obra}/gastos/resumo"]:
         r = await http.get(url, headers=h)
         assert r.status_code < 500, (url, r.text)
+    # a troca de senha procura as pontas vivas das famílias do usuário
+    r = await http.post("/auth/senha", headers=h, json={"senha_atual": vila.senha, "senha_nova": vila.senha + "-2"})
+    assert r.status_code == 200, r.text
+    vila.sessao = r.json()
     await http.post("/auth/sair", json={"renovacao": vila.sessao["renovacao"]})
     await publicar_pendentes(espiao, PublicadorEmMemoria(), vila.tenant_id)
 

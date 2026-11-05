@@ -2,10 +2,10 @@ import hmac
 import ipaddress
 import logging
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Depends, Request, status
 
 from .. import auth
-from ..esquemas import EntrarCorpo, RenovarCorpo, Sessao
+from ..esquemas import EntrarCorpo, RenovarCorpo, Sessao, TrocarSenhaCorpo
 
 r = APIRouter(prefix="/auth", tags=["autenticação"])
 log = logging.getLogger(__name__)
@@ -78,3 +78,10 @@ async def renovar(corpo: RenovarCorpo, request: Request):
 @r.post("/sair", status_code=status.HTTP_204_NO_CONTENT)
 async def sair(corpo: RenovarCorpo, request: Request) -> None:
     await auth.sair(request.app.state.arm, corpo.renovacao)
+
+
+@r.post("/senha", response_model=Sessao)
+async def trocar_senha(corpo: TrocarSenhaCorpo, request: Request, u: auth.UsuarioAtual = Depends(auth.usuario_atual)):
+    """Qualquer papel troca a própria senha. Devolve uma sessão nova: as outras (inclusive a deste aparelho) caem."""
+    return await auth.trocar_senha(request.app.state.arm, request.app.state.config, u, corpo.senha_atual,
+                                   corpo.senha_nova, _ip(request))

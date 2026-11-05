@@ -20,6 +20,7 @@ from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import agora
 from canteiro_dominio.tipos import novo_id
 
+from .armazenamento.base import normalizar
 from .config import Config
 from .modelos import NIVEL, TENANT_SISTEMA, IndiceEmail, Papel, Renovacao, Usuario, doc, id_de_email, normalizar_email
 
@@ -40,6 +41,10 @@ def senha_confere(hash_: str, senha: str) -> bool:
         return False
 
 
+def _ms(momento) -> int:
+    return int(momento.timestamp() * 1000)
+
+
 def _sha(texto: str) -> str:
     return hashlib.sha256(texto.encode()).hexdigest()
 
@@ -57,16 +62,28 @@ class UsuarioAtual:
 
 def emitir_acesso(cfg: Config, usuario_id: str, tenant_id: str) -> str:
     momento = agora()
-    return jwt.encode({"sub": usuario_id, "tid": tenant_id, "iat": momento,
+    # `ems` (emitido em ms): o `iat` é em segundos, e a troca de senha precisa separar o acesso emitido logo antes
+    # dela do emitido logo depois, no mesmo segundo (ver resolver_usuario)
+    return jwt.encode({"sub": usuario_id, "tid": tenant_id, "iat": momento, "ems": _ms(momento),
                        "exp": momento + timedelta(minutes=cfg.acesso_minutos), "typ": "acesso"},
                       cfg.jwt_segredo, algorithm=_ALGORITMO)
 
 
-def _nova_renovacao(cfg: Config, usuario_id: str, tenant_id: str, familia: str | None = None) -> tuple[str, dict]:
+def _nova_renovacao(cfg: Config, usuario_id: str, tenant_id: str, familia: str | None = None,
+                    familia_desde=None) -> tuple[str, dict]:
+    """Sem `familia`, é um login: família nova nascida agora. Com ela, é uma troca e herda o `familia_desde`."""
     token = secrets.token_urlsafe(32)
+    momento = agora()
     r = Renovacao(id=_sha(token), familia=familia or novo_id(), usuario_id=usuario_id, tenant_usuario=tenant_id,
-                  expira_em=agora() + timedelta(days=cfg.renovacao_dias))
+                  expira_em=momento + timedelta(days=cfg.renovacao_dias),
+                  familia_desde=familia_desde if familia else (familia_desde or momento))
     return token, doc(r)
+
+
+def _sessao_anterior_a_troca(u: dict, familia_desde) -> bool:
+    """A família nasceu antes da última troca de senha? Então é de um aparelho que a troca desconectou."""
+    desde = u.get("sessoes_validas_desde")
+    return bool(desde) and (familia_desde is None or familia_desde < desde)
 
 
 def _resposta(cfg: Config, u: dict, renovacao: str) -> dict:
@@ -209,9 +226,12 @@ async def renovar(arm, cfg: Config, token: str) -> dict:
                 return "em_andamento", r
             return "reuso", r
         u = await tx.obter("usuarios", r["tenant_usuario"], r["usuario_id"])
-        if not u or not u["ativo"]:
+        # Conferir aqui, e não só revogar as famílias na troca de senha: esta transação lê o usuário, a da troca o
+        # grava, então uma renovação que corre junto com a troca ou vê a senha nova (e recusa) ou é serializada antes
+        # dela; a revogação por consulta, sozinha, perderia o token criado por essa renovação concorrente.
+        if not u or not u["ativo"] or _sessao_anterior_a_troca(u, r.get("familia_desde")):
             return None, r
-        novo, doc_novo = _nova_renovacao(cfg, u["id"], u["tenant_id"], r["familia"])
+        novo, doc_novo = _nova_renovacao(cfg, u["id"], u["tenant_id"], r["familia"], r.get("familia_desde"))
         tx.atualizar("renovacoes", TENANT_SISTEMA, id_, {"usado": True, "usado_em": agora()})
         tx.criar("renovacoes", doc_novo)
         return _resposta(cfg, u, novo), r
@@ -226,6 +246,77 @@ async def renovar(arm, cfg: Config, token: str) -> dict:
     if resultado is None:
         raise _negado("Sessão expirada. Entre de novo.")
     return resultado
+
+
+# --- troca de senha ---
+
+SENHA_MIN, SENHA_MAX = 8, 256
+
+
+def _conferir_senha_nova(atual: str, nova: str, email: str) -> None:
+    # nucleo importa este módulo: importar dentro da função evita o ciclo
+    from .nucleo import ErroNegocio
+
+    if not atual:
+        raise ErroNegocio("Informe a senha atual.")
+    if not SENHA_MIN <= len(nova) <= SENHA_MAX:
+        raise ErroNegocio(f"A nova senha precisa ter de {SENHA_MIN} a {SENHA_MAX} caracteres.")
+    if nova == atual:
+        raise ErroNegocio("A nova senha precisa ser diferente da atual.")
+    if normalizar_email(nova) == normalizar_email(email):
+        raise ErroNegocio("A nova senha não pode ser o seu e-mail.")
+
+
+async def trocar_senha(arm, cfg: Config, quem: UsuarioAtual, atual: str, nova: str, ip: str) -> dict:
+    """Confere a senha atual, grava a nova, derruba as outras sessões e devolve uma sessão nova para este aparelho.
+
+    Quem troca a senha normalmente desconfia que ela vazou: deixar vivas as sessões abertas com a senha velha
+    anularia a troca. Por isso todas as famílias de renovação caem, inclusive a deste navegador, que recebe uma nova.
+    """
+    from .nucleo import Conflito, registrar
+
+    u = await arm.obter("usuarios", quem.tenant_id, quem.id)
+    if not u or not u["ativo"]:
+        raise _negado("Usuário inativo.")
+    # As regras da senha nova vêm antes da reserva: errar a confirmação no formulário não gasta tentativa, e nenhuma
+    # delas confere a senha atual, então não servem para adivinhá-la.
+    _conferir_senha_nova(atual, nova, u["email"])
+    # Mesmo contador do login (por e-mail e por IP): um token de acesso roubado não pode virar um jeito de chutar a
+    # senha sem limite, nem de contornar o limite do /auth/entrar.
+    if not await _reservar_tentativa(arm, cfg, u["email"], ip):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            "Muitas tentativas com a senha errada. Espere alguns minutos e tente de novo.")
+    # argon2 é lento de propósito: fora do laço de eventos para não travar as outras requisições
+    if not await asyncio.to_thread(senha_confere, u["senha_hash"], atual):
+        # sem WWW-Authenticate: a sessão continua boa, só a senha digitada é que está errada
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Senha atual incorreta.")
+    hash_novo = await asyncio.to_thread(hash_senha, nova)
+    momento = normalizar(agora())
+    token, renovacao = _nova_renovacao(cfg, u["id"], u["tenant_id"], familia_desde=momento)
+
+    async def corpo(tx):
+        atual_doc = await tx.obter("usuarios", u["tenant_id"], u["id"])
+        # Outra troca terminou entre a conferência e aqui: a senha conferida já não é a do banco.
+        if not atual_doc or atual_doc["senha_hash"] != u["senha_hash"]:
+            raise Conflito("A senha acabou de ser trocada em outro lugar. Entre de novo com a senha nova.")
+        tx.atualizar("usuarios", u["tenant_id"], u["id"], {"senha_hash": hash_novo, "sessoes_validas_desde": momento})
+        tx.criar("renovacoes", renovacao)
+        # EXCEÇÃO À REGRA DO DESFAZER, como a chave da Anthropic: a receita teria de guardar o hash da senha velha, e
+        # "desfazer" devolveria uma senha que a pessoa trocou justamente por achar que vazou. O texto não leva nada
+        # da senha; o caminho de volta é trocar de novo.
+        registrar(tx, quem, obra_id=None, texto="Trocou a própria senha", desfazer=None)
+
+    await arm.em_transacao(corpo)
+    await _devolver_tentativa(arm, cfg, u["email"], ip)
+    # A garantia é o `sessoes_validas_desde` gravado acima (renovar e resolver_usuario o conferem). Marcar as
+    # famílias como revogadas deixa o banco dizendo a mesma coisa; só as pontas vivas (não usadas) importam, porque
+    # um token já trocado não rende sessão, e são elas que a consulta pega sem varrer o histórico de trocas.
+    vivas = await arm.consultar(Consulta("renovacoes", TENANT_SISTEMA, [
+        Filtro("usuario_id", "==", u["id"]), Filtro("revogado", "==", False), Filtro("usado", "==", False)]))
+    for r in vivas:
+        if r["id"] != renovacao["id"]:
+            await arm.atualizar("renovacoes", TENANT_SISTEMA, r["id"], {"revogado": True})
+    return _resposta(cfg, u, token)
 
 
 async def sair(arm, token: str) -> None:
@@ -255,6 +346,11 @@ async def resolver_usuario(request: Request, token: str | None, folga: timedelta
     u = await request.app.state.arm.obter("usuarios", claims["tid"], claims["sub"])
     if not u or not u["ativo"]:
         raise _negado("Usuário inativo.")
+    # Acesso emitido antes de uma troca de senha: o JWT dura 15 min, e o aparelho desconectado não pode seguir
+    # usando a API até ele vencer. Token sem `ems` (anterior ao campo) cai no `iat`, em segundos.
+    desde = u.get("sessoes_validas_desde")
+    if desde and claims.get("ems", claims.get("iat", 0) * 1000) < _ms(desde):
+        raise _negado("Sua senha foi trocada. Entre de novo.")
     return UsuarioAtual(id=u["id"], tenant_id=u["tenant_id"], nome=u["nome"], papel=Papel(u["papel"]))
 
 

@@ -54,6 +54,9 @@ class Usuario(Documento):
     papel: Papel = Papel.VIEWER
     senha_hash: str
     ativo: bool = True
+    # Trocar a senha derruba as outras sessões: renovação de família mais antiga e acesso emitido antes disso deixam
+    # de valer (ver auth.trocar_senha). None = nunca trocou.
+    sessoes_validas_desde: datetime | None = None
 
 
 class IndiceEmail(BaseModel):
@@ -77,6 +80,9 @@ class Renovacao(BaseModel):
     usado_em: datetime | None = None
     revogado: bool = False
     criado_em: datetime = Field(default_factory=agora)
+    # quando a família nasceu (o login), herdado a cada troca: é o que se compara com `Usuario.sessoes_validas_desde`.
+    # None = família anterior ao campo, tratada como antiga.
+    familia_desde: datetime | None = None
 
 
 class InscritoEspera(BaseModel):

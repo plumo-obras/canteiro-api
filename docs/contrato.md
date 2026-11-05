@@ -14,6 +14,21 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   `{detail: "Renovação em andamento; tente de novo."}`, sem emitir token e sem revogar nada (é a renovação que estava
   no ar quando a página recarregou; o cliente espera o cookie novo e tenta de novo). Depois disso → 401 e a família
   inteira é revogada (reuso = vazamento). 401 também para token desconhecido, revogado ou vencido.
+- `POST /auth/senha` (qualquer papel, `Authorization: Bearer <acesso>`) `{senha_atual, senha_nova}` → **o mesmo corpo
+  do `/auth/entrar`** (`{acesso, renovacao, usuario}`): uma sessão nova para o aparelho que trocou.
+  - Regras, conferidas **antes** da senha atual e sem gastar tentativa → 422 com `detail` pronto: "Informe a senha
+    atual." · "A nova senha precisa ter de 8 a 256 caracteres." · "…diferente da atual." · "…não pode ser o seu e-mail."
+    (comparação sem maiúsculas e espaços nas pontas).
+  - Senha atual errada → **401** `{detail: "Senha atual incorreta."}`, **sem** `WWW-Authenticate`: a sessão continua
+    válida, o cliente não deve desconectar ninguém. Cada erro conta no **mesmo limite do login** (por e-mail do usuário e
+    por IP, reserva transacional antes do argon2); estourou → 429 (e o `/auth/entrar` desse e-mail também fica em 429
+    até a janela passar). Troca certa zera o contador do e-mail.
+  - Sucesso: hash novo (argon2) e `sessoes_validas_desde` no usuário na mesma transação. **Todas** as sessões caem,
+    inclusive a de quem trocou (que recebe a nova): renovação de família nascida antes da troca → 401 no `/auth/renovar`,
+    e acesso emitido antes dela → 401 em qualquer rota ("Sua senha foi trocada. Entre de novo."), sem esperar os 15 min.
+    As pontas vivas das famílias também ficam `revogado`. Registro "Trocou a própria senha", `obra_id` nulo, **sem
+    `desfazer`** (como a chave da Anthropic: a receita guardaria o hash velho, e desfazer devolveria uma senha que a
+    pessoa trocou por achar que vazou). Nada da senha vai ao registro.
 - Senha com argon2. Limite de tentativas por e-mail e por IP. O IP só vem do `X-Forwarded-For` quando quem chama está
   em `TRUSTED_PROXIES` (IPs/redes separados por vírgula no `.env`, vazio por padrão); vale o último endereço da cadeia
   que não é proxy de confiança. Papéis no banco: `viewer` (lê), `admin` (aprova e
