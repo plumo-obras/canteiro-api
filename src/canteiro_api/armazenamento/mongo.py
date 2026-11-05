@@ -1,13 +1,11 @@
 """Adaptador MongoDB com a API assíncrona nativa do PyMongo (o Motor foi descontinuado).
 
-Este é o ÚNICO módulo que importa `pymongo` (e o `gridfs` que vem com ele, para os arquivos). Ele mapeia `id` ↔ `_id`,
-exige tenant em toda leitura e usa transações reais (replica set), repetidas pelo driver em conflito transitório.
+Este é o ÚNICO módulo que importa `pymongo`. Ele mapeia `id` ↔ `_id`, exige tenant em toda leitura e usa transações
+reais (replica set), repetidas pelo próprio driver em conflito transitório.
 """
 import logging
 from typing import Any
 
-from gridfs import AsyncGridFSBucket
-from gridfs.errors import NoFile
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
 from pymongo.errors import DuplicateKeyError
 from pymongo.read_concern import ReadConcern
@@ -15,7 +13,6 @@ from pymongo.write_concern import WriteConcern
 
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta
 
-from ..arquivos import conferir_caminho, do_tenant
 from .base import DocumentoAusente, TransacaoComBuffer, validar_campos, validar_consulta, validar_doc
 
 # Em DEBUG o driver loga o comando inteiro, com o documento dentro: e-mail da lista de espera, hash de senha, chave
@@ -98,9 +95,6 @@ class ArmazenamentoMongo:
                 await self._db[colecao].create_index([(c, ASCENDING) for c in campos])
         for colecao, campo in TTL.items():
             await self._db[colecao].create_index([(campo, ASCENDING)], expireAfterSeconds=0)
-
-    def arquivos(self) -> ArquivosMongo:
-        return ArquivosMongo(self._db)
 
     async def apagar_banco(self) -> None:
         """Só para testes."""
@@ -188,43 +182,3 @@ class ArmazenamentoMongo:
 
             return await sessao.with_transaction(
                 corpo, read_concern=ReadConcern("snapshot"), write_concern=WriteConcern("majority"))
-
-
-class ArquivosMongo:
-    """Arquivos no GridFS do mesmo banco (bucket `arquivos`): persiste entre deploys e quando o Render dorme, sem
-    serviço novo nem chave nova. Custo: ocupa o mesmo espaço do Atlas M0 (512 MB) que os dados — veja docs/deploy.md.
-
-    Cada envio é um arquivo GridFS com `_id` próprio, `filename` = caminho (`tenant/obra/nome`) e `metadata` com
-    tenant e obra. O documento em `arquivos.files` só é gravado depois de todos os pedaços: se ele existe, o arquivo
-    está inteiro. Envio interrompido deixa só pedaços órfãos (nunca lidos). Leitura sempre filtra pelo tenant.
-    """
-
-    def __init__(self, db):
-        self._bucket = AsyncGridFSBucket(db, bucket_name="arquivos")
-        self._files = db["arquivos.files"]
-
-    async def _achar(self, tenant_id: str, caminho: str) -> dict | None:
-        return await self._files.find_one({"filename": caminho, "metadata.tenant_id": tenant_id},
-                                          projection={"_id": 1})
-
-    async def salvar(self, tenant_id: str, obra_id: str, caminho: str, conteudo: bytes, tipo: str) -> None:
-        conferir_caminho(caminho, tenant_id, obra_id)
-        # o nome sai do sha256 do conteúdo: já existe = mesmo arquivo, não regrava. Dois envios simultâneos do mesmo
-        # arquivo podem gravar duas cópias iguais; a leitura pega qualquer uma (e o espaço extra é raro e pequeno).
-        if await self._achar(tenant_id, caminho):
-            return
-        await self._bucket.upload_from_stream(caminho, conteudo, metadata={
-            "tenant_id": tenant_id, "obra_id": obra_id, "tipo_conteudo": tipo, "tamanho": len(conteudo)})
-
-    async def ler(self, tenant_id: str, caminho: str) -> bytes | None:
-        if not do_tenant(caminho, tenant_id):
-            return None
-        conferir_caminho(caminho, tenant_id)
-        achado = await self._achar(tenant_id, caminho)
-        if not achado:
-            return None
-        try:
-            fluxo = await self._bucket.open_download_stream(achado["_id"])
-        except NoFile:
-            return None
-        return await fluxo.read()

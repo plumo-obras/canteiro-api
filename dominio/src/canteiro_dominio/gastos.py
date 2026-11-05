@@ -40,10 +40,12 @@ def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao
 
 
 def soma_nos_gastos_avulsos(gasto: dict) -> bool:
-    """Se o gasto entra no total da árvore de gastos (`GET …/gastos/resumo`). Gasto de um pedido não: o custo do
-    pedido já conta pela entrega, e o gasto só registra que ele foi pago (`Pedido.pago`). Estornado não conta em nada.
+    """Se o gasto entra no total da árvore de gastos (`GET …/gastos/resumo`: etapas fixas, extras, tópicos). Gasto de
+    um pedido não: o custo do pedido já conta pela entrega, e o gasto só registra que ele foi pago (`Pedido.pago`).
+    Estornado não conta em nada.
 
-    Atenção: a árvore de gastos é OUTRA árvore que a EAP do orçamento. Gasto avulso não muda o "realizado" do
-    orçamento (`GET …/orcamento`), que vem só das entregas e medições dos pedidos; o de-para entre as duas vem depois.
+    Atenção aos dois sentidos de "etapa": a da árvore de gastos não é a etapa da EAP do orçamento. O de-para entre as
+    duas ainda não existe, e por isso gasto avulso não muda o "realizado" do orçamento (`GET …/orcamento`), que vem só
+    das entregas e medições dos pedidos.
     """
     return not gasto.get("estornado") and not gasto.get("pedido_id")

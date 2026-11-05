@@ -394,21 +394,26 @@ aparece só em `GET …/gastos/resumo`.
 **Comprovantes:**
 
 - `POST /obras/{obra_id}/comprovantes` (multipart `arquivo` + `legenda?`, **qualquer papel**) → `Comprovante` (201;
-  200 com `ja_existia: true` se o mesmo arquivo já foi enviado nesta obra: o ID sai do sha256). JPG, PNG, WEBP ou PDF
-  até **4 MB** (4 × 1024 × 1024 bytes; a função da Vercel que repassa o envio recusa corpo acima de 4,5 MB). Arquivo
-  maior → **413** com a mensagem do limite; corpo inteiro acima de 5 MiB → 413 antes do login. O tipo é conferido
-  **pelos bytes** (JPEG `FF D8 FF`, PNG `89 50 4E 47…`, WEBP `RIFF….WEBP`, PDF `%PDF-`): formato fora da lista ou
-  conteúdo que não bate com o `Content-Type` declarado → 422 com a explicação ("O arquivo diz ser JPG, mas o conteúdo é
-  PNG…"); a tela converte HEIC para JPEG. `legenda` = "do que é?" de quem enviou, **até 300 caracteres** (mais → 422).
+  200 com `ja_existia: true` se o mesmo arquivo já foi enviado nesta obra: o ID sai do sha256). O tipo sai dos **bytes**
+  (JPEG `FF D8 FF`, PNG `89 50 4E 47…`, WEBP `RIFF….WEBP`, PDF `%PDF-`), não do `Content-Type` declarado, que é
+  ignorado (o navegador chuta pela extensão); `tipo_conteudo` devolve o tipo real. Formato fora da lista → 422. Limites:
+  JPG, PNG ou WEBP até **3,5 MB** (3.500.000 bytes; a imagem vai ao modelo em base64) e lado até 8000 px (mais → 422);
+  PDF até **4 MB** (4 × 1024 × 1024 bytes; a função da Vercel que repassa o envio recusa corpo acima de 4,5 MB).
+  Arquivo maior → **413** com a mensagem do limite; corpo inteiro acima de 5 MiB → 413 antes do login. A tela reduz a
+  foto para ~1 MB e converte HEIC para JPEG. `legenda` = "do que é?" de quem enviou, **até 300 caracteres** (mais →
+  422).
   Nasce `a_revisar` e grava o evento `comprovante.recebido`.
 - `Comprovante` = `{id, obra_id, arquivo, tipo_conteudo, tamanho, sha256, legenda, quem, usuario_id, status:
   a_revisar | confirmado | descartado, leitura, erro_leitura, lido_em, modelo_leitura, gasto_id, motivo_descarte,
   criado_em, atualizado_em}`.
 - `GET /obras/{obra_id}/comprovantes?status=a_revisar&limite=100&antes_de=…` → a fila (mais novos primeiro).
 - `GET /comprovantes/{id}/arquivo` → o arquivo (`Cache-Control: private, no-store`). Só do tenant; o armazenamento é
-  privado e confere o tenant de novo: GridFS no mesmo banco (`ARQUIVOS=mongo`, padrão e o único aceito em produção);
-  `disco` só em desenvolvimento. Estornar ou desfazer um gasto e descartar um comprovante **não apagam o arquivo** (é a
-  prova do pagamento). Política de retenção (LGPD) ainda a decidir: hoje nada se apaga.
+  privado e separa por tenant de novo: no próprio banco (`ARQUIVOS=banco`, padrão e o único aceito em produção), em
+  pedaços de 512 KiB por documento e um índice gravado por último na mesma transação, que confere o sha256 ao ler
+  (pedaço faltando ou trocado → 404, nunca outra foto); `disco` só em desenvolvimento (o disco do Render some a cada
+  deploy). `arquivo` = `<obra_id>/<id>.<ext>` (o tenant vem à parte). Estornar ou desfazer um gasto e descartar um
+  comprovante **não apagam o arquivo** (é a prova do pagamento). Política de retenção (LGPD) ainda a decidir: hoje
+  nada se apaga.
 - `PUT /interno/comprovantes/{id}/leitura` (**só o serviço do agente**: token de serviço + `X-Canteiro-Usuario`, como o
   `POST /uso`) `{leitura?, erro?, modelo?}` (um dos dois) → `Comprovante`. `leitura` = `LeituraComprovante`
   (`dominio/.../leitura.py`, o esquema da saída estruturada do modelo): `{tipo_documento, situacao_pagamento: pago |

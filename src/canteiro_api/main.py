@@ -41,8 +41,8 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.config = config
     app.state.arm = arm
     app.state.cofre = criar_cofre(config.chave_cifra)
-    # GridFS usa o cliente do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
-    adiar = config.arquivos == "mongo" and arm is None
+    # no banco, os arquivos dependem do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
+    adiar = config.arquivos == "banco" and arm is None
     app.state.arquivos = None if adiar else criar_arquivos(config.arquivos, config.arquivos_dir, arm)
 
     @app.exception_handler(ErroNegocio)

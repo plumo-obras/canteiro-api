@@ -3,12 +3,14 @@ import asyncio
 import secrets
 
 from canteiro_api.limite_corpo import LIMITE_COMPROVANTE
-from canteiro_api.servicos.gastos import MAX_ARQUIVO, MAX_LEGENDA, hoje
+from canteiro_api.servicos.gastos import MAX_ARQUIVO, MAX_IMAGEM, MAX_LEGENDA, hoje
 from canteiro_dominio.etapas import MAX_EXTRAS_POR_OBRA, MAX_TOPICOS_POR_ETAPA
 
 JPEG = b"\xff\xd8\xff\xe0" + b"comprovante de teste "
 PNG = b"\x89PNG\r\n\x1a\n" + b"comprovante de teste "
-WEBP = b"RIFF\x00\x10\x00\x00WEBPVP8 " + b"comprovante de teste "
+# VP8X de 1000 x 800 (largura e altura menos 1, em 3 bytes cada): o cabeçalho tem de dizer medidas de verdade
+WEBP = (b"RIFF\x00\x10\x00\x00WEBPVP8X\x0a\x00\x00\x00\x00\x00\x00\x00" + (999).to_bytes(3, "little")
+        + (799).to_bytes(3, "little") + b"comprovante de teste ")
 PDF = b"%PDF-1.7 comprovante de teste "
 
 
@@ -177,13 +179,29 @@ async def test_envio_fica_a_revisar_e_o_mesmo_arquivo_nao_duplica(vila):
     assert [x["id"] for x in fila] == [c["id"]]
 
 
+def _png(largura, altura):
+    import struct
+    ihdr = b"IHDR" + struct.pack(">II", largura, altura) + b"\x08\x02\x00\x00\x00"
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + ihdr
+
+
 async def test_formato_e_tamanho_do_arquivo(vila):
     assert (await _enviar(vila, b"oi", tipo="text/plain")).status_code == 422
-    # passou de 4 MiB: a rota responde 413 dizendo o limite do arquivo
-    r = await _enviar(vila, JPEG + b"x" * (MAX_ARQUIVO + 1 - len(JPEG)))
+    # PDF: até 4 MiB; passou, a rota responde 413 dizendo o limite do arquivo
+    r = await _enviar(vila, PDF + b"x" * (MAX_ARQUIVO + 1 - len(PDF)), tipo="application/pdf")
     assert r.status_code == 413 and "4 MB" in r.json()["detail"], r.text
-    assert (await _enviar(vila, JPEG + secrets.token_bytes(MAX_ARQUIVO - len(JPEG)))).status_code == 201
-    assert (await _enviar(vila, PDF + secrets.token_bytes(8), tipo="application/pdf")).status_code == 201
+    r = await _enviar(vila, PDF + secrets.token_bytes(MAX_ARQUIVO - len(PDF)), tipo="application/pdf")
+    assert r.status_code == 201, r.text
+    # foto: até 3,5 MB (vai ao modelo em base64)
+    r = await _enviar(vila, JPEG + b"x" * (MAX_IMAGEM + 1 - len(JPEG)))
+    assert r.status_code == 413 and "3,5 MB" in r.json()["detail"], r.text
+    assert (await _enviar(vila, JPEG + secrets.token_bytes(MAX_IMAGEM - len(JPEG)))).status_code == 201
+
+
+async def test_imagem_comprida_demais(vila):
+    r = await _enviar(vila, _png(1080, 9000), tipo="image/png")
+    assert r.status_code == 422 and "comprida" in r.json()["detail"]
+    assert (await _enviar(vila, _png(1080, 7999) + secrets.token_bytes(8), tipo="image/png")).status_code == 201
 
 
 async def test_tipo_vem_dos_bytes_e_nao_do_que_o_cliente_diz(vila):
@@ -191,15 +209,19 @@ async def test_tipo_vem_dos_bytes_e_nao_do_que_o_cliente_diz(vila):
         r = await _enviar(vila, conteudo + secrets.token_bytes(8), tipo=tipo)
         assert r.status_code == 201, r.text
         assert r.json()["tipo_conteudo"] == tipo.split(";")[0]
-    # PNG que diz ser JPEG, HTML que diz ser PDF, RIFF que não é WEBP (um WAV)
+    # o navegador chuta pela extensão: PNG salvo como .jpg e PDF dito JPEG entram com o tipo real
     r = await _enviar(vila, PNG + secrets.token_bytes(8), tipo="image/jpeg")
-    assert r.status_code == 422 and "diz ser JPG" in r.json()["detail"] and "é PNG" in r.json()["detail"]
+    assert r.status_code == 201 and r.json()["tipo_conteudo"] == "image/png", r.text
+    r = await _enviar(vila, PDF + secrets.token_bytes(8), tipo="image/jpeg")
+    assert r.status_code == 201 and r.json()["tipo_conteudo"] == "application/pdf", r.text
+    # HTML que diz ser PDF, executável que diz ser PNG, RIFF que não é WEBP (um WAV)
     r = await _enviar(vila, b"<html><script>alert(1)</script>", tipo="application/pdf")
-    assert r.status_code == 422 and "não é uma foto" in r.json()["detail"]
+    assert r.status_code == 422 and "Envie uma foto" in r.json()["detail"]
+    assert (await _enviar(vila, b"MZ\x90\x00 executavel" + secrets.token_bytes(8), tipo="image/png")).status_code == 422
     assert (await _enviar(vila, b"RIFF\x00\x10\x00\x00WAVEfmt " + secrets.token_bytes(8),
                           tipo="image/webp")).status_code == 422
     fila = (await vila.http.get(f"/obras/{vila.obra}/comprovantes", headers=vila.h)).json()
-    assert len(fila) == 3
+    assert len(fila) == 5
 
 
 async def test_legenda_ate_300_caracteres(vila):
@@ -388,3 +410,8 @@ async def test_descartar_guarda_o_arquivo_e_desfazer_reabre(vila):
                                  json=_confirmacao())).status_code == 409
     await _desfazer(vila, r.json()["registro_id"])
     assert (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["status"] == "a_revisar"
+
+
+async def test_corpo_acima_do_limite_da_rota_e_413(vila):
+    r = await _enviar(vila, JPEG + b"x" * (7 * 1024 * 1024))
+    assert r.status_code == 413

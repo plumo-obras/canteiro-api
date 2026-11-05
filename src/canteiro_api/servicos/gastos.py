@@ -49,16 +49,16 @@ from ..nucleo import (
     receita_inversa,
     verbo_desfazer,
 )
-from . import fornecedores
+from . import fornecedores, tipo_arquivo
 from .estoque import id_derivado
 
 _SP = ZoneInfo("America/Sao_Paulo")
-# O Claude lê estes formatos; HEIC (foto de iPhone) a tela converte para JPEG antes de enviar.
-TIPOS_ACEITOS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf"}
-_NOME_TIPO = {"image/jpeg": "JPG", "image/png": "PNG", "image/webp": "WEBP", "application/pdf": "PDF"}
-# 4 MiB: a web repassa o envio por uma função da Vercel, que recusa corpo acima de 4,5 MB com um 413 sem explicação.
-# Com 4 MiB de arquivo + o envelope do multipart, o corpo cabe lá e quem passa do limite recebe a nossa mensagem.
+# Limites por tipo. A web repassa o envio por uma função da Vercel, que recusa corpo acima de 4,5 MB com um 413 sem
+# explicação: com 4 MiB de arquivo + o envelope do multipart, o corpo cabe lá e quem passa do limite recebe a nossa
+# mensagem. A imagem vai ao modelo em base64 (+1/3), e a Anthropic recusa imagem acima de 5 MB: 3,5 MB cru fica abaixo
+# disso. HEIC (foto de iPhone) a tela converte para JPEG antes de enviar.
 MAX_ARQUIVO = 4 * 1024 * 1024
+MAX_IMAGEM = 3_500_000
 MAX_LEGENDA = 300
 _NOMES_FIXOS = {e.chave: e.nome for e in ETAPAS_FIXAS}
 
@@ -272,19 +272,6 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict) -> Operac
 
 # --- comprovantes ---
 
-def tipo_pelo_conteudo(conteudo: bytes) -> str | None:
-    """O tipo pela assinatura dos primeiros bytes (os "números mágicos" de cada formato)."""
-    if conteudo.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if conteudo.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if conteudo[:4] == b"RIFF" and conteudo[8:12] == b"WEBP":
-        return "image/webp"
-    if conteudo.startswith(b"%PDF-"):
-        return "application/pdf"
-    return None
-
-
 def id_comprovante(tenant_id: str, obra_id: str, sha256: str) -> str:
     """O mesmo arquivo na mesma obra é o mesmo comprovante: foto enviada duas vezes não vira dois gastos."""
     return id_derivado(tenant_id, "comprovante", obra_id, sha256)
@@ -293,19 +280,19 @@ def id_comprovante(tenant_id: str, obra_id: str, sha256: str) -> str:
 async def enviar_comprovante(arm, arquivos, u: UsuarioAtual, obra_id: str, conteudo: bytes, tipo: str,
                              legenda: str) -> tuple[dict, bool]:
     await obra_do_tenant(arm, u.tenant_id, obra_id)
-    tipo = (tipo or "").split(";")[0].strip().lower()
-    if tipo not in TIPOS_ACEITOS:
-        raise ErroNegocio("Envie uma foto (JPG, PNG ou WEBP) ou um PDF.")
     if not conteudo:
         raise ErroNegocio("O arquivo chegou vazio. Tente de novo.")
-    if len(conteudo) > MAX_ARQUIVO:
-        raise GrandeDemais("Arquivo maior que 4 MB. Tire a foto de novo com menos resolução ou envie o PDF.")
-    real = tipo_pelo_conteudo(conteudo)
-    if real != tipo:
-        # o tipo declarado vem do cliente; o que vai para a leitura e para o navegador é o que os bytes dizem ser
-        raise ErroNegocio(f"O arquivo diz ser {_NOME_TIPO[tipo]}, mas o conteúdo "
-                          + (f"é {_NOME_TIPO[real]}." if real else "não é uma foto (JPG, PNG, WEBP) nem um PDF.")
-                          + " Envie o arquivo original.")
+    # vale o que os bytes dizem, não o tipo que o cliente declarou: o navegador chuta pela extensão (print de PNG salvo
+    # como .jpg chega "image/jpeg"), e é o tipo real que vai para a leitura e para o navegador de quem revisa
+    detectado = tipo_arquivo.detectar(conteudo)
+    if detectado is None:
+        raise ErroNegocio("Envie uma foto (JPG, PNG ou WEBP) ou um PDF.")
+    eh_pdf = detectado.tipo == "application/pdf"
+    if len(conteudo) > (MAX_ARQUIVO if eh_pdf else MAX_IMAGEM):
+        raise GrandeDemais("PDF maior que 4 MB." if eh_pdf
+                           else "Foto maior que 3,5 MB. Tire de novo com menos resolução ou reduza antes de enviar.")
+    if detectado.medidas and max(detectado.medidas) > tipo_arquivo.LADO_MAX:
+        raise ErroNegocio(f"Imagem comprida demais (mais de {tipo_arquivo.LADO_MAX} px): recorte só o comprovante.")
     legenda = " ".join(legenda.split())
     if len(legenda) > MAX_LEGENDA:
         raise ErroNegocio(f"A legenda pode ter até {MAX_LEGENDA} caracteres.")
@@ -313,10 +300,10 @@ async def enviar_comprovante(arm, arquivos, u: UsuarioAtual, obra_id: str, conte
     id_ = id_comprovante(u.tenant_id, obra_id, sha)
     if ja := await arm.obter("comprovantes", u.tenant_id, id_):
         return ja, True
-    caminho = f"{u.tenant_id}/{obra_id}/{id_}.{TIPOS_ACEITOS[tipo]}"
+    caminho = f"{obra_id}/{id_}.{detectado.extensao}"
     # o arquivo antes do documento: documento sem arquivo quebraria a revisão; arquivo sem documento é só sobra
-    await arquivos.salvar(u.tenant_id, obra_id, caminho, conteudo, tipo)
-    d = doc(Comprovante(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, arquivo=caminho, tipo_conteudo=tipo,
+    await arquivos.salvar(u.tenant_id, caminho, conteudo)
+    d = doc(Comprovante(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, arquivo=caminho, tipo_conteudo=detectado.tipo,
                         tamanho=len(conteudo), sha256=sha, legenda=legenda,
                         quem=u.nome, usuario_id=u.id))
 
