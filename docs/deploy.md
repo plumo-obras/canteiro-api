@@ -56,6 +56,14 @@ python3 -c "import base64, os; print('CHAVE_CIFRA', base64.b64encode(os.urandom(
      `TOKEN_SERVICO_AGENTE`. `MODELO_ROTEIRO=1` já vem ligado (demo sem chave, 0 tokens).
 3. Depois do deploy: `https://canteiro-api.onrender.com/saude` e `https://canteiro-agente.onrender.com/saude` devem responder `{"ok":true}`.
 
+### Fotos dos comprovantes
+
+O disco do Render gratuito some a cada deploy e quando o serviço dorme: as fotos dos comprovantes ficam no próprio
+Atlas (`ARQUIVOS=banco`, já fixado no `render.yaml`), em pedaços de 512 KiB nas coleções `arquivos` e
+`arquivos_pedacos`. A web reduz cada foto para ~1 MB; o M0 tem 512 MB para tudo, o que dá algumas centenas de
+comprovantes. Quando apertar: bucket privado (R2 ou GCS) atrás da mesma interface `Arquivos`, ou o Atlas pago.
+`ARQUIVOS=disco` só serve na máquina de quem desenvolve.
+
 ## 4. Dados de exemplo (seed) no Atlas
 
 O plano gratuito do Render não tem terminal, então rode o seed da sua máquina, com as variáveis só no terminal:

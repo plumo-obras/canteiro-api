@@ -273,3 +273,38 @@ async def test_descartar_guarda_o_arquivo_e_desfazer_reabre(vila):
                                  json=_confirmacao())).status_code == 409
     await _desfazer(vila, r.json()["registro_id"])
     assert (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["status"] == "a_revisar"
+
+
+# --- o arquivo pelo que os bytes dizem ---
+
+def _png(largura, altura):
+    import struct
+    ihdr = b"IHDR" + struct.pack(">II", largura, altura) + b"\x08\x02\x00\x00\x00"
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + ihdr
+
+
+async def test_tipo_vem_dos_bytes_nao_do_que_o_cliente_diz(vila):
+    pdf = b"%PDF-1.7 comprovante " + secrets.token_bytes(8)
+    r = await _enviar(vila, pdf, tipo="image/jpeg")
+    assert r.status_code == 201 and r.json()["tipo_conteudo"] == "application/pdf"
+    disfarçado = await _enviar(vila, b"MZ\x90\x00 executavel" + secrets.token_bytes(8), tipo="image/png")
+    assert disfarçado.status_code == 422
+
+
+async def test_limites_por_tipo_e_imagem_comprida(vila):
+    grande = JPEG + b"x" * 3_500_001
+    assert "3,5 MB" in (await _enviar(vila, grande)).json()["detail"]
+    pdf_grande = b"%PDF-1.7" + b"x" * (4 * 1024 * 1024)
+    assert "4 MB" in (await _enviar(vila, pdf_grande, tipo="application/pdf")).json()["detail"]
+    r = await _enviar(vila, _png(1080, 9000), tipo="image/png")
+    assert r.status_code == 422 and "comprida" in r.json()["detail"]
+    assert (await _enviar(vila, _png(1080, 7999) + secrets.token_bytes(8), tipo="image/png")).status_code == 201
+
+
+async def test_corpo_acima_do_limite_da_rota_e_413(vila):
+    r = await _enviar(vila, JPEG + b"x" * (7 * 1024 * 1024))
+    assert r.status_code == 413
+
+
+async def test_legenda_ate_300(vila):
+    assert (await _enviar(vila, legenda="x" * 301)).status_code == 422

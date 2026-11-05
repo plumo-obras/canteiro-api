@@ -73,7 +73,7 @@ async def editar_topico(topico_id: str, corpo: EdicaoArvoreCorpo, u: UsuarioAtua
 @r.post("/obras/{obra_id}/comprovantes", response_model=ComprovanteSaida, status_code=status.HTTP_201_CREATED,
         responses={200: {"description": "o mesmo arquivo já tinha sido enviado (ja_existia)"}})
 async def enviar(obra_id: str, response: Response, arquivo: UploadFile = File(...),
-                 legenda: str = Form("", max_length=1000), u: UsuarioAtual = Depends(usuario_atual),
+                 legenda: str = Form("", max_length=gastos.MAX_LEGENDA), u: UsuarioAtual = Depends(usuario_atual),
                  arm=Depends(_arm), arquivos=Depends(_arquivos)):
     # qualquer papel envia (como qualquer um propõe): enviar não conta em nada; só admin confirma
     conteudo = await arquivo.read(gastos.MAX_ARQUIVO + 1)

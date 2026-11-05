@@ -40,3 +40,17 @@ async def test_pedaco_adulterado_nao_vira_outra_foto(arm, tenant):
     await a.salvar(tenant, "obra/c1.jpg", b"original")
     await arm.atualizar(COLECAO_PEDACOS, tenant, f"{_id_arquivo(tenant, 'obra/c1.jpg')}-000", {"dados": b"trocado!"})
     assert await a.ler(tenant, "obra/c1.jpg") is None
+
+
+async def test_disco_nao_sai_da_raiz(tmp_path):
+    import pytest
+
+    from canteiro_api.arquivos import ArquivosDisco
+
+    d = ArquivosDisco(str(tmp_path / "raiz"))
+    await d.salvar("t1", "obra/c1.jpg", b"ok")
+    assert await d.ler("t1", "obra/c1.jpg") == b"ok"
+    with pytest.raises(ValueError):
+        await d.salvar("t1", "../../fora.jpg", b"x")
+    with pytest.raises(ValueError):
+        await d.ler("..", "../etc/passwd")

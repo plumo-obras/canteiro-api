@@ -385,8 +385,10 @@ confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e não con
 **Comprovantes:**
 
 - `POST /obras/{obra_id}/comprovantes` (multipart `arquivo` + `legenda?`, **qualquer papel**) → `Comprovante` (201;
-  200 com `ja_existia: true` se o mesmo arquivo já foi enviado nesta obra: o ID sai do sha256). JPG, PNG, WEBP ou PDF
-  até 5 MB (outro formato → 422; a tela converte HEIC para JPEG). `legenda` = "do que é?" de quem enviou (até 300).
+  200 com `ja_existia: true` se o mesmo arquivo já foi enviado nesta obra: o ID sai do sha256). O tipo sai dos **bytes**
+  (não do `Content-Type`): JPG, PNG ou WEBP até 3,5 MB e lado até 8000 px (o limite da imagem no modelo), PDF até 4 MB
+  (a Vercel recusa corpo acima de 4,5 MB); outro formato, maior ou comprido demais → 422. A tela reduz a foto para
+  ~1 MB e converte HEIC para JPEG. `legenda` = "do que é?" de quem enviou (até 300; mais → 422).
   Nasce `a_revisar` e grava o evento `comprovante.recebido`.
 - `Comprovante` = `{id, obra_id, arquivo, tipo_conteudo, tamanho, sha256, legenda, quem, usuario_id, status:
   a_revisar | confirmado | descartado, leitura, erro_leitura, lido_em, modelo_leitura, gasto_id, motivo_descarte,
