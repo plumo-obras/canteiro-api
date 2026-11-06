@@ -1,5 +1,7 @@
 .DS_Store
-.claude/
+# .claude/ é local (settings.local.json etc.); só as skills do repositório vão para o git
+.claude/*
+!.claude/skills/
 pesquisa/
 .env
 .env.*
