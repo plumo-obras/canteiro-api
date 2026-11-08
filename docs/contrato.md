@@ -186,6 +186,19 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
     atualizados (R$ X)" por lote, com `desfazer` `restaurar_insumos`: arquiva os novos e devolve aos atualizados
     `precisa_ate_o_fim`, `valor_unitario` e `curva` de antes.
 
+### Materiais do projeto estrutural
+
+- `POST /obras/{obra_id}/orcamento/materiais` (JSON `{origem, itens: [{nome, unidade, quantidade, valor_unitario}],
+  aplicar}`, admin) → o mesmo `PreviaOrcamento` da lista de materiais. É a lista que o canteiro-cad tira das pranchas
+  (`GET /v1/projetos/materiais`): a web manda o nome do insumo do SINAPI quando ele existe e o preço de referência.
+  - `quantidade` em milésimos (> 0), `valor_unitario` em centavos (0 = sem preço); até 500 itens; `origem` (até 80
+    caracteres) entra no registro: "Importou os materiais do {origem}: N novos, M atualizados (R$ X)".
+  - Unidade em ASCII do tradutor vira a do almoxarifado (`m3` → `m³`, `m2` → `m²`). O mesmo nome repetido soma; com
+    outra unidade, ou unidade diferente da do insumo já cadastrado, é erro da linha e nada é gravado.
+  - Daí em diante é a lista de materiais: **atualiza** troca `precisa_ate_o_fim`, `valor_unitario` e `curva`; a curva
+    sai do peso no valor; lotes de 100 com `desfazer` (`"Desfeito: importação dos materiais do {origem}"`). O que falta
+    comprar é a `Conta` de sempre (precisa − saldo − a caminho).
+
 ### Orçamento da obra (EAP, em versões)
 
 O orçamento é etapa → item, como a planilha da construtora: cada linha vira um item, com o número, o código e a fonte

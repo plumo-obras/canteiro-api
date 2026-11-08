@@ -510,6 +510,20 @@ class PreviaOrcamento(BaseModel):
                                     description="uma EntradaRegistro por lote gravado: é o que o Desfazer usa")
 
 
+class MaterialDoProjeto(BaseModel):
+    nome: str = Field(min_length=1, max_length=120, description="como vai aparecer no almoxarifado e em Compras")
+    unidade: str = Field(min_length=1, max_length=12)
+    quantidade: int = Field(gt=0, description="milésimos: o quanto o projeto pede (vira o precisa_ate_o_fim)")
+    valor_unitario: int = Field(0, ge=0, description="centavos; 0 = sem preço de referência")
+
+
+class MateriaisDoProjeto(BaseModel):
+    """A lista de materiais que o tradutor tirou das pranchas (o \"precisa\" da conta de compras)."""
+    origem: str = Field(min_length=1, max_length=80, description="vai no registro: \"projeto estrutural\"")
+    itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
+    aplicar: bool = False
+
+
 class ItemPrevia(BaseModel):
     ordem: int
     tipo: Literal["etapa", "item"]

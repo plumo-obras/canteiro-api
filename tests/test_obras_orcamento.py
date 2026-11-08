@@ -370,3 +370,55 @@ async def test_reabrir_recusa_se_a_obra_ja_mudou(vila, arm):
     await arm.atualizar("obras", vila.tenant_id, o["id"], {"status": "concluida"})
     d = await vila.http.post(f"/registro/{r['registro_id']}/desfazer", headers=vila.h)
     assert d.status_code == 409
+
+
+# --- materiais do projeto (a lista que o tradutor tira das pranchas) ---
+
+MATERIAIS = {"origem": "projeto estrutural", "itens": [
+    {"nome": "ACO CA-50, 10,0 MM, VERGALHAO", "unidade": "KG", "quantidade": qtd(220.3), "valor_unitario": 669},
+    {"nome": "CONCRETO USINADO BOMBEAVEL C30", "unidade": "m3", "quantidade": qtd(21.65), "valor_unitario": 51263},
+    {"nome": "Bloco EPS B8/30/125", "unidade": "un", "quantidade": qtd(382)},
+]}
+
+
+async def test_materiais_do_projeto_previa_grava_e_desfaz(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/materiais"
+    p = (await vila.http.post(url, headers=vila.h, json=MATERIAIS)).json()
+    assert p["aplicado"] is False and (p["novos"], p["atualizados"]) == (3, 0)
+    concreto = next(x for x in p["linhas"] if x["nome"].startswith("CONCRETO"))
+    assert concreto["unidade"] == "m³" and concreto["total"] == round(21.65 * 51263)  # m3 do tradutor vira m³
+    assert concreto["curva"] == "A"  # o maior valor da lista
+    assert (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json() == []  # prévia não grava
+
+    r = await vila.http.post(url, headers=vila.h, json={**MATERIAIS, "aplicar": True})
+    assert r.status_code == 200 and r.json()["aplicado"] is True, r.text
+    (reg,) = r.json()["registro_ids"]
+    entrada = await registro(vila, reg)
+    assert entrada["texto"] == "Importou os materiais do projeto estrutural: 3 novos, 0 atualizados (R$ 12.572,25)"
+    itens = {x["insumo"]["nome"]: x for x in (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json()}
+    aco = itens["ACO CA-50, 10,0 MM, VERGALHAO"]
+    # o projeto vira o "precisa": a conta do que falta comprar é a de sempre (nada em estoque, nada a caminho)
+    assert aco["insumo"]["precisa_ate_o_fim"] == qtd(220.3) and aco["conta"]["falta"] == qtd(220.3)
+
+    # mandar de novo atualiza (prévia mostra o antes), não duplica
+    p2 = (await vila.http.post(url, headers=vila.h, json=MATERIAIS)).json()
+    assert (p2["novos"], p2["atualizados"]) == (0, 3)
+
+    desfeito = await vila.http.post(f"/registro/{reg}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    assert desfeito.json()["texto"] == "Desfeito: importação dos materiais do projeto estrutural"
+    assert (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json() == []
+
+
+async def test_materiais_do_projeto_recusa_unidade_diferente_e_corpo_invalido(vila):
+    url = f"/obras/{vila.obra}/orcamento/materiais"
+    # a Casa Vila Nova já tem o cimento em sc: em kg é erro, e com erro nada é gravado
+    corpo = {"origem": "projeto estrutural", "aplicar": True,
+             "itens": [{"nome": "Cimento CP-II 50 kg", "unidade": "kg", "quantidade": qtd(10)}]}
+    p = (await vila.http.post(url, headers=vila.h, json=corpo)).json()
+    assert p["aplicado"] is False and "já está cadastrado em" in p["erros"][0]["mensagem"]
+    vazio = await vila.http.post(url, headers=vila.h, json={"origem": "projeto estrutural", "itens": []})
+    assert vazio.status_code == 422
+    zero = {"origem": "x", "itens": [{"nome": "Areia", "unidade": "m³", "quantidade": 0}]}
+    assert (await vila.http.post(url, headers=vila.h, json=zero)).status_code == 422
