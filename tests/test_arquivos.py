@@ -1,13 +1,15 @@
-"""Contrato da porta `Arquivos`: o mesmo conjunto roda contra memória, disco e banco (pedaços na porta de
-armazenamento, em memória e no Mongo do compose).
+"""Contrato da porta `Arquivos`: o mesmo conjunto roda contra memória, disco, banco (pedaços na porta de
+armazenamento, em memória e no Mongo do compose) e o Supabase Storage (um falso que responde como o de verdade).
 
 O que importa aqui é o isolamento: um cliente nunca lê o arquivo de outro, e caminho torto (travessia, subpasta,
 tenant estranho) falha alto em vez de gravar ou ler fora do lugar. No banco, também a integridade: pedaço trocado ou
 faltando não vira outra foto.
 """
+import json
 import secrets
 import uuid
 
+import httpx
 import pytest
 
 from canteiro_api.arquivos import (
@@ -18,18 +20,57 @@ from canteiro_api.arquivos import (
     ArquivosDisco,
     ArquivosMemoria,
     ArquivosNoBanco,
+    ArquivosSupabase,
+    ErroArquivos,
     _id_arquivo,
     criar_arquivos,
 )
 from canteiro_api.config import Config
 
+CHAVE_FALSA = "sb_secret_FALSA-de-teste-0000"
+URL_FALSA = "https://falso.supabase.co"
 
-@pytest.fixture(params=["memoria", "disco", "banco"])
+
+class StorageFalso:
+    """O pedaço da API REST do Storage que a porta usa: grava sem sobrescrever (409), lê autenticado (404 se não há)."""
+
+    def __init__(self, bucket="comprovantes"):
+        self.objetos: dict[str, bytes] = {}
+        self.bucket = bucket
+        self.pedidos: list[httpx.Request] = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        self.pedidos.append(req)
+        if req.headers.get("apikey") != CHAVE_FALSA:
+            return httpx.Response(401, json={"code": "InvalidJWT"})
+        caminho = req.url.path
+        if req.method == "POST" and caminho.startswith(f"/storage/v1/object/{self.bucket}/"):
+            chave = caminho.removeprefix(f"/storage/v1/object/{self.bucket}/")
+            if chave in self.objetos:
+                return httpx.Response(409, json={"code": "KeyAlreadyExists"})
+            self.objetos[chave] = req.content
+            return httpx.Response(200, json={"Key": f"{self.bucket}/{chave}"})
+        if req.method == "GET" and caminho.startswith(f"/storage/v1/object/authenticated/{self.bucket}/"):
+            chave = caminho.removeprefix(f"/storage/v1/object/authenticated/{self.bucket}/")
+            if chave not in self.objetos:
+                return httpx.Response(404, json={"code": "NoSuchKey"})
+            return httpx.Response(200, content=self.objetos[chave])
+        return httpx.Response(400, json={"code": "InvalidRequest"})
+
+
+def _supabase(storage=None):
+    return ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "comprovantes",
+                            transporte=httpx.MockTransport(storage or StorageFalso()))
+
+
+@pytest.fixture(params=["memoria", "disco", "banco", "supabase"])
 def arquivos(request, tmp_path, arm):
     if request.param == "memoria":
         return ArquivosMemoria()
     if request.param == "disco":
         return ArquivosDisco(str(tmp_path / "arquivos"))
+    if request.param == "supabase":
+        return _supabase()
     return ArquivosNoBanco(arm)
 
 
@@ -153,6 +194,85 @@ async def test_pedaco_adulterado_nao_vira_outra_foto(arm, tenant):
     assert await a.ler(tenant, "obra/c1.jpg") is None
 
 
+# --- Supabase Storage: bucket privado, tenant no prefixo, nunca sobrescreve ---
+
+async def test_supabase_guarda_com_o_tenant_no_prefixo_e_sem_sobrescrever():
+    storage = StorageFalso()
+    a = _supabase(storage)
+    tenant, obra = _ids()
+    await a.salvar(tenant, f"{obra}/c1.jpg", b"original")
+    assert list(storage.objetos) == [f"{tenant}/{obra}/c1.jpg"]
+    post = storage.pedidos[0]
+    assert post.headers["x-upsert"] == "false" and "authorization" not in post.headers   # chave nova: só no apikey
+    # o mesmo nome com outro conteúdo (bug de rota) não troca a foto já guardada
+    await a.salvar(tenant, f"{obra}/c1.jpg", b"trocado")
+    assert await a.ler(tenant, f"{obra}/c1.jpg") == b"original"
+
+
+def test_supabase_chave_antiga_vai_tambem_no_authorization():
+    a = ArquivosSupabase(URL_FALSA, "eyJ.falso.jwt", "comprovantes")
+    assert a._cabecalhos == {"apikey": "eyJ.falso.jwt", "Authorization": "Bearer eyJ.falso.jwt"}
+
+
+@pytest.mark.parametrize("resposta, esperado", [
+    (httpx.Response(400, json={"statusCode": "409", "error": "Duplicate"}), "salvo"),     # formato antigo do erro
+    (httpx.Response(400, json={"statusCode": "404", "error": "not_found"}), None),
+])
+async def test_supabase_entende_o_formato_antigo_de_erro(resposta, esperado):
+    a = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "comprovantes", transporte=httpx.MockTransport(lambda _: resposta))
+    tenant, obra = _ids()
+    if esperado == "salvo":
+        await a.salvar(tenant, f"{obra}/x.jpg", b"x")
+    else:
+        assert await a.ler(tenant, f"{obra}/x.jpg") is None
+
+
+async def test_supabase_falha_alto_sem_vazar_a_chave():
+    def recusa(req):
+        return httpx.Response(403, json={"message": f"chave {req.headers['apikey']} sem acesso"})
+
+    def cai(req):
+        raise httpx.ConnectError("sem rede", request=req)
+
+    tenant, obra = _ids()
+    for transporte in (recusa, cai):
+        a = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "comprovantes", transporte=httpx.MockTransport(transporte))
+        for chamada in (a.salvar(tenant, f"{obra}/x.jpg", b"x"), a.ler(tenant, f"{obra}/x.jpg")):
+            with pytest.raises(ErroArquivos) as e:
+                await chamada
+            assert CHAVE_FALSA not in str(e.value) and e.value.__cause__ is None
+
+
+def test_supabase_exige_https_chave_e_bucket():
+    for url, chave, bucket in [("http://x.supabase.co", CHAVE_FALSA, "b"), (URL_FALSA, "", "b"),
+                               (URL_FALSA, CHAVE_FALSA, "../b")]:
+        with pytest.raises(RuntimeError):
+            ArquivosSupabase(url, chave, bucket)
+
+
+async def test_rota_responde_503_quando_o_storage_cai(arm, config):
+    from canteiro_api.main import create_app
+
+    app = create_app(config.model_copy(update={"arquivos": "memoria"}), arm)
+
+    class Fora:
+        async def salvar(self, *a):
+            raise ErroArquivos("O Storage não respondeu ao gravar (ConnectError).")
+
+        async def ler(self, *a):
+            raise ErroArquivos("O Storage não respondeu ao ler (ConnectError).")
+
+    app.state.arquivos = Fora()
+
+    @app.get("/_teste_arquivo")
+    async def _rota():
+        await app.state.arquivos.ler("t", "o/x.jpg")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/_teste_arquivo")
+    assert r.status_code == 503 and "armazenamento" in json.loads(r.text)["detail"]
+
+
 # --- configuração: produção não sobe com arquivo em lugar que some ---
 
 def _config(**kw):
@@ -161,6 +281,15 @@ def _config(**kw):
 
 def test_padrao_e_o_banco():
     assert _config().arquivos == "banco"
+
+
+def test_producao_aceita_supabase_com_url_e_chave():
+    _config(ambiente="producao", arquivos="supabase", supabase_url=URL_FALSA,
+            supabase_chave_servico=CHAVE_FALSA).conferir()
+    for falta in ({"supabase_url": URL_FALSA}, {"supabase_chave_servico": CHAVE_FALSA},
+                  {"supabase_url": "http://x.supabase.co", "supabase_chave_servico": CHAVE_FALSA}):
+        with pytest.raises(RuntimeError, match="SUPABASE"):
+            _config(arquivos="supabase", **falta).conferir()
 
 
 @pytest.mark.parametrize("arquivos", ["disco", "memoria", "mongo"])
@@ -182,6 +311,8 @@ def test_criar_arquivos():
     from canteiro_api.armazenamento import ArmazenamentoMemoria
 
     assert isinstance(criar_arquivos("banco", "", ArmazenamentoMemoria()), ArquivosNoBanco)
+    assert isinstance(criar_arquivos("supabase", "", supabase_url=URL_FALSA, supabase_chave=CHAVE_FALSA),
+                      ArquivosSupabase)
     with pytest.raises(RuntimeError, match="armazenamento"):
         criar_arquivos("banco", "")
     with pytest.raises(RuntimeError, match="desconhecido"):

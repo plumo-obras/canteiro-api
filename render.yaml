@@ -16,7 +16,7 @@ services:
         sync: false
       - key: MONGO_DB
         value: canteiro
-      - key: AMBIENTE             # producao: a API recusa subir sem ARQUIVOS=banco e ARMAZENAMENTO=mongo
+      - key: AMBIENTE             # producao: a API recusa subir sem ARQUIVOS=banco|supabase e ARMAZENAMENTO=mongo
         value: producao
       - key: JWT_SEGREDO
         generateValue: true
@@ -29,7 +29,11 @@ services:
       - key: SEED_ADMIN_EMAIL
         sync: false
       - key: ARQUIVOS             # fotos dos comprovantes no próprio Mongo: o disco do plano gratuito some a cada deploy
-        value: banco
+        value: banco              # supabase = bucket privado (seção 9 do docs/deploy.md), com as três abaixo
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_CHAVE_SERVICO
+        sync: false
       - key: IP_CABECALHO         # o Render põe a Cloudflare na frente e não limpa o X-Forwarded-For do cliente
         value: cf-connecting-ip
       - key: CORS_ORIGENS         # quem chama POST /lista-espera do navegador (a landing da Plumo). Nunca "*".
