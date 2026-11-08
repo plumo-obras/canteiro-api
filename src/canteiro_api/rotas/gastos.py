@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 
 from canteiro_dominio.modelos import StatusComprovante
 
+from .. import vau as tabela_vau
 from ..auth import UsuarioAtual, exigir, usuario_atual, usuario_pelo_agente
 from ..esquemas import (
     ComprovanteDetalhe,
@@ -17,16 +18,19 @@ from ..esquemas import (
     EtapaExtraCorpo,
     EtapaExtraSaida,
     EtapaNaArvoreSaida,
+    FiscalGastoCorpo,
     GastoReclassificado,
     GastoSaida,
     LeituraCorpo,
+    LinhaVAU,
     ReclassificarCorpo,
     ResumoGastos,
     TopicoCorpo,
     TopicoSaida,
+    TributosObra,
 )
 from ..modelos import Papel
-from ..servicos import gastos
+from ..servicos import gastos, tributos
 
 r = APIRouter(tags=["gastos"])
 admin = exigir(Papel.ADMIN)
@@ -147,3 +151,22 @@ async def reclassificar(gasto_id: str, corpo: ReclassificarCorpo, u: UsuarioAtua
 async def resumo(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await gastos.resumo(arm, u, obra_id)
 
+
+
+@r.patch("/gastos/{gasto_id}/fiscal", response_model=GastoReclassificado, tags=["tributos"])
+async def classificar_fiscal(gasto_id: str, corpo: FiscalGastoCorpo, u: UsuarioAtual = Depends(admin),
+                             arm=Depends(_arm)):
+    return await gastos.classificar_fiscal(arm, u, gasto_id, corpo)
+
+
+@r.get("/obras/{obra_id}/tributos", response_model=TributosObra, tags=["tributos"])
+async def tributos_da_obra(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await tributos.tributos_da_obra(arm, u, obra_id)
+
+
+@r.get("/vau", response_model=list[LinhaVAU], tags=["tributos"])
+async def tabela_vau_da_uf(uf: str = Query(min_length=2, max_length=2), destinacao: str = Query(max_length=40),
+                           u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    # tabela pública da Receita, a mesma para todo cliente: qualquer papel lê, mais novo primeiro
+    linhas = await tabela_vau.linhas_de(arm, uf.upper(), destinacao)
+    return sorted(linhas, key=lambda x: x["mes"], reverse=True)

@@ -45,6 +45,20 @@ class Obra(Documento):
     numero_contrato: str = ""
     bdi: int = 0                           # centésimos de ponto percentual: 22,91% = 2291; 0 = não informado
     data_base: str | None = None           # "AAAA-MM": mês dos preços de referência (SINAPI etc.)
+    # Dados fiscais (`tributos`): INSS da aferição (CNO/SERO) e IBS/CBS. Opcionais como o resto do onboarding.
+    cno: str = ""                          # matrícula no Cadastro Nacional de Obras (12 dígitos)
+    proprietario: str | None = None        # pf | pj: o fator social do INSS só vale para pessoa física
+    destinacao: str | None = None          # uma de `tributos.DESTINACOES` (as da tabela VAU do SERO)
+    material: str | None = None            # alvenaria | mista | madeira (percentual da mão de obra presumida)
+    area_complementar: Milesimos = 0       # m² complementares cobertos (piscina/quadra cobertas, garagem fora da casa)
+    area_descoberta: Milesimos = 0         # m² complementares descobertos (piscina, quadra)
+    categoria: str | None = None           # obra_nova | acrescimo | reforma | demolicao; None = da tipologia
+    dctfweb_em_dia: bool | None = None     # DCTFWeb entregue em todos os meses da obra (fator de ajuste do INSS)
+    vau: Centavos = 0                      # VAU à mão, em centavos por m²; 0 = usar a tabela VAU do SERO
+    vau_referencia: str | None = None      # "AAAA-MM" do VAU usado
+    finalidade: str | None = None          # uso_proprio | venda | prestacao_servico (IBS/CBS)
+    valor_terreno: Centavos = 0            # redutor de ajuste do IBS/CBS na venda
+    unidades: int = 0                      # imóveis residenciais vendidos (redutor social do IBS/CBS)
 
 
 class TipoVersao(StrEnum):
@@ -381,6 +395,13 @@ class Gasto(Documento):
     quem: str = ""
     usuario_id: str | None = None
     estornado: bool = False                # desfeito pelo registro: sai das contas, o documento fica
+    # Para os tributos: o que este pagamento comprova no INSS da obra (`tributos.NATUREZAS`; None = a classificar)
+    # e o IBS/CBS destacado na nota, que vira crédito.
+    natureza_fiscal: str | None = None
+    ibs_cbs: Centavos = 0
+    # Na nota de mão de obra: traz o CNO da obra (sem ele a Receita não liga a nota à obra) e a retenção de 11%.
+    nf_cno: bool | None = None
+    retencao: Centavos = 0
 
 
 class UsoIA(Documento):

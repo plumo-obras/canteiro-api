@@ -25,6 +25,10 @@ ROTULOS = {
     "area_construida": "área", "pavimentos": "pavimentos", "padrao": "padrão", "regime": "regime",
     "cliente": "cliente", "inicio": "início", "prazo_meses": "prazo", "verba": "valor do contrato",
     "numero_contrato": "nº do contrato", "bdi": "BDI", "data_base": "data-base",
+    "cno": "CNO", "proprietario": "proprietário", "destinacao": "destinação", "material": "material",
+    "area_complementar": "área complementar", "area_descoberta": "área descoberta", "vau": "VAU",
+    "vau_referencia": "mês do VAU", "finalidade": "finalidade", "valor_terreno": "valor do terreno",
+    "unidades": "unidades", "categoria": "categoria", "dctfweb_em_dia": "DCTFWeb em dia",
 }
 
 

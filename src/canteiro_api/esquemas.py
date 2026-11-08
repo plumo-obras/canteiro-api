@@ -326,6 +326,14 @@ class RecusarCorpo(Entrada):
 Tipologia = Literal["casa", "sobrado", "predio", "galpao", "reforma", "comercial", "outro"]
 Padrao = Literal["baixo", "normal", "alto"]
 Regime = Literal["empreitada", "administracao"]
+Proprietario = Literal["pf", "pj"]
+Destinacao = Literal["residencial_unifamiliar", "residencial_multifamiliar", "casa_popular", "conjunto_habitacional",
+                     "comercial", "edificio_garagens", "galpao"]
+Material = Literal["alvenaria", "mista", "madeira"]
+Finalidade = Literal["uso_proprio", "venda", "prestacao_servico"]
+NaturezaFiscal = Literal["folha", "mao_de_obra_nf", "gps", "autonomo_mei", "pre_moldado", "concreto_usinado",
+                         "mao_de_obra_sem_nf", "material", "equipamento", "outros"]
+CategoriaObra = Literal["obra_nova", "acrescimo", "reforma", "demolicao"]
 
 
 class _DadosObra(Entrada):
@@ -346,6 +354,30 @@ class _DadosObra(Entrada):
     numero_contrato: str = Field("", max_length=40)
     bdi: int = Field(0, ge=0, le=10_000, description="centésimos de ponto percentual (22,91% = 2291)")
     data_base: str | None = Field(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="AAAA-MM")
+    # dados fiscais (tributos)
+    cno: str = Field("", max_length=15, description="matrícula CNO: 12 dígitos, com ou sem pontuação")
+    proprietario: Proprietario | None = None
+    destinacao: Destinacao | None = None
+    material: Material | None = None
+    area_complementar: int = Field(0, ge=0, le=10_000_000_000, description="m² em milésimos")
+    area_descoberta: int = Field(0, ge=0, le=10_000_000_000, description="m² em milésimos")
+    categoria: CategoriaObra | None = Field(None, description="null = da tipologia (reforma) ou obra nova")
+    dctfweb_em_dia: bool | None = Field(None, description="DCTFWeb entregue em todos os meses da obra")
+    vau: int = Field(0, ge=0, le=10_000_000, description="VAU à mão, em centavos por m²; 0 = o da tabela do SERO")
+    vau_referencia: str | None = Field(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="AAAA-MM")
+    finalidade: Finalidade | None = None
+    valor_terreno: int = Field(0, ge=0, description="centavos")
+    unidades: int = Field(0, ge=0, le=100_000)
+
+    @field_validator("cno")
+    @classmethod
+    def _cno(cls, v: str) -> str:
+        # guardado só com os dígitos: "90.012.34567/89" e "900123456789" são a mesma obra
+        v = v.strip()
+        digitos = re.sub(r"[.\-/ ]", "", v)
+        if v and not re.fullmatch(r"\d{12}", digitos):
+            raise ValueError("O CNO tem 12 dígitos.")
+        return digitos
 
     @field_validator("cidade", "cep", "endereco", "cliente", "numero_contrato")
     @classmethod
@@ -1133,6 +1165,104 @@ class ReclassificarCorpo(Entrada):
 
 class GastoReclassificado(GastoSaida):
     registro_id: str
+
+
+class FiscalGastoCorpo(Entrada):
+    natureza_fiscal: NaturezaFiscal | None = Field(description="o que o pagamento comprova no INSS; null = a "
+                                                               "classificar")
+    ibs_cbs: int = Field(0, ge=0, description="IBS/CBS destacado na nota, em centavos (vira crédito)")
+    nf_cno: bool | None = Field(None, description="a nota de mão de obra traz o CNO e o endereço da obra")
+    retencao: int = Field(0, ge=0, description="retenção de 11% destacada na nota, em centavos")
+
+
+# --- tributos (estimativa) ---
+
+class INSSObra(BaseModel):
+    situacao: Literal["calculado", "isenta", "sem_dados"]
+    motivos: list[str]
+    area_equivalente: int = Field(description="área para cálculo do SERO, m² em milésimos")
+    custo_obra: int = Field(description="COD: VAU × área para cálculo, centavos")
+    rmt: int = Field(description="mão de obra presumida não decadente, centavos, com todas as reduções")
+    fator_social: int = Field(description="centésimos de ponto (10000 = sem redução)")
+    percentual_rmt: int
+    percentual_categoria: int
+    pre_moldado: Literal["reduziu", "virou_mista"] | None
+    nao_decadente: int = Field(description="parte não decadente dos meses da obra, centésimos de ponto")
+    comprovado: int = Field(description="o que abate da RMT: remunerações corrigidas pela Selic + concreto")
+    comprovado_por_natureza: dict[str, int]
+    credito_concreto: int
+    credito_autonomo: int = Field(description="20% do autônomo/MEI declarado, abatido do débito")
+    base: int
+    inss_sem_fator_ajuste: int
+    inss: int
+    fator_ajuste: Literal["nao_se_aplica", "aplicado", "atingido", "nao_atingido"]
+    fator_ajuste_minimo: int
+    creditos_fator_ajuste: int
+    falta_fator_ajuste: int = Field(description="remuneração declarada que falta para o INSS da aferição zerar")
+    economia_com_notas: int = Field(description="quanto o INSS cairia se a mão de obra sem nota (ou com nota sem o "
+                                                "CNO) fosse comprovada")
+    mao_de_obra_sem_nf: int
+    notas_sem_cno: int
+    selic_faltando: list[str]
+    avisos: list[str]
+    linhas: list[str]
+
+
+class IBSCBSObra(BaseModel):
+    situacao: Literal["calculado", "nao_incide", "sem_dados"]
+    motivos: list[str]
+    aliquota_efetiva: int
+    valor_operacao: int
+    redutor_ajuste: int
+    redutor_social: int
+    base: int
+    debito: int
+    creditos: int
+    a_pagar: int
+    transicao: str
+    linhas: list[str]
+
+
+class GastoAClassificar(BaseModel):
+    id: str
+    valor: int
+    data_pagamento: str
+    favorecido: str
+    descricao: str
+    natureza_fiscal: str | None
+    nf_cno: bool | None = None
+
+
+class LinhaVAU(BaseModel):
+    uf: str
+    mes: str = Field(description="AAAA-MM")
+    destinacao: Destinacao
+    vau: int = Field(description="centavos por m²")
+    fonte: str
+
+
+class TributosObra(BaseModel):
+    obra_id: str
+    cno: str
+    vau_referencia: str | None = Field(description="AAAA-MM do VAU usado na conta")
+    vau_usado: int = Field(0, description="centavos por m²; 0 = sem VAU (a conta fica sem_dados)")
+    vau_fonte: Literal["informado", "tabela_sero"] | None = Field(
+        None, description="informado = o VAU à mão da obra; tabela_sero = o vigente da tabela VAU para a UF e a "
+                          "destinação da obra")
+    destinacao: str | None = Field(None, description="a destinação usada (a da obra, ou a que sai da tipologia)")
+    categoria: str = Field("obra_nova", description="a categoria usada (a da obra, ou reforma pela tipologia)")
+    afericao: str = Field(description="AAAA-MM: o mês em que a conta supõe a aferição (hoje)")
+    selic_ate: str | None = Field(None, description="AAAA-MM da última Selic carregada")
+    inss: INSSObra
+    ibs_cbs: IBSCBSObra
+    a_classificar: int = Field(description="gastos avulsos sem natureza fiscal (contam zero no INSS)")
+    valor_a_classificar: int
+    sem_nota: list[GastoAClassificar] = Field(description="até 20 pagamentos de mão de obra sem nota (ou com nota "
+                                                          "sem o CNO da obra), maiores primeiro: o que mais reduz o "
+                                                          "INSS se for comprovado")
+    pendentes: list[GastoAClassificar] = Field(description="até 20 gastos a classificar, maiores primeiro")
+    parametros: dict[str, Any] = Field(description="percentuais usados (inss, ibs_cbs), com a fonte")
+    aviso: str
 
 
 class Confirmacao(BaseModel):

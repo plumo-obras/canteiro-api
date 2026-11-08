@@ -69,6 +69,15 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   **valor do contrato** com o cliente; a tela não diz mais "verba do dono") · `numero_contrato` (≤ 40, `""`) · `bdi` em
   centésimos de ponto percentual (22,91% = 2291; 0 = não informado; ≤ 10000) · `data_base` `"AAAA-MM"` ou `null` (mês
   dos preços de referência).
+  Dados fiscais (todos opcionais; ver **Tributos da obra**): `cno` (só os 12 dígitos; aceita pontuação na entrada,
+  outro tamanho → 422; `""` = não informado) · `proprietario` ∈ `pf | pj` · `destinacao` ∈ `residencial_unifamiliar |
+  residencial_multifamiliar | casa_popular | conjunto_habitacional | comercial | edificio_garagens | galpao` (as da
+  tabela VAU do SERO) · `material` ∈ `alvenaria | mista | madeira` (os quatro podem ser
+  `null`) · `area_complementar`, `area_descoberta` em milésimos de m² · `vau` à mão, em centavos por m² (0 = usar a tabela VAU do SERO) ·
+  `vau_referencia` `"AAAA-MM"` ou `null` · `finalidade` ∈ `uso_proprio | venda | prestacao_servico` ou `null` ·
+  `valor_terreno` em centavos · `unidades` (imóveis residenciais vendidos) · `categoria` ∈ `obra_nova | acrescimo |
+  reforma | demolicao` ou `null` (= reforma se a `tipologia` é reforma, senão obra nova) · `dctfweb_em_dia` `true |
+  false | null` (a DCTFWeb foi entregue em todos os meses da obra: condição do fator de ajuste).
 - `POST /obras` (admin) `{nome, chave_idempotencia, …os campos acima, todos opcionais}` → `Obra + registro_id`. Nasce
   `em_orcamento`. ID derivado da chave: a repetição devolve a mesma obra (201 na 1ª, 200 nas repetidas); a mesma chave
   com outro nome → 409. Registro "Criou a obra X", **sem desfazer** (a porta de armazenamento não apaga).
@@ -501,6 +510,78 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   Fundação para 2 FUNDAÇÕES", desfazer `reclassificar_gasto`: volta para a etapa de antes (mesmo que ela não esteja
   mais na árvore), com Refazer; 409 se a etapa do gasto mudou de novo depois ou se ele foi estornado.
 
+## Tributos da obra (estimativa: INSS da aferição e IBS/CBS)
+
+A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS da aferição** (CNO/SERO, IN RFB
+2.021/2021) e o **IBS/CBS** (LC 214/2025, regime de bens imóveis). É estimativa: todos os percentuais vêm em
+`parametros`, com a fonte, para o contador conferir; a conta é do domínio (`canteiro_dominio.tributos`).
+
+- **Tabela VAU (SERO).** O valor do m² que a aferição usa sai por UF, mês e destinação (não pelo padrão), na tela
+  "Consultar Tabela VAU" do SERO. A API guarda a tabela no tenant de sistema (um documento por UF:mês:destinação),
+  importada por `python -m canteiro_api.vau ARQUIVO` (o JSON de `src/canteiro_api/dados/` ou o texto da tela do SERO
+  copiado como está; coluna ou valor estranho recusa o arquivo inteiro); o seed importa o JSON do repositório.
+  `scripts/coletar-vau-sero.sh` coleta as 27 UFs no portal em que a pessoa entrou no e-CAC (ver
+  `docs/tributos-integracao.md`).
+  `GET /vau?uf=SP&destinacao=galpao` (qualquer papel) → `[{uf, mes: "AAAA-MM", destinacao, vau, fonte}]`, mais novo
+  primeiro.
+- **Selic (art. 31).** A remuneração comprovada é corrigida pela Selic acumulada no mês (Banco Central, SGS 4390),
+  guardada no tenant de sistema, um documento por ano (`indices/selic:AAAA`, `{meses: {"AAAA-MM": centésimos de
+  ponto}}`, só meses fechados). `python -m canteiro_api.selic` baixa do BCB; com `ARQUIVO`, lê o JSON de `dados/`; o
+  seed importa o JSON do repositório.
+- `GET /obras/{obra_id}/tributos` (qualquer papel) → `{obra_id, cno, vau_referencia, vau_usado, vau_fonte, destinacao,
+  categoria, afericao: "AAAA-MM", selic_ate, inss, ibs_cbs, a_classificar, valor_a_classificar, sem_nota, pendentes,
+  parametros: {inss, ibs_cbs}, aviso}`. A conta supõe a obra aferida no mês corrente (`afericao`).
+  - `inss` = `{situacao: calculado|isenta|sem_dados, motivos, area_equivalente, custo_obra, rmt, fator_social,
+    percentual_rmt, percentual_categoria, pre_moldado: reduziu|virou_mista|null, nao_decadente, comprovado,
+    comprovado_por_natureza: {natureza: centavos}, credito_concreto, credito_autonomo, base, inss_sem_fator_ajuste,
+    inss, fator_ajuste: nao_se_aplica|aplicado|atingido|nao_atingido, fator_ajuste_minimo, creditos_fator_ajuste,
+    falta_fator_ajuste, economia_com_notas, mao_de_obra_sem_nf, notas_sem_cno, selic_faltando, avisos, linhas}`.
+    A conta segue o Manual do SERO (IN RFB 2.021/2021):
+    - área para cálculo (`area_equivalente`) = principal × equivalência da destinação (unifamiliar 89% até 1.000 m²,
+      85% acima; multifamiliar 90/86%; comercial e edifício garagem 86/83% (3.000 m²); galpão 95%; casa popular e
+      conjunto 98%) + `area_complementar` (coberta) × 50% + `area_descoberta` × 25%; `custo_obra` = VAU × essa área.
+    - `rmt` = custo × tipo (alvenaria 20%, mista/madeira 15%; casa popular e conjunto 12%/7%) × categoria (reforma 35%,
+      demolição 10%) × edifício garagem 80% × fator social (toda obra de `pf`, pela área total: 20/40/55/70/90%) ×
+      pré-moldado (notas ≥ 40% do custo → 30%; abaixo disso a alvenaria conta como mista) × `nao_decadente` (meses
+      desde `inicio` fora da decadência: aferida em 2026, decaíram os anos até 2020).
+    - `comprovado` = remunerações comprovadas, corrigidas pela Selic (do 2º mês depois do pagamento ao mês anterior +
+      1%), sem as decadentes: folha 100%, nota de mão de obra **com `nf_cno`** 40%, GPS ÷ 36,8% — + `credito_concreto`
+      (usou concreto usinado: custo × Anexo I da UF/destinação × 5%, × 35% na reforma, 0 na demolição).
+      Autônomo/MEI declarado não abate da RMT: `credito_autonomo` = 20% dele sai do débito (a parte patronal).
+    - base = RMT − comprovado (≥ 0); `inss_sem_fator_ajuste` = base × 36,8% − `credito_autonomo`.
+    - fator de ajuste (só `pf`): remunerações (com autônomo/MEI) ≥ 50% da RMT (área total até 350 m²) ou 70% (acima).
+      Atingido e `dctfweb_em_dia: true` → `aplicado`, `inss: 0`; atingido sem a DCTFWeb confirmada → `atingido` (o
+      `inss` segue cheio, com aviso); `falta_fator_ajuste` = remuneração declarada que ainda falta.
+    - `isenta` = `pf`, unifamiliar ou casa popular, padrão baixo, `finalidade: uso_proprio`, até 70 m² de área total
+      e nenhuma mão de obra paga (folha, nota, sem nota, GPS, autônomo). `sem_dados` sem área ou sem VAU.
+    - `economia_com_notas` = quanto o INSS cairia se a mão de obra sem nota (`mao_de_obra_sem_nf`) e a com nota sem o
+      CNO (`notas_sem_cno`) fossem comprovadas. `avisos`: nota sem o CNO, empresa (`pj`) com nota de mão de obra sem
+      `retencao`, pré-moldado abaixo de 40%, fator de ajuste atingido sem DCTFWeb, mês sem Selic (`selic_faltando`).
+    Sem `destinacao`, ela sai da `tipologia` (casa/sobrado → unifamiliar, predio → multifamiliar…).
+    O VAU é o `vau` à mão da obra (`vau_fonte: informado`, `vau_referencia` = o mês informado) ou, sem ele, o vigente
+    da tabela para a `uf` e a destinação, o do mês mais recente até hoje (`vau_fonte: tabela_sero`); sem UF ou sem
+    linha na tabela, `vau_usado: 0`, `vau_fonte: null` e `inss.situacao: sem_dados`.
+  - `ibs_cbs` = `{situacao: calculado|nao_incide|sem_dados, motivos, aliquota_efetiva, valor_operacao,
+    redutor_ajuste, redutor_social, base, debito, creditos, a_pagar, transicao, linhas}`. Regime pleno: alíquota de
+    referência 26,5% × (100% − 50% de redução de imóveis). `venda`: base = `verba` − `valor_terreno` − R$ 100.000 por
+    unidade residencial; `prestacao_servico`: base = `verba`; a pagar = débito − `creditos` (soma do `ibs_cbs` dos
+    gastos), nunca negativo. `uso_proprio` → `nao_incide`. `transicao` = a frase do ano corrente (2026 teste…2033).
+  - `linhas`: a conta pronta, linha a linha, para a tela e o agente citarem.
+  - `a_classificar`/`valor_a_classificar`: gastos avulsos sem natureza fiscal (contam zero no INSS); `pendentes` e
+    `sem_nota`: até 20 de cada, maiores primeiro, `{id, valor, data_pagamento, favorecido, descricao,
+    natureza_fiscal, nf_cno}`; `sem_nota` traz a mão de obra sem nota e a com nota sem o CNO. Gasto de pedido conta
+    como `material` sem precisar classificar.
+- `PATCH /gastos/{gasto_id}/fiscal` `{natureza_fiscal, ibs_cbs?=0, nf_cno?=null, retencao?=0}` (admin) → `Gasto +
+  {etapa_nome, etapa_origem, registro_id}`. `natureza_fiscal` ∈ `folha | mao_de_obra_nf | gps | autonomo_mei |
+  pre_moldado | concreto_usinado | mao_de_obra_sem_nf | material | equipamento | outros` ou `null` (a classificar).
+  `nf_cno` (a nota traz o CNO e o endereço da obra) e `retencao` (os 11% destacados, centavos) só ficam na
+  `mao_de_obra_nf`; nas outras naturezas voltam a `null`/0. `ibs_cbs` e `retencao` (centavos, ≤ valor do gasto, senão
+  422): o IBS/CBS destacado vira crédito. Nada mudou → 422; estornado → 409; viewer → 403. Registro "Classificou o
+  gasto de R$ 10.000,00 (descrição) como mão de obra com nota (com o CNO da obra, retenção R$ 1.100,00)", desfazer
+  `fiscal_gasto` com Refazer (409 se a classificação mudou de novo depois).
+- `Gasto` ganha `natureza_fiscal` (`null` = a classificar), `ibs_cbs` (centavos, 0), `nf_cno` (`null`) e `retencao`
+  (centavos, 0).
+
 ## Propostas, aprovação e registro
 
 - `POST /propostas` `{obra_id, tipo, titulo, conta, justificativa, fonte, dados, chave_idempotencia?}` → `Proposta +
@@ -643,6 +724,7 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 | `consultar_orcamento(obra_id, busca?)` | consulta | `GET /obras/{id}/orcamento` |
 | `consultar_cronograma(obra_id, mes?)` | consulta | `GET /obras/{id}/cronograma` (por etapa; `mes` detalha o que está previsto no mês) |
 | `listar_fornecedores(busca?)` | consulta | `GET /fornecedores` |
+| `consultar_tributos(obra_id)` | consulta | `GET /obras/{id}/tributos` (INSS da aferição e IBS/CBS estimados, com as linhas da conta e o que reduz) |
 | `calcular(expressao, unidade_resultado?)` | consulta | nenhuma (calculadora local em Decimal, sem `eval`) |
 | `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, justificativa, valor? \| preco_unitario?, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido; com `preco_unitario` o total sai da calculadora e volta em `conta_do_valor`) |
 | `propor_entrega(obra_id, pedido_id, linhas, justificativa, nf_numero?, nf_data?, nf_valor?, confirmar_excesso?)` | propõe | `POST /propostas` (registrar_entrega; `nf_data` aceita "hoje"/"ontem", resolvido no fuso de Brasília, e com número de nota sem data fica hoje) |
