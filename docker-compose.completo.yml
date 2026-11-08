@@ -1,7 +1,8 @@
-# O produto inteiro em contêineres, com os três repositórios clonados lado a lado:
-#   canteiro-api/  canteiro-agente/  canteiro-web/
+# O produto inteiro em contêineres, com os repositórios clonados lado a lado:
+#   canteiro-api/  canteiro-agente/  canteiro-web/  canteiro-cad/
 # Subir (de dentro de canteiro-api):  docker compose -f docker-compose.yml -f docker-compose.completo.yml up -d --build
-# Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY) vêm do .env, nunca daqui.
+# Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY, TRADUTOR_CHAVE) vêm do
+# .env, nunca daqui.
 # Sem ANTHROPIC_API_KEY o agente sobe no modelo de roteiro (MODELO_ROTEIRO=1, 0 tokens).
 services:
   agente:
@@ -16,13 +17,28 @@ services:
     depends_on:
       api: { condition: service_healthy }
 
+  # Tradutor de pranchas (PDF/imagem da prancha estrutural -> dados e modelo 3D da tela Projeto 3D). Não conhece
+  # usuário nem banco: só o Next fala com ele, com a TRADUTOR_CHAVE. Leitura de imagem usa vários núcleos por prancha.
+  tradutor:
+    build: ../canteiro-cad
+    environment:
+      TRADUTOR_API_KEYS: ${TRADUTOR_CHAVE:-}
+      TRADUTOR_WORKERS: ${TRADUTOR_WORKERS:-2}
+    ports: ["8200:8000"]
+    volumes: ["tradutor-dados:/dados"]
+
   web:
     build: ../canteiro-web
     env_file: [{ path: .env, required: false }]
     environment:
       API_URL: http://api:8000
       AGENTE_URL: http://agente:8100
+      TRADUTOR_URL: http://tradutor:8000
     ports: ["3000:3000"]
     depends_on:
       api: { condition: service_healthy }
       agente: { condition: service_healthy }
+      tradutor: { condition: service_healthy }
+
+volumes:
+  tradutor-dados:
