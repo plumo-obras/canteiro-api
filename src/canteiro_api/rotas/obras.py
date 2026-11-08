@@ -367,7 +367,11 @@ async def ver_cronograma(obra_id: str, u: UsuarioAtual = Depends(usuario_atual),
 async def ver_desembolso(obra_id: str, hoje: date | None = Query(None, description="AAAA-MM-DD; padrão: hoje em São "
                                                                                   "Paulo"),
                          u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
-    return await desembolso.desembolso_da_obra(arm, u.tenant_id, obra_id, hoje or datetime.now(estoque.FUSO).date())
+    agora = datetime.now(estoque.FUSO).date()
+    # a série vai do 1º pagamento até `hoje`: sem teto, ?hoje=9999-12-31 viraria 95 mil meses de resposta
+    if hoje and abs(hoje.year - agora.year) > 10:
+        raise ErroNegocio("A data de referência tem de estar a até 10 anos de hoje.")
+    return await desembolso.desembolso_da_obra(arm, u.tenant_id, obra_id, hoje or agora)
 
 
 @r.put("/obras/{obra_id}/cronograma", response_model=CronogramaObra, tags=["cronograma"])

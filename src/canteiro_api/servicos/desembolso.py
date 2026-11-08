@@ -14,16 +14,23 @@
 
 Dois cenários, porque nenhum acerta sozinho. **Pelo cronograma** supõe que, empurrado o atraso, o resto anda no ritmo
 planejado. **No ritmo atual** estica o resto pelo ritmo medido até aqui (% medido ÷ % previsto na última medição): uma
-obra que andou a 30% do planejado leva ~3 meses para cada mês de plano. No teste com uma obra pública real (creche
-FNDE, pagamentos do TCE-RS), o primeiro previa sair em 12 meses o dobro do que saiu; o segundo ficou perto em 3 de 4
-pontos. Sem medição só há o primeiro (o gasto não mede ritmo: material comprado adiantado pareceria obra adiantada).
+obra que andou a 30% do planejado leva ~3 meses para cada mês de plano. O que se estica é o TRABALHO que falta, não o
+calendário: cada mês do plano dura o quanto ainda falta dele (10% de um mês = 10% do tempo), e o atrasado entra em fila
+a partir de hoje. Assim um resto de R$ 10 nas Preliminares não empurra o fim da obra. Sem medição só há o primeiro (o
+gasto não mede ritmo: material comprado adiantado pareceria obra adiantada).
+
+No teste com uma obra pública real (creche FNDE, pagamentos do TCE-RS, 4 pontos da obra), o primeiro previa sair em 6
+meses de 2 a 15 vezes o que saiu; o segundo errou bem menos (o mais perto: 545 mil previstos, 510 mil reais), e o
+término real ficou entre os dois em 3 dos 4 pontos (no 4º, 2 meses depois do "no ritmo").
 
 **Pago** = os gastos confirmados (avulsos e pagamentos de pedido) pelo mês do pagamento: é dinheiro que saiu da conta.
 O realizado conta o pedido pela entrega; a diferença (entregue e sem pagamento registrado) também é devida agora e cai
 no mês corrente. Pago adiantado (pagou antes de receber) desconta dos primeiros meses, sem deixar mês negativo.
 """
+import math
 from dataclasses import dataclass, field
 from datetime import date
+from fractions import Fraction
 
 from ..esquemas import DesembolsoObra, EtapaDesembolso, MesDesembolso, TotaisDesembolso
 from . import cronograma as cron
@@ -51,14 +58,14 @@ def restante_do_plano(percentuais: list[int], executado: int) -> list[int]:
     return saida
 
 
-def repartir(valor: int, pesos: dict[int, int]) -> dict[int, int]:
-    """`valor` pelos meses na proporção dos pesos. Arredonda o acumulado, como `cronograma.valores_mes`: a soma fecha
-    no centavo."""
+def repartir(valor: int, pesos: dict[int, int | Fraction]) -> dict[int, int]:
+    """`valor` pelos meses na proporção dos pesos (inteiros ou frações). Arredonda o acumulado, como
+    `cronograma.valores_mes`: a soma fecha no centavo."""
     total = sum(pesos.values())
     saida, acum, antes = {}, 0, 0
     for k in sorted(pesos):
         acum += pesos[k]
-        agora = (valor * acum + total // 2) // total
+        agora = math.floor(Fraction(valor) * acum / total + Fraction(1, 2))
         saida[k] = agora - antes
         antes = agora
     return saida
@@ -67,28 +74,37 @@ def repartir(valor: int, pesos: dict[int, int]) -> dict[int, int]:
 RITMO_MINIMO = 1000                      # 10% do planejado: abaixo disso a obra está parada, e esticar não informa
 
 
-def _espalhar(pesos_plano: dict[int, int], hoje: int, ritmo: int, origem: int) -> dict[int, int]:
-    """Leva o peso de cada mês do plano (já empurrado pelo atraso) para o calendário. No ritmo do plano (10000), o
-    mês k cai em k, nunca antes de hoje: o que já devia ter saído cai agora. No ritmo r, o resto do plano se estica por
-    10000/r a partir de hoje, na ordem do plano: o mês k ocupa [hoje + (k − origem)·10000/r, + 10000/r) e o peso se
-    divide pelos meses do calendário que esse intervalo cobre. `origem` = o primeiro mês com resto na obra toda (ou
-    hoje, se for depois); com ela, o atrasado entra em fila em vez de se empilhar no mês corrente, e as etapas mantêm
-    a sequência entre si."""
-    saida: dict[int, int] = {}
-    for k, w in pesos_plano.items():
-        if ritmo >= CEM:
-            m = max(hoje, k)
-            saida[m] = saida.get(m, 0) + w * CEM
+def _fila_no_ritmo(resto_mes: dict[int, int], cheio_mes: dict[int, int], hoje: int,
+                   ritmo: int) -> dict[int, tuple[Fraction, Fraction]]:
+    """O intervalo do calendário (em meses, fracionário) que cada mês do plano ocupa no ritmo atual. O mês k dura
+    (o que falta dele ÷ o que ele tinha) × 10000/ritmo e começa quando o anterior acaba, nunca antes de hoje nem do
+    próprio mês (já empurrado pelo atraso). Mês sem resto não ocupa tempo; intervalo vazio entre hoje e um mês futuro
+    não é esticado (o atraso já mede a lentidão)."""
+    saida, cursor = {}, Fraction(hoje)
+    for k in sorted(resto_mes):
+        if resto_mes[k] <= 0:
             continue
-        # em décimos de milésimo de mês, para ficar em inteiros: a = início, b = fim do intervalo
-        a = hoje * CEM + (k - origem) * CEM * CEM // ritmo
-        b = a + CEM * CEM // ritmo
-        m = a // CEM
-        while m * CEM < b:
-            parte = min(b, (m + 1) * CEM) - max(a, m * CEM)
-            saida[m] = saida.get(m, 0) + w * parte * ritmo // CEM    # w·CEM no total do intervalo
-            m += 1
+        fracao = Fraction(resto_mes[k], cheio_mes[k]) if cheio_mes.get(k) else Fraction(1)
+        ini = max(cursor, Fraction(k))
+        cursor = ini + fracao * CEM / ritmo
+        saida[k] = (ini, cursor)
     return saida
+
+
+def _no_calendario(valores: dict[int, int], intervalos: dict[int, tuple[Fraction, Fraction]]) -> dict[int, Fraction]:
+    """Espalha o valor de cada mês do plano pelos meses do calendário que o intervalo dele cobre, pelo tempo."""
+    pesos: dict[int, Fraction] = {}
+    for k, v in valores.items():
+        if not v:
+            continue
+        a, b = intervalos[k]
+        m = math.floor(a)
+        while m < b:
+            parte = min(b, m + 1) - max(a, Fraction(m))
+            if parte > 0:
+                pesos[m] = pesos.get(m, 0) + v * parte / (b - a)
+            m += 1
+    return pesos
 
 
 def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_atual: str,
@@ -105,9 +121,11 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
     sem_mes = devido_total = 0
     linhas = []
     restos = []
+    cheio: dict[int, int] = {}                          # o que o plano previa por mês (centavos × CEM), obra toda
     for e in etapas:
         falta = max(0, e.atual - e.realizado)
-        executado = e.executado if com_medicao else (min(CEM, pct(e.realizado, e.atual)) if e.atual else CEM)
+        # sem medição, o gasto é o avanço; piso, para "quase tudo gasto" não arredondar para 100% e perder o mês
+        executado = e.executado if com_medicao else (min(CEM, e.realizado * CEM // e.atual) if e.atual else CEM)
         executado = executado or 0
         devido = 0
         if com_medicao:
@@ -115,10 +133,18 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
         resto = falta - devido
         devido_total += devido
         plano: dict[int, int] = {}
+        if e.percentuais and ini is not None:
+            for k, p in enumerate(e.percentuais):
+                if p:
+                    cheio[ini + k + desloca] = cheio.get(ini + k + desloca, 0) + e.atual * p
         if resto and e.percentuais and ini is not None:
             for k, w in enumerate(restante_do_plano(e.percentuais, executado)):
                 if w:
                     plano[ini + k + desloca] = plano.get(ini + k + desloca, 0) + w
+            if not plano and any(e.percentuais):
+                # o plano já foi todo consumido e ainda sobra (medido 100% sem gasto que feche): no último mês dele
+                ultimo = max(k for k, p in enumerate(e.percentuais) if p)
+                plano = {ini + ultimo + desloca: 1}
         fora = bool(resto) and not plano
         if fora:
             sem_mes += resto
@@ -127,13 +153,27 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
         linhas.append(EtapaDesembolso(etapa=e.etapa, descricao=e.descricao, atual=e.atual, realizado=e.realizado,
                                       executado_pct=executado, falta=falta, devido_agora=devido,
                                       sem_cronograma=fora))
-    origem = min([hoje] + [k for _, plano in restos for k in plano])
-    for resto, plano in restos:
-        for cen, r in zip(cenarios, (CEM, ritmo), strict=True):
-            for m, v in repartir(resto, _espalhar(plano, hoje, r, origem)).items():
+    pelo_plano, no_ritmo = cenarios
+    por_mes = [(resto, repartir(resto, plano)) for resto, plano in restos]   # o resto de cada etapa por mês do plano
+    resto_obra: dict[int, int] = {}
+    for _, valores in por_mes:
+        for k, v in valores.items():
+            resto_obra[k] = resto_obra.get(k, 0) + v
+    intervalos = _fila_no_ritmo(resto_obra, {k: v // CEM for k, v in cheio.items()}, hoje, ritmo)
+    for resto, valores in por_mes:
+        # pelo cronograma, o que já devia ter saído cai agora; no ritmo, a fila
+        agora: dict[int, int] = {}
+        for k, v in valores.items():
+            agora[max(hoje, k)] = agora.get(max(hoje, k), 0) + v
+        fila = agora if ritmo >= CEM else repartir(resto, _no_calendario(valores, intervalos))
+        for cen, distribuido in ((pelo_plano, agora), (no_ritmo, fila)):
+            for m, v in distribuido.items():
                 cen[m] = cen.get(m, 0) + v
 
     pago_total = sum(pago_por_mes.values())
+    # Negativo = pagou mais do que recebeu (adiantamento, ou frete e juros pagos além do preço do pedido): vira crédito
+    # que desconta dos primeiros meses. Crédito maior que tudo o que falta não aparece em lugar nenhum: a série não
+    # fica negativa, e então `pago + falta` passa de `custo_final` (o contrato avisa).
     entregue_sem_pagamento = realizado_total - pago_total
     for cen in cenarios:
         agora = devido_total + max(0, entregue_sem_pagamento)
@@ -154,7 +194,6 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
     idx_prev = [cron._mes_idx(m) for m in previsto_por_mes]
     primeiro = min([hoje] + idx_pagos + idx_prev)
     ultimo = max([hoje] + idx_pagos + idx_prev + [f for f in fins if f is not None])
-    pelo_plano, no_ritmo = cenarios
     meses = [MesDesembolso(mes=cron._mes(k), pago=pago_por_mes.get(cron._mes(k), 0),
                            previsto=previsto_por_mes.get(cron._mes(k), 0), projetado=pelo_plano.get(k, 0),
                            projetado_no_ritmo=no_ritmo.get(k, 0))

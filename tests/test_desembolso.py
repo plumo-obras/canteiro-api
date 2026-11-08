@@ -173,6 +173,42 @@ def test_ritmo_so_vale_com_medicao_e_tem_piso():
     assert _serie(d)["2026-02"] >= 30_000 and _ritmo(d)["2026-02"] >= 30_000
 
 
+def test_no_ritmo_resto_pequeno_de_etapa_antiga_nao_empurra_o_fim():
+    # B (R$ 1.000) de jul a dez, nada feito; hoje jul, ritmo 90%. Sozinha, termina em jan/27.
+    b = EtapaBase("2", "Estrutura", 100_000, 0, [0] * 6 + [1667] * 5 + [1665], 0)
+    args = {"inicio": "2026-01", "atraso": 0, "mes_atual": "2026-07", "pago_por_mes": {}, "previsto_por_mes": {},
+            "mes_referencia": "2026-06", "ritmo": 9000}
+    so_b = projetar([b], realizado_total=0, **args)
+    # A (R$ 1.000 em jan) medida 99% e paga: sobram R$ 10, que entram na fila em poucos dias e não mexem no fim
+    a = EtapaBase("1", "Preliminares", 100_000, 99_000, [10000] + [0] * 11, 9900)
+    com_a = projetar([a, b], realizado_total=99_000, pago_por_mes={"2026-01": 99_000},
+                     **{k: v for k, v in args.items() if k != "pago_por_mes"})
+    assert so_b.termino_no_ritmo == com_a.termino_no_ritmo == "2027-01"
+    assert all(m.projetado_no_ritmo > 0 for m in com_a.meses if "2026-07" <= m.mes <= "2027-01")   # sem buraco
+
+
+def test_no_ritmo_espera_hoje_sem_esticar_o_vazio_ate_o_plano():
+    # o plano (já empurrado) começa daqui a 2 meses: o vazio até lá não é trabalho, não se estica pelo ritmo
+    e = [EtapaBase("1", "Obra", 200_000, 0, [0, 0, 0, 0, 5000, 5000], 0)]
+    d = projetar(e, inicio="2026-01", atraso=0, mes_atual="2026-03", pago_por_mes={}, previsto_por_mes={},
+                 realizado_total=0, mes_referencia="2026-02", ritmo=5000)
+    assert _ritmo(d) == {"2026-05": 50_000, "2026-06": 50_000, "2026-07": 50_000, "2026-08": 50_000}
+
+
+def test_sem_medicao_quase_tudo_gasto_continua_no_cronograma():
+    e = [EtapaBase("1", "Obra", 1_000_000, 999_960, [5000, 5000])]
+    d = projetar(e, inicio="2026-01", atraso=0, mes_atual="2026-01", pago_por_mes={"2026-01": 999_960},
+                 previsto_por_mes={}, realizado_total=999_960)
+    assert (d.etapas[0].sem_cronograma, d.totais.sem_mes, d.totais.falta) == (False, 0, 40)
+    assert _serie(d) == {"2026-02": 40}
+
+
+async def test_desembolso_recusa_data_absurda(vila):
+    obra = await _obra(vila)
+    r = await vila.http.get(f"/obras/{obra}/desembolso", headers=vila.h, params={"hoje": "9999-12-31"})
+    assert r.status_code == 422 and "10 anos" in r.json()["detail"]
+
+
 def test_no_ritmo_o_atrasado_entra_em_fila_e_nao_empilha():
     # nada executado e já em março: pelo cronograma, jan..mar caem todos agora; no ritmo de 50%, em fila
     d = _proj(_etapas(ma=0, mb=0), mes_atual="2026-03", mes_referencia="2026-01", ritmo=5000)
