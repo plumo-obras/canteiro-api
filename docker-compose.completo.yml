@@ -1,5 +1,5 @@
 # O produto inteiro em contêineres, com os repositórios clonados lado a lado:
-#   canteiro-api/  canteiro-agente/  canteiro-web/  canteiro-tradutor/
+#   canteiro-api/  canteiro-agente/  canteiro-web/  canteiro-cad/
 # Subir (de dentro de canteiro-api):  docker compose -f docker-compose.yml -f docker-compose.completo.yml up -d --build
 # Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY, TRADUTOR_CHAVE) vêm do
 # .env, nunca daqui.
@@ -20,7 +20,7 @@ services:
   # Tradutor de pranchas (PDF/imagem da prancha estrutural -> dados e modelo 3D da tela Projeto 3D). Não conhece
   # usuário nem banco: só o Next fala com ele, com a TRADUTOR_CHAVE. Leitura de imagem usa vários núcleos por prancha.
   tradutor:
-    build: ../canteiro-tradutor
+    build: ../canteiro-cad
     environment:
       TRADUTOR_API_KEYS: ${TRADUTOR_CHAVE:-}
       TRADUTOR_WORKERS: ${TRADUTOR_WORKERS:-2}
