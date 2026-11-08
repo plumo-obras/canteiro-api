@@ -47,11 +47,15 @@ services:
       API_URL: http://api:8000
       AGENTE_URL: http://agente:8100
       TRADUTOR_URL: http://tradutor:8000
+      # a busca na tabela oficial (SINAPI/SICRO) no Compras vem do serviço de produtos
+      PRODUTOS_URL: http://produtos:8000
+      PRODUTOS_CHAVE: ${PRODUTOS_CHAVE:-}
     ports: ["3000:3000"]
     depends_on:
       api: { condition: service_healthy }
       agente: { condition: service_healthy }
       tradutor: { condition: service_healthy }
+      produtos: { condition: service_healthy }
 
 volumes:
   tradutor-dados:
