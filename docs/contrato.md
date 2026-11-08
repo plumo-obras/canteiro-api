@@ -361,6 +361,25 @@ atual de cada etapa (contrato + aditivos vigentes).
   `Medicao` = `{id, numero, mes, etapas: [{etapa, pct_acumulado, pct_periodo, valor_periodo}], valor,
   pct_obra_acumulado, observacao, quem, criado_em}`; `valor_periodo` = orçado atual × % do período. Registro "3ª
   medição (2026-03): R$ X no mês · Y% da obra executada"; desfazer `desfazer_medicao` só da última.
+- `GET /obras/{obra_id}/desembolso?hoje=AAAA-MM-DD` (qualquer papel; `hoje` padrão = hoje em São Paulo) → projeção de
+  desembolso: o que já saiu por mês e o que ainda vai sair até o fim. Só leitura; a conta e o porquê de cada regra em
+  `servicos/desembolso.py`.
+  - `{mes_atual, base, mes_referencia, atraso_meses, ritmo_pct, termino_projetado, termino_no_ritmo, meses, etapas,
+    totais}`. `base` ∈ `medicao` (avanço = última medição) | `gastos` (sem medição: realizado ÷ orçado faz o papel do
+    avanço) | `sem_cronograma` (tudo em `totais.sem_mes`).
+  - `meses`: `[{mes, pago, previsto, projetado, projetado_no_ritmo}]`, do primeiro mês com pagamento ou do início do
+    cronograma até o último mês projetado. `pago` = gastos confirmados (avulsos e pagamentos de pedido) pelo mês do
+    pagamento; `previsto` = o `mensal[].previsto` do cronograma vigente; `projetado` = o que falta, **pelo cronograma**
+    (o resto do plano empurrado por `atraso_meses`, nada antes do mês corrente); `projetado_no_ritmo` = o mesmo
+    esticado pelo ritmo medido (`ritmo_pct` = % medido ÷ % previsto na última medição, entre 1000 e 10000; 10000 sem
+    medição, e aí os dois cenários são iguais). Os dois somam `totais.falta − totais.sem_mes`.
+  - `etapas`: `[{etapa, descricao, atual, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`. `falta` =
+    orçado atual − realizado (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
+    executado pela medição e ainda não realizado, no mês corrente.
+  - `totais`: `{orcado, realizado, pago, falta, custo_final, desvio, entregue_sem_pagamento, sem_mes}`; `custo_final`
+    = realizado + Σ falta das etapas = `pago + falta`; `desvio` = custo_final − orçado (o estouro que já houve, e gasto
+    fora do orçamento); `entregue_sem_pagamento` = realizado − pago (pedido entregue sem pagamento registrado; está no
+    mês corrente). Pago adiantado desconta dos primeiros meses, sem mês negativo.
 
 ## Resumo de uma obra ("como está a obra?")
 

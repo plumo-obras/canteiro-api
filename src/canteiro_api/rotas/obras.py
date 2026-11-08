@@ -13,6 +13,7 @@ from ..esquemas import (
     AvancarCorpo,
     CronogramaCorpo,
     CronogramaObra,
+    DesembolsoObra,
     EtapaRef,
     InsumoComConta,
     InsumoCorpo,
@@ -41,7 +42,7 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import cronograma, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -360,6 +361,13 @@ async def etapas(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Dep
 @r.get("/obras/{obra_id}/cronograma", response_model=CronogramaObra, tags=["cronograma"])
 async def ver_cronograma(obra_id: str, u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await cronograma.cronograma_da_obra(arm, u.tenant_id, obra_id)
+
+
+@r.get("/obras/{obra_id}/desembolso", response_model=DesembolsoObra, tags=["cronograma"])
+async def ver_desembolso(obra_id: str, hoje: date | None = Query(None, description="AAAA-MM-DD; padrão: hoje em São "
+                                                                                  "Paulo"),
+                         u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    return await desembolso.desembolso_da_obra(arm, u.tenant_id, obra_id, hoje or datetime.now(estoque.FUSO).date())
 
 
 @r.put("/obras/{obra_id}/cronograma", response_model=CronogramaObra, tags=["cronograma"])
