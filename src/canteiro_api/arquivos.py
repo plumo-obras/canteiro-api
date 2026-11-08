@@ -191,6 +191,16 @@ class ArquivosSupabase:
             return ""
         return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "statusCode"))
 
+    async def conferir(self) -> None:
+        """O bucket existe e a chave abre: é o ping que conta como atividade do projeto (o gratuito pausa parado)."""
+        try:
+            async with self._cliente() as c:
+                r = await c.get(f"{self._base.removesuffix('/object')}/bucket/{self._bucket}")
+        except httpx.HTTPError as e:
+            raise ErroArquivos(f"O Storage não respondeu ao conferir ({type(e).__name__}).") from None
+        if not r.is_success:
+            raise ErroArquivos(f"O Storage não abriu o bucket (HTTP {r.status_code}).")
+
     async def salvar(self, tenant_id: str, caminho: str, conteudo: bytes) -> None:
         objeto = self._chave_objeto(tenant_id, caminho)
         try:

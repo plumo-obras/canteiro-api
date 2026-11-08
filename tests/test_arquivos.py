@@ -55,6 +55,8 @@ class StorageFalso:
             if chave not in self.objetos:
                 return httpx.Response(404, json={"code": "NoSuchKey"})
             return httpx.Response(200, content=self.objetos[chave])
+        if req.method == "GET" and caminho == f"/storage/v1/bucket/{self.bucket}":
+            return httpx.Response(200, json={"id": self.bucket, "public": False})
         return httpx.Response(400, json={"code": "InvalidRequest"})
 
 
@@ -271,6 +273,84 @@ async def test_rota_responde_503_quando_o_storage_cai(arm, config):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/_teste_arquivo")
     assert r.status_code == 503 and "armazenamento" in json.loads(r.text)["detail"]
+
+
+async def test_supabase_conferir_o_bucket():
+    await _supabase().conferir()
+    outro = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "outro-bucket", transporte=httpx.MockTransport(StorageFalso()))
+    with pytest.raises(ErroArquivos, match="HTTP 400"):
+        await outro.conferir()
+
+
+async def test_ping_do_bucket_responde_e_guarda_o_resultado(arm, config):
+    from canteiro_api.main import create_app
+
+    storage = StorageFalso()
+    app = create_app(config.model_copy(update={"arquivos": "memoria"}), arm)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/saude/arquivos")                       # sem bucket: nada a conferir
+        assert r.json() == {"ok": True, "arquivos": "memoria"}
+        app.state.arquivos = _supabase(storage)
+        for _ in range(3):
+            assert (await c.get("/saude/arquivos")).status_code == 200
+        assert len(storage.pedidos) == 1                         # chamada em laço não vira tráfego no Storage
+        app.state.arquivos = ArquivosSupabase(URL_FALSA, "sb_secret_errada", "comprovantes",
+                                              transporte=httpx.MockTransport(storage))
+        app.state.saude_arquivos = None
+        r = await c.get("/saude/arquivos")
+        assert r.status_code == 503 and "sb_secret" not in r.text
+
+
+# --- migração do banco para o bucket ---
+
+async def test_migrar_copia_confere_e_so_apaga_quando_pedido(arm):
+    from canteiro_api.migrar_arquivos import migrar
+
+    banco, storage = ArquivosNoBanco(arm), StorageFalso()
+    destino = _supabase(storage)
+    (t1, obra1), (t2, obra2) = _ids(), _ids()
+    grande = secrets.token_bytes(PEDACO * 2 + 7)
+    await banco.salvar(t1, f"{obra1}/a.jpg", grande)
+    await banco.salvar(t1, f"{obra1}/b.pdf", b"%PDF-1.7 b")
+    await banco.salvar(t2, f"{obra2}/a.jpg", b"de outro cliente")
+
+    rel = await migrar(arm, destino, tenants=[t1, t2], avisar=lambda _: None)
+    assert (rel.copiados, rel.apagados, rel.problemas) == (3, 0, [])
+    assert storage.objetos[f"{t1}/{obra1}/a.jpg"] == grande
+    assert storage.objetos[f"{t2}/{obra2}/a.jpg"] == b"de outro cliente"
+    assert await banco.ler(t1, f"{obra1}/a.jpg") == grande          # sem a opção, o banco fica como estava
+
+    # de novo, agora apagando: o que já está no bucket conta como copiado e sai do banco, pedaços inclusive
+    rel = await migrar(arm, destino, apagar_do_banco=True, tenants=[t1, t2], avisar=lambda _: None)
+    assert (rel.copiados, rel.apagados) == (3, 3)
+    assert await banco.ler(t1, f"{obra1}/a.jpg") is None
+    id_ = _id_arquivo(t1, f"{obra1}/a.jpg")
+    assert all([await arm.obter(COLECAO_PEDACOS, t1, f"{id_}-{n:03d}") is None for n in range(3)])
+    assert await destino.ler(t1, f"{obra1}/a.jpg") == grande
+
+
+async def test_migrar_nao_apaga_o_que_nao_confere_no_bucket(arm):
+    from canteiro_api.migrar_arquivos import migrar
+
+    banco, storage = ArquivosNoBanco(arm), StorageFalso()
+    tenant, obra = _ids()
+    await banco.salvar(tenant, f"{obra}/a.jpg", b"o do banco")
+    storage.objetos[f"{tenant}/{obra}/a.jpg"] = b"outro conteudo"   # já havia outra coisa com esse nome
+    await banco.salvar(tenant, f"{obra}/b.jpg", b"este quebrou")
+    await arm.atualizar(COLECAO_PEDACOS, tenant, f"{_id_arquivo(tenant, f'{obra}/b.jpg')}-000", {"dados": b"x"})
+
+    rel = await migrar(arm, _supabase(storage), apagar_do_banco=True, tenants=[tenant], avisar=lambda _: None)
+    assert (rel.copiados, rel.apagados, len(rel.problemas)) == (0, 0, 2)
+    assert await banco.ler(tenant, f"{obra}/a.jpg") == b"o do banco"
+    assert f"{tenant}/{obra}/b.jpg" not in storage.objetos
+
+
+async def test_migrar_acha_os_clientes_sozinho(arm):
+    from canteiro_api.migrar_arquivos import _tenants
+
+    tenant, obra = _ids()
+    await ArquivosNoBanco(arm).salvar(tenant, f"{obra}/a.jpg", b"x")
+    assert tenant in await _tenants(arm)
 
 
 # --- configuração: produção não sobe com arquivo em lugar que some ---

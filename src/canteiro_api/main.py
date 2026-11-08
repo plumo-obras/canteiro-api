@@ -1,5 +1,6 @@
 """App FastAPI. `create_app` recebe o armazenamento para os testes rodarem contra memória e Mongo."""
 import logging
+import time
 from contextlib import asynccontextmanager
 from functools import cache
 
@@ -72,6 +73,28 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     @app.get("/saude", tags=["infra"])
     async def saude():
         return {"ok": True}
+
+    @app.get("/saude/arquivos", tags=["infra"])
+    async def saude_arquivos():
+        """Confere o bucket. É também o ping diário (.github/workflows/manter-storage.yml) que impede o Supabase
+        gratuito de pausar o projeto parado. Pública e sem dado nenhum; o resultado vale 10 min (a falha, 1 min), para
+        quem chamar em laço não virar tráfego no Storage."""
+        arquivos = app.state.arquivos
+        if not hasattr(arquivos, "conferir"):
+            return {"ok": True, "arquivos": config.arquivos}
+        agora = time.monotonic()
+        visto = getattr(app.state, "saude_arquivos", None)
+        if visto is None or agora - visto[0] > (600 if visto[1] else 60):
+            try:
+                await arquivos.conferir()
+                visto = (agora, True)
+            except ErroArquivos as e:
+                logging.getLogger("canteiro_api.arquivos").error("%s", e)
+                visto = (agora, False)
+            app.state.saude_arquivos = visto
+        if not visto[1]:
+            return JSONResponse(status_code=503, content={"ok": False, "arquivos": config.arquivos})
+        return {"ok": True, "arquivos": config.arquivos}
 
     app.include_router(auth.r)
     app.include_router(obras.r)

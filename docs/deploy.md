@@ -161,7 +161,16 @@ e o comprovante enviado de manhã sumiria antes da revisão.
     arquivo, porque o nome sai do sha256). Storage fora do ar vira 503 "tente de novo", e o erro nunca leva a chave.
   - **Cuidados do plano gratuito:** projeto parado 7 dias **pausa** (os arquivos ficam inacessíveis até reativar no
     painel); limite de projetos ativos por conta; cota mensal de tráfego de saída.
-  - **Falta:** o script que copia os arquivos que já estão no Mongo para o bucket, e o ping contra a pausa.
+  - **Ping contra a pausa:** `GET /saude/arquivos` (pública, sem dado, resultado guardado 10 min) confere o bucket;
+    o workflow `.github/workflows/manter-storage.yml` chama todo dia às 08:23. Run vermelho = a API não abriu o bucket.
+    Em repositório público o GitHub desliga agendamento após 60 dias sem commit (avisa por e-mail; reative em Actions).
+  - **Trocar sem perder arquivo** (`python -m canteiro_api.migrar_arquivos`, com `MONGO_URL`, `MONGO_DB` e as
+    `SUPABASE_*` no ambiente; nada gravado em arquivo):
+    1. Rodar o script: copia tudo, lê de volta do bucket e confere o sha256. Não apaga nada.
+    2. No Render: `ARQUIVOS=supabase` (com as duas `SUPABASE_*` já lá) e esperar o deploy.
+    3. Rodar o script de novo: pega o que chegou no banco entre o passo 1 e o 2.
+    4. Abrir alguns comprovantes no app. Então `--apagar-do-banco`: tira do Mongo só o que está conferido no bucket.
+    Arquivo que não confere fica no banco e aparece no relatório (saída com código 1). Rodar de novo é seguro.
 - **Retenção — decisão pendente (LGPD):** hoje nenhum arquivo é apagado. Estornar/desfazer um gasto ou descartar um
   comprovante mantém o arquivo de propósito (é a prova do pagamento e o Desfazer precisa dele). Falta decidir o prazo
   (ex.: descartados apagados após N dias; confirmados enquanto a obra existir + prazo fiscal) e o pedido de exclusão
