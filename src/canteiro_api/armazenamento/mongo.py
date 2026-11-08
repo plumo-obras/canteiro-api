@@ -96,6 +96,17 @@ class ArmazenamentoMongo:
         for colecao, campo in TTL.items():
             await self._db[colecao].create_index([(campo, ASCENDING)], expireAfterSeconds=0)
 
+    # --- manutenção (scripts como migrar_arquivos): FORA da porta `Armazenamento` de propósito. Atravessam clientes
+    # e apagam, duas coisas que nenhuma rota pode fazer; quem usa é só código de manutenção, rodado à mão.
+
+    async def tenants_da_colecao(self, colecao: str) -> list[str]:
+        return sorted(await self._db[colecao].distinct("tenant_id"))
+
+    async def apagar_ids(self, colecao: str, tenant_id: str, ids: list[str]) -> None:
+        if not tenant_id:
+            raise ValueError("Apagar sem tenant_id.")
+        await self._db[colecao].delete_many({"_id": {"$in": ids}, "tenant_id": tenant_id})
+
     async def apagar_banco(self) -> None:
         """Só para testes."""
         await self._cliente.drop_database(self._db.name)

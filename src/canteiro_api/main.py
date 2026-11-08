@@ -81,7 +81,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
         quem chamar em laço não virar tráfego no Storage."""
         arquivos = app.state.arquivos
         if not hasattr(arquivos, "conferir"):
-            return {"ok": True, "arquivos": config.arquivos}
+            return {"ok": True}
         agora = time.monotonic()
         visto = getattr(app.state, "saude_arquivos", None)
         if visto is None or agora - visto[0] > (600 if visto[1] else 60):
@@ -92,9 +92,10 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
                 logging.getLogger("canteiro_api.arquivos").error("%s", e)
                 visto = (agora, False)
             app.state.saude_arquivos = visto
+        # só ok/falhou: qual armazenamento está ligado não é da conta de quem chama
         if not visto[1]:
-            return JSONResponse(status_code=503, content={"ok": False, "arquivos": config.arquivos})
-        return {"ok": True, "arquivos": config.arquivos}
+            return JSONResponse(status_code=503, content={"ok": False})
+        return {"ok": True}
 
     app.include_router(auth.r)
     app.include_router(obras.r)

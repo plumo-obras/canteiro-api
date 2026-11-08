@@ -34,10 +34,12 @@ URL_FALSA = "https://falso.supabase.co"
 class StorageFalso:
     """O pedaço da API REST do Storage que a porta usa: grava sem sobrescrever (409), lê autenticado (404 se não há)."""
 
-    def __init__(self, bucket="comprovantes"):
+    def __init__(self, bucket="comprovantes", tipos=("image/jpeg", "image/png", "image/webp", "application/pdf")):
         self.objetos: dict[str, bytes] = {}
         self.bucket = bucket
+        self.tipos = tipos                      # o bucket restrito a esses tipos, como o roteiro do deploy sugere
         self.pedidos: list[httpx.Request] = []
+        self.falhar_em: set[str] = set()        # chaves cujo envio responde 500 (Storage instável)
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         self.pedidos.append(req)
@@ -46,6 +48,10 @@ class StorageFalso:
         caminho = req.url.path
         if req.method == "POST" and caminho.startswith(f"/storage/v1/object/{self.bucket}/"):
             chave = caminho.removeprefix(f"/storage/v1/object/{self.bucket}/")
+            if chave in self.falhar_em:
+                return httpx.Response(500, json={"code": "InternalError"})
+            if self.tipos and req.headers.get("content-type") not in self.tipos:
+                return httpx.Response(400, json={"code": "InvalidMimeType", "statusCode": "415"})
             if chave in self.objetos:
                 return httpx.Response(409, json={"code": "KeyAlreadyExists"})
             self.objetos[chave] = req.content
@@ -57,6 +63,8 @@ class StorageFalso:
             return httpx.Response(200, content=self.objetos[chave])
         if req.method == "GET" and caminho == f"/storage/v1/bucket/{self.bucket}":
             return httpx.Response(200, json={"id": self.bucket, "public": False})
+        if caminho.startswith("/storage/v1/"):
+            return httpx.Response(404, json={"code": "NoSuchBucket"})
         return httpx.Response(400, json={"code": "InvalidRequest"})
 
 
@@ -278,7 +286,7 @@ async def test_rota_responde_503_quando_o_storage_cai(arm, config):
 async def test_supabase_conferir_o_bucket():
     await _supabase().conferir()
     outro = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "outro-bucket", transporte=httpx.MockTransport(StorageFalso()))
-    with pytest.raises(ErroArquivos, match="HTTP 400"):
+    with pytest.raises(ErroArquivos, match="HTTP 404"):
         await outro.conferir()
 
 
@@ -289,7 +297,7 @@ async def test_ping_do_bucket_responde_e_guarda_o_resultado(arm, config):
     app = create_app(config.model_copy(update={"arquivos": "memoria"}), arm)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/saude/arquivos")                       # sem bucket: nada a conferir
-        assert r.json() == {"ok": True, "arquivos": "memoria"}
+        assert r.json() == {"ok": True}
         app.state.arquivos = _supabase(storage)
         for _ in range(3):
             assert (await c.get("/saude/arquivos")).status_code == 200
@@ -298,7 +306,7 @@ async def test_ping_do_bucket_responde_e_guarda_o_resultado(arm, config):
                                               transporte=httpx.MockTransport(storage))
         app.state.saude_arquivos = None
         r = await c.get("/saude/arquivos")
-        assert r.status_code == 503 and "sb_secret" not in r.text
+        assert r.status_code == 503 and r.json() == {"ok": False}
 
 
 # --- migração do banco para o bucket ---
@@ -346,11 +354,65 @@ async def test_migrar_nao_apaga_o_que_nao_confere_no_bucket(arm):
 
 
 async def test_migrar_acha_os_clientes_sozinho(arm):
-    from canteiro_api.migrar_arquivos import _tenants
+    from canteiro_api.migrar_arquivos import migrar
 
     tenant, obra = _ids()
     await ArquivosNoBanco(arm).salvar(tenant, f"{obra}/a.jpg", b"x")
-    assert tenant in await _tenants(arm)
+    assert tenant in await arm.tenants_da_colecao(COLECAO_INDICE)
+    storage = StorageFalso()
+    await migrar(arm, _supabase(storage), avisar=lambda _: None)        # sem lista: acha sozinho
+    assert f"{tenant}/{obra}/a.jpg" in storage.objetos
+
+
+async def test_apagar_ids_so_apaga_do_proprio_tenant(arm):
+    tenant, obra = _ids()
+    outro, _ = _ids()
+    await ArquivosNoBanco(arm).salvar(tenant, f"{obra}/a.jpg", b"x")
+    id_ = _id_arquivo(tenant, f"{obra}/a.jpg")
+    await arm.apagar_ids(COLECAO_INDICE, outro, [id_])
+    assert await arm.obter(COLECAO_INDICE, tenant, id_)
+    with pytest.raises(ValueError):
+        await arm.apagar_ids(COLECAO_INDICE, "", [id_])
+
+
+async def test_migrar_termina_um_apagamento_que_parou_no_meio(arm):
+    from canteiro_api.migrar_arquivos import migrar
+
+    banco, storage = ArquivosNoBanco(arm), StorageFalso()
+    tenant, obra = _ids()
+    await banco.salvar(tenant, f"{obra}/a.jpg", b"conteudo")
+    await migrar(arm, _supabase(storage), tenants=[tenant], avisar=lambda _: None)
+    id_ = _id_arquivo(tenant, f"{obra}/a.jpg")
+    await arm.apagar_ids(COLECAO_PEDACOS, tenant, [f"{id_}-000"])     # morreu depois dos pedaços, antes do índice
+    rel = await migrar(arm, _supabase(storage), apagar_do_banco=True, tenants=[tenant], avisar=lambda _: None)
+    assert (rel.copiados, rel.apagados, rel.problemas) == (1, 1, [])
+    assert await arm.obter(COLECAO_INDICE, tenant, id_) is None
+
+
+async def test_migrar_segue_quando_um_arquivo_falha_no_storage(arm):
+    from canteiro_api.migrar_arquivos import migrar
+
+    banco, storage = ArquivosNoBanco(arm), StorageFalso()
+    tenant, obra = _ids()
+    await banco.salvar(tenant, f"{obra}/a.jpg", b"um")
+    await banco.salvar(tenant, f"{obra}/b.jpg", b"dois")
+    storage.falhar_em.add(f"{tenant}/{obra}/a.jpg")
+    rel = await migrar(arm, _supabase(storage), apagar_do_banco=True, tenants=[tenant], avisar=lambda _: None)
+    assert (rel.copiados, rel.apagados, len(rel.problemas)) == (1, 1, 1) and "HTTP 500" in rel.problemas[0]
+    assert await banco.ler(tenant, f"{obra}/a.jpg") == b"um"           # o que falhou continua no banco
+
+
+async def test_supabase_envia_o_tipo_real_e_bucket_errado_nao_vira_arquivo_sumido():
+    storage = StorageFalso()
+    a = _supabase(storage)
+    tenant, obra = _ids()
+    for nome, tipo in [("a.jpg", "image/jpeg"), ("b.png", "image/png"), ("c.webp", "image/webp"),
+                       ("d.pdf", "application/pdf")]:
+        await a.salvar(tenant, f"{obra}/{nome}", b"x")                 # o bucket restrito aceita
+        assert storage.pedidos[-1].headers["content-type"] == tipo
+    errado = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "apagado", transporte=httpx.MockTransport(storage))
+    with pytest.raises(ErroArquivos, match="HTTP 404"):
+        await errado.ler(tenant, f"{obra}/a.jpg")
 
 
 # --- configuração: produção não sobe com arquivo em lugar que some ---

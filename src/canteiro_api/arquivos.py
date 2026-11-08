@@ -144,6 +144,16 @@ class ErroArquivos(RuntimeError):
     """O serviço de arquivos recusou ou não respondeu. A mensagem leva só o status, nunca a chave nem o corpo."""
 
 
+# O tipo vai no envio porque o bucket pode restringir os tipos aceitos (e o Storage confere pelo cabeçalho). A extensão
+# do caminho sai do `tipo_arquivo.detectar`, que olha os bytes: não é o que o navegador declarou.
+_TIPOS_POR_EXTENSAO = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+                       "pdf": "application/pdf"}
+
+
+def _tipo(caminho: str) -> str:
+    return _TIPOS_POR_EXTENSAO.get(caminho.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+
+
 class ArquivosSupabase:
     """Bucket PRIVADO do Supabase Storage, pela API REST, com a chave secreta do projeto (só no ambiente do Render).
 
@@ -189,7 +199,7 @@ class ArquivosSupabase:
             return ""
         if not isinstance(corpo, dict):
             return ""
-        return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "statusCode"))
+        return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "statusCode", "httpStatusCode"))
 
     async def conferir(self) -> None:
         """O bucket existe e a chave abre: é o ping que conta como atividade do projeto (o gratuito pausa parado)."""
@@ -206,7 +216,7 @@ class ArquivosSupabase:
         try:
             async with self._cliente() as c:
                 r = await c.post(f"{self._base}/{objeto}", content=conteudo,
-                                 headers={"Content-Type": "application/octet-stream", "x-upsert": "false"})
+                                 headers={"Content-Type": _tipo(caminho), "x-upsert": "false"})
         except httpx.HTTPError as e:
             raise ErroArquivos(f"O Storage não respondeu ao gravar ({type(e).__name__}).") from None
         if r.is_success:
@@ -227,7 +237,9 @@ class ArquivosSupabase:
         if r.is_success:
             return r.content
         codigo = self._codigo(r)
-        if r.status_code == 404 or any(x in codigo for x in ("not_found", "NoSuchKey", "404")):
+        # bucket errado ou apagado também responde 404: é falha de configuração (503), não "comprovante não existe"
+        if "Bucket" not in codigo and (r.status_code == 404
+                                       or any(x in codigo for x in ("not_found", "NoSuchKey", "404"))):
             return None
         raise ErroArquivos(f"O Storage não devolveu o arquivo (HTTP {r.status_code}).")
 

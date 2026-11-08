@@ -152,7 +152,8 @@ e o comprovante enviado de manhã sumiria antes da revisão.
   no Storage, à parte dos 512 MB do Atlas); o Mongo continua com o documento do comprovante (tamanho, sha256,
   caminho). Implementado em `ArquivosSupabase` (`src/canteiro_api/arquivos.py`), pela API REST do Storage:
   - **Montar:** projeto no Supabase (região São Paulo, por LGPD) → Storage → bucket **privado** `comprovantes`
-    (opcional: limite de 5 MB por arquivo e tipos `image/jpeg,image/png,image/webp,application/pdf`). Nenhuma policy
+    (opcional: limite de 5 MB por arquivo e tipos `image/jpeg,image/png,image/webp,application/pdf`; a API envia o
+    tipo real, detectado pelos bytes). Nenhuma policy
     de RLS: só a API acessa, com a chave secreta.
   - **Variáveis no Render** (nunca no git): `ARQUIVOS=supabase`, `SUPABASE_URL` (`https://<projeto>.supabase.co`),
     `SUPABASE_CHAVE_SERVICO` (a `sb_secret_...`, ou a `service_role` antiga) e, se não for `comprovantes`,
@@ -170,7 +171,9 @@ e o comprovante enviado de manhã sumiria antes da revisão.
     2. No Render: `ARQUIVOS=supabase` (com as duas `SUPABASE_*` já lá) e esperar o deploy.
     3. Rodar o script de novo: pega o que chegou no banco entre o passo 1 e o 2.
     4. Abrir alguns comprovantes no app. Então `--apagar-do-banco`: tira do Mongo só o que está conferido no bucket.
-    Arquivo que não confere fica no banco e aparece no relatório (saída com código 1). Rodar de novo é seguro.
+    Arquivo que não confere fica no banco e aparece no relatório (saída com código 1). Rodar de novo é seguro, e
+    termina um `--apagar-do-banco` que parou no meio. **Depois do passo 4 não há volta para `ARQUIVOS=banco`** sem
+    copiar no sentido contrário: os comprovantes migrados só existem no bucket.
 - **Retenção — decisão pendente (LGPD):** hoje nenhum arquivo é apagado. Estornar/desfazer um gasto ou descartar um
   comprovante mantém o arquivo de propósito (é a prova do pagamento e o Desfazer precisa dele). Falta decidir o prazo
   (ex.: descartados apagados após N dias; confirmados enquanto a obra existir + prazo fiscal) e o pedido de exclusão
