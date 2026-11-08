@@ -50,9 +50,10 @@ def _fmt_pct(c: int) -> str:
     return f"{c / 100:.1f}".replace(".", ",") + "%"
 
 
-async def _etapas_orcadas(arm, tenant_id: str, obra_id: str) -> dict[str, tuple[str, int]]:
-    """{etapa: (descrição, orçado atual)} das versões vigentes; é a base dos pesos do cronograma e da medição."""
-    o = await orcamento_da_obra(arm, tenant_id, obra_id)
+async def _etapas_orcadas(arm, tenant_id: str, obra_id: str, o=None) -> dict[str, tuple[str, int]]:
+    """{etapa: (descrição, orçado atual)} das versões vigentes; é a base dos pesos do cronograma e da medição. `o` = o
+    orçamento já lido por quem chama (a projeção de desembolso lê os dois e não precisa ler o orçamento duas vezes)."""
+    o = o or await orcamento_da_obra(arm, tenant_id, obra_id)
     return {e.etapa: (e.descricao, e.atual) for e in o.etapas if e.etapa}
 
 
@@ -298,9 +299,9 @@ async def preparar_refazer_medicao(tx, u: UsuarioAtual, receita: dict) -> Operac
                     desfazer=lambda d: {"op": "desfazer_medicao", "medicao_id": med["id"]})
 
 
-async def cronograma_da_obra(arm, tenant_id: str, obra_id: str) -> CronogramaObra:
+async def cronograma_da_obra(arm, tenant_id: str, obra_id: str, orcamento=None) -> CronogramaObra:
     obra = await obra_do_tenant(arm, tenant_id, obra_id)
-    orcadas = await _etapas_orcadas(arm, tenant_id, obra_id)
+    orcadas = await _etapas_orcadas(arm, tenant_id, obra_id, orcamento)
     c = await arm.obter("cronogramas", tenant_id, id_cronograma(tenant_id, obra_id))
     if not c or not c.get("etapas"):
         etapas = [EtapaCronograma(etapa=e, descricao=d, atual=v, percentuais=[]) for e, (d, v) in orcadas.items()]

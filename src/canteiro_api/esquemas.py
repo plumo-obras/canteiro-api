@@ -1069,6 +1069,58 @@ class CronogramaObra(BaseModel):
     registro_id: str | None = None
 
 
+class MesDesembolso(BaseModel):
+    mes: str
+    pago: int = Field(0, description="gastos confirmados (avulsos e pagamentos de pedido) pagos neste mês")
+    previsto: int = Field(0, description="o cronograma vigente para o mês (o mesmo `previsto` do mensal)")
+    projetado: int = Field(0, description="o que ainda vai sair neste mês, pelo cronograma (empurrado pelo atraso); "
+                                          "0 antes do mês corrente")
+    projetado_no_ritmo: int = Field(0, description="o mesmo, no ritmo medido até aqui (igual ao `projetado` sem "
+                                                   "medição ou com a obra no ritmo do plano)")
+
+
+class EtapaDesembolso(BaseModel):
+    etapa: str
+    descricao: str
+    atual: int
+    realizado: int
+    executado_pct: int = Field(description="avanço usado na conta (centésimos): o medido, ou realizado ÷ orçado se a "
+                                           "obra não tem medição")
+    falta: int = Field(description="orçado atual − realizado, nunca negativo")
+    devido_agora: int = Field(0, description="executado pela medição e ainda não realizado: cai no mês corrente")
+    sem_cronograma: bool = Field(False, description="a etapa não está no cronograma: o que falta vai para `sem_mes`")
+
+
+class TotaisDesembolso(BaseModel):
+    orcado: int
+    realizado: int
+    pago: int
+    falta: int = Field(description="Σ projetado + sem_mes: o que ainda vai sair (o mesmo nos dois cenários)")
+    custo_final: int = Field(description="realizado + o que falta nas etapas")
+    desvio: int = Field(description="custo_final − orçado (positivo = acima do orçado, pelo que já estourou)")
+    entregue_sem_pagamento: int = Field(0, description="realizado − pago: pedido entregue sem pagamento registrado; "
+                                                       "está no projetado do mês corrente")
+    sem_mes: int = Field(0, description="o que falta nas etapas fora do cronograma")
+
+
+class DesembolsoObra(BaseModel):
+    """`GET /obras/{id}/desembolso`: a projeção de desembolso (servicos/desembolso.py explica a conta)."""
+    mes_atual: str
+    base: Literal["medicao", "gastos", "sem_cronograma"] = Field(
+        description="de onde vem o avanço: a última medição; os gastos (obra sem medição); ou nada (sem cronograma, "
+                    "tudo em sem_mes)")
+    mes_referencia: str | None = Field(None, description="mês da última medição")
+    atraso_meses: int = Field(0, description="quanto o resto do cronograma foi empurrado (o atraso do prazo projetado; "
+                                             "0 sem medição ou com a obra adiantada)")
+    ritmo_pct: int = Field(10000, description="% medido ÷ % previsto na última medição (centésimos, entre 1000 e "
+                                              "10000); 10000 sem medição")
+    termino_projetado: str | None = Field(None, description="último mês com desembolso, pelo cronograma")
+    termino_no_ritmo: str | None = Field(None, description="último mês com desembolso, no ritmo atual")
+    meses: list[MesDesembolso] = Field(default_factory=list)
+    etapas: list[EtapaDesembolso] = Field(default_factory=list)
+    totais: TotaisDesembolso
+
+
 class MedicaoSaida(BaseModel):
     medicao: Medicao
     cronograma: CronogramaObra
