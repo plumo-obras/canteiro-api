@@ -12,6 +12,7 @@ from canteiro_dominio.modelos import Insumo, Movimento, Obra, Pedido, Saldo, Sta
 from canteiro_dominio.regras import saldo_de
 from canteiro_dominio.tipos import qtd, reais
 
+from . import selic, vau
 from .armazenamento import criar_armazenamento
 from .auth import criar_usuario
 from .config import Config
@@ -38,7 +39,10 @@ def documentos(cfg: Config, t: str = TENANT_EXEMPLO) -> dict[str, list[dict]]:
     tenant = Tenant(id=t, nome="Construtora Exemplo", saldo_microdolares=cfg.franquia_padrao_microdolares,
                     franquia_microdolares=cfg.franquia_padrao_microdolares)
     obra = Obra(id=o, tenant_id=t, nome="Casa Vila Nova", cidade="Campinas/SP", cep="13000-000",
-                verba=reais("480.000,00"))
+                verba=reais("480.000,00"), uf="SP", tipologia="casa", padrao="normal", area_construida=qtd("180"),
+                # dados fiscais para a aba Tributos
+                # o VAU vem da tabela do SERO (UF + destinação); nada à mão
+                area_complementar=qtd("30"), proprietario="pf", material="alvenaria", finalidade="uso_proprio")
 
     def insumo(chave, nome, unidade, precisa, curva):
         return Insumo(id=_id(f"insumo:{chave}"), tenant_id=t, obra_id=o, nome=nome, unidade=unidade,
@@ -124,6 +128,13 @@ async def principal() -> int:
             print(f"Casa Vila Nova semeada. Entre com {cfg.seed_admin_email} e a senha do .env.")
         else:
             print("O exemplo já existe; nada a fazer.")
+        # a tabela VAU é pública e idempotente: vai sempre, para a obra de exemplo já sair com o VAU do SERO
+        linhas, fonte = vau.carregar(vau.DADOS)
+        r = await vau.importar(arm, linhas, fonte)
+        print(f"Tabela VAU: {r['linhas']} linhas ({r['novas']} novas).")
+        meses, fonte = selic.carregar(selic.DADOS)
+        r = await selic.importar(arm, meses, fonte)
+        print(f"Selic: {r['meses']} meses ({r['novos']} novos), até {max(meses)}.")
     finally:
         await arm.fechar()
     return 0

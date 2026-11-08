@@ -42,7 +42,7 @@ from canteiro_dominio.tipos import fmt_reais
 
 from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
-from ..esquemas import ConfirmarCorpo, EdicaoArvoreCorpo, LeituraCorpo, ReclassificarCorpo
+from ..esquemas import ConfirmarCorpo, EdicaoArvoreCorpo, FiscalGastoCorpo, LeituraCorpo, ReclassificarCorpo
 from ..modelos import doc
 from ..nucleo import (
     Conflito,
@@ -685,4 +685,87 @@ async def preparar_reclassificar(tx, u: UsuarioAtual, receita: dict) -> Operacao
     return Operacao(obra_id=g["obra_id"], aplicar=aplicar,
                     texto=lambda r: f"{verbo_desfazer(receita)}: o gasto de {fmt_reais(g['valor'])} "
                                     f"({g['descricao']}) voltou para {nome}",
+                    desfazer=lambda r: receita_inversa(receita))
+
+
+# --- natureza fiscal: o que o pagamento comprova no INSS da obra e o IBS/CBS da nota ---
+
+ROTULOS_FISCAIS = {
+    None: "a classificar", "folha": "folha (eSocial)", "mao_de_obra_nf": "mão de obra com nota",
+    "gps": "GPS paga com o CNO", "autonomo_mei": "autônomo ou MEI no eSocial",
+    "pre_moldado": "pré-moldado com nota", "concreto_usinado": "concreto usinado com nota",
+    "mao_de_obra_sem_nf": "mão de obra sem nota", "material": "material", "equipamento": "equipamento",
+    "outros": "outros",
+}
+
+
+_CAMPOS_FISCAIS = {"natureza_fiscal": None, "ibs_cbs": 0, "nf_cno": None, "retencao": 0}
+
+
+def _fiscal_de(g: dict) -> dict:
+    return {k: g.get(k, padrao) for k, padrao in _CAMPOS_FISCAIS.items()}
+
+
+def _texto_fiscal(g: dict, f: dict) -> str:
+    detalhes = [x for x in ("com o CNO da obra" if f.get("nf_cno") else "",
+                            f"retenção {fmt_reais(f['retencao'])}" if f.get("retencao") else "",
+                            f"IBS/CBS {fmt_reais(f['ibs_cbs'])}" if f.get("ibs_cbs") else "") if x]
+    return (f"o gasto de {fmt_reais(g['valor'])} ({g['descricao']}) como {ROTULOS_FISCAIS[f['natureza_fiscal']]}"
+            + (f" ({', '.join(detalhes)})" if detalhes else ""))
+
+
+async def classificar_fiscal(arm, u: UsuarioAtual, gasto_id: str, corpo: FiscalGastoCorpo) -> dict:
+    """Marca o que o gasto comprova para os tributos. Com Desfazer, como a mudança de etapa."""
+    g = await arm.obter("gastos", u.tenant_id, gasto_id)
+    if not g:
+        raise NaoEncontrado("Gasto não encontrado.")
+    if corpo.ibs_cbs > g["valor"] or corpo.retencao > g["valor"]:
+        raise ErroNegocio("O IBS/CBS e a retenção da nota não podem passar do valor do gasto.")
+    obra_id = g["obra_id"]
+    orcamento, extras, _ = await _nomes(arm, u.tenant_id, obra_id)
+    # CNO e retenção só fazem sentido na nota de mão de obra: nas outras naturezas voltam ao padrão
+    nota = corpo.natureza_fiscal == "mao_de_obra_nf"
+    depois = {"natureza_fiscal": corpo.natureza_fiscal, "ibs_cbs": corpo.ibs_cbs,
+              "nf_cno": corpo.nf_cno if nota else None, "retencao": corpo.retencao if nota else 0}
+
+    async def corpo_tx(tx):
+        atual = await tx.obter("gastos", u.tenant_id, gasto_id)
+        if atual.get("estornado"):
+            raise Conflito("Este gasto foi desfeito: não dá para classificar.")
+        antes = _fiscal_de(atual)
+        if antes == depois:
+            raise ErroNegocio("Nada mudou.")
+
+        def aplicar():
+            tx.atualizar("gastos", u.tenant_id, gasto_id, depois)
+            return {**atual, **depois}
+
+        receita = {"op": "fiscal_gasto", "gasto_id": gasto_id, "antes": antes, "depois": depois}
+        op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=lambda r: f"Classificou {_texto_fiscal(g, depois)}",
+                      desfazer=lambda r: receita)
+        novo, reg = executar_e_registrar(tx, u, op)
+        evento(tx, u.tenant_id, "gasto.fiscal", obra_id, {"gasto_id": gasto_id})
+        return {**_com_etapa(novo, orcamento, extras), "registro_id": reg["id"]}
+
+    return await arm.em_transacao(corpo_tx)
+
+
+async def preparar_desfazer_fiscal(tx, u: UsuarioAtual, receita: dict) -> Operacao:
+    """Volta a classificação de antes, se ninguém classificou de novo depois (senão apagaria a correção)."""
+    g = await tx.obter("gastos", u.tenant_id, receita["gasto_id"])
+    if not g:
+        raise NaoEncontrado("Gasto não encontrado.")
+    if g.get("estornado"):
+        raise Conflito("Este gasto foi desfeito depois; não dá para mudar a classificação dele.")
+    # receita antiga (antes do CNO e da retenção) compara só os campos que ela tem
+    if {k: v for k, v in _fiscal_de(g).items() if k in receita["depois"]} != receita["depois"]:
+        raise Conflito("A classificação deste gasto mudou de novo depois; não dá para desfazer esta mudança.")
+    volta = receita["antes"]
+
+    def aplicar():
+        tx.atualizar("gastos", u.tenant_id, g["id"], volta)
+        return {**g, **volta}
+
+    return Operacao(obra_id=g["obra_id"], aplicar=aplicar,
+                    texto=lambda r: f"{verbo_desfazer(receita)}: voltou {_texto_fiscal(g, volta)}",
                     desfazer=lambda r: receita_inversa(receita))

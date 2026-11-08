@@ -393,6 +393,7 @@ _DESFAZER = {
     "estornar_gasto": gastos.preparar_estorno_gasto,
     "reabrir_comprovante": gastos.preparar_reabrir,
     "reclassificar_gasto": gastos.preparar_reclassificar,
+    "fiscal_gasto": gastos.preparar_desfazer_fiscal,
 }
 
 
