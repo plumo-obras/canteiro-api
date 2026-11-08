@@ -59,6 +59,18 @@ class ArmazenamentoMemoria:
     async def fechar(self) -> None:
         pass
 
+    # --- manutenção: fora da porta, como no adaptador do Mongo (veja lá o porquê)
+
+    async def tenants_da_colecao(self, colecao: str) -> list[str]:
+        return sorted({d["tenant_id"] for (col, _), d in self._docs.items() if col == colecao})
+
+    async def apagar_ids(self, colecao: str, tenant_id: str, ids: list[str]) -> None:
+        if not tenant_id:
+            raise ValueError("Apagar sem tenant_id.")
+        for id_ in ids:
+            if (d := self._docs.get((colecao, id_))) and d["tenant_id"] == tenant_id:
+                del self._docs[(colecao, id_)]
+
     def _ler(self, colecao: str, tenant_id: str, id: str) -> dict[str, Any] | None:
         doc = self._docs.get((colecao, id))
         if doc is None or doc["tenant_id"] != tenant_id:

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "API central do Canteiro: dona dos dados e das regras (FastAPI + porta de armazenamento portável)."
 requires-python = ">=3.14"
 dependencies = [
+    "httpx>=0.28",
     "canteiro-dominio",
     "fastapi>=0.120",
     "uvicorn[standard]>=0.35",

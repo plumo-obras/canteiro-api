@@ -1,4 +1,6 @@
 """App FastAPI. `create_app` recebe o armazenamento para os testes rodarem contra memória e Mongo."""
+import logging
+import time
 from contextlib import asynccontextmanager
 from functools import cache
 
@@ -10,12 +12,17 @@ from canteiro_dominio.armazenamento import ConflitoDeId
 from canteiro_dominio.regras import RegraViolada
 
 from .armazenamento import criar_armazenamento
-from .arquivos import criar_arquivos
+from .arquivos import ErroArquivos, criar_arquivos
 from .cofre import criar_cofre
 from .config import Config
 from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
 from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, sessoes
+
+
+def _arquivos(config: Config, arm):
+    return criar_arquivos(config.arquivos, config.arquivos_dir, arm, supabase_url=config.supabase_url,
+                          supabase_chave=config.supabase_chave_servico, supabase_bucket=config.supabase_bucket)
 
 
 def create_app(config: Config | None = None, arm=None) -> FastAPI:
@@ -30,7 +37,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
             if hasattr(app.state.arm, "garantir_indices"):
                 await app.state.arm.garantir_indices()
             if app.state.arquivos is None:
-                app.state.arquivos = criar_arquivos(config.arquivos, config.arquivos_dir, app.state.arm)
+                app.state.arquivos = _arquivos(config, app.state.arm)
             yield
             await app.state.arm.fechar()
         else:
@@ -43,7 +50,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.cofre = criar_cofre(config.chave_cifra)
     # no banco, os arquivos dependem do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
     adiar = config.arquivos == "banco" and arm is None
-    app.state.arquivos = None if adiar else criar_arquivos(config.arquivos, config.arquivos_dir, arm)
+    app.state.arquivos = None if adiar else _arquivos(config, arm)
 
     @app.exception_handler(ErroNegocio)
     async def _erro_negocio(_: Request, e: ErroNegocio):
@@ -53,12 +60,41 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     async def _regra(_: Request, e: RegraViolada):
         return JSONResponse(status_code=422, content={"detail": str(e)})
 
+    @app.exception_handler(ErroArquivos)
+    async def _arquivos_fora(_: Request, e: ErroArquivos):
+        logging.getLogger("canteiro_api.arquivos").error("%s", e)
+        return JSONResponse(status_code=503, content={"detail": "O armazenamento de arquivos não respondeu. "
+                                                                "Tente de novo em instantes."})
+
     @app.exception_handler(ConflitoDeId)
     async def _conflito(_: Request, e: ConflitoDeId):
         return JSONResponse(status_code=409, content={"detail": "Já existe um registro com este identificador."})
 
     @app.get("/saude", tags=["infra"])
     async def saude():
+        return {"ok": True}
+
+    @app.get("/saude/arquivos", tags=["infra"])
+    async def saude_arquivos():
+        """Confere o bucket. É também o ping diário (.github/workflows/manter-storage.yml) que impede o Supabase
+        gratuito de pausar o projeto parado. Pública e sem dado nenhum; o resultado vale 10 min (a falha, 1 min), para
+        quem chamar em laço não virar tráfego no Storage."""
+        arquivos = app.state.arquivos
+        if not hasattr(arquivos, "conferir"):
+            return {"ok": True}
+        agora = time.monotonic()
+        visto = getattr(app.state, "saude_arquivos", None)
+        if visto is None or agora - visto[0] > (600 if visto[1] else 60):
+            try:
+                await arquivos.conferir()
+                visto = (agora, True)
+            except ErroArquivos as e:
+                logging.getLogger("canteiro_api.arquivos").error("%s", e)
+                visto = (agora, False)
+            app.state.saude_arquivos = visto
+        # só ok/falhou: qual armazenamento está ligado não é da conta de quem chama
+        if not visto[1]:
+            return JSONResponse(status_code=503, content={"ok": False})
         return {"ok": True}
 
     app.include_router(auth.r)

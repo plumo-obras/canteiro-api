@@ -1,0 +1,24 @@
+# Ping diário no bucket dos comprovantes (só faz algo com ARQUIVOS=supabase). O Supabase gratuito pausa o projeto
+# depois de 7 dias sem atividade e os comprovantes ficam inacessíveis até alguém reativar no painel. A rota é pública
+# e não precisa de segredo aqui: quem fala com o Storage, com a chave, é a API.
+# Run falhando = a API não abriu o bucket (o GitHub avisa por e-mail quem é dono do workflow). Atenção: em repositório
+# público o GitHub desliga o agendamento depois de 60 dias sem commit; ele avisa por e-mail e reativa em Actions.
+name: manter-storage
+
+on:
+  schedule:
+    - cron: "23 11 * * *"   # 08:23 em Brasília
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: conferir o bucket pela API
+        # o serviço gratuito do Render dorme: a primeira chamada pode levar ~1 min para acordar
+        run: |
+          curl -fsS --retry 5 --retry-delay 20 --retry-all-errors --max-time 120 \
+            https://canteiro-api.onrender.com/saude/arquivos

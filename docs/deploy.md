@@ -127,8 +127,9 @@ novo) e confere o sha256. O disco do Render não serve: ele é recriado a cada d
 e o comprovante enviado de manhã sumiria antes da revisão.
 
 - **Configuração:** `ARQUIVOS=banco` (padrão) usa a mesma `MONGO_URL`; não há serviço nem segredo novo.
+  `ARQUIVOS=supabase` põe os arquivos num bucket privado (veja a alternativa no fim desta seção).
   `ARQUIVOS=disco` (pasta `.arquivos/`, fora do git) e `memoria` são só para desenvolvimento e testes.
-- **Trava de produção:** com `AMBIENTE=producao`, a API **recusa subir** se `ARQUIVOS` não for `banco` ou
+- **Trava de produção:** com `AMBIENTE=producao`, a API **recusa subir** se `ARQUIVOS` não for `banco`/`supabase` ou
   `ARMAZENAMENTO` não for `mongo` (`Config.conferir`). Regra escolhida por ser explícita: produção se declara, e
   nenhuma combinação de variáveis esquecida faz o envio "funcionar" gravando num lugar que some.
 - **Portável para o Firestore:** nada aqui é exclusivo do Mongo (por isso não é GridFS). O pedaço de 512 KiB fica
@@ -147,6 +148,32 @@ e o comprovante enviado de manhã sumiria antes da revisão.
   ~350 MB: hora de subir o plano (M10/Flex) ou mover os arquivos para um bucket privado (a porta `Arquivos` já isola a
   troca; o GCS vem junto com o Firestore). Arquivo duplicado não ocupa espaço de novo (o nome sai do sha256 do
   conteúdo), e como pedaços e índice vão na mesma transação, envio interrompido não deixa sobra.
+- **Alternativa: bucket privado no Supabase Storage (`ARQUIVOS=supabase`).** Tira os bytes do M0 (1 GB grátis
+  no Storage, à parte dos 512 MB do Atlas); o Mongo continua com o documento do comprovante (tamanho, sha256,
+  caminho). Implementado em `ArquivosSupabase` (`src/canteiro_api/arquivos.py`), pela API REST do Storage:
+  - **Montar:** projeto no Supabase (região São Paulo, por LGPD) → Storage → bucket **privado** `comprovantes`
+    (opcional: limite de 5 MB por arquivo e tipos `image/jpeg,image/png,image/webp,application/pdf`; a API envia o
+    tipo real, detectado pelos bytes). Nenhuma policy
+    de RLS: só a API acessa, com a chave secreta.
+  - **Variáveis no Render** (nunca no git): `ARQUIVOS=supabase`, `SUPABASE_URL` (`https://<projeto>.supabase.co`),
+    `SUPABASE_CHAVE_SERVICO` (a `sb_secret_...`, ou a `service_role` antiga) e, se não for `comprovantes`,
+    `SUPABASE_BUCKET`. Faltando URL https ou chave, a API recusa subir.
+  - **Como grava:** objeto `<tenant>/<obra_id>/<nome>`, sem sobrescrever (`x-upsert: false`; "já existe" é o mesmo
+    arquivo, porque o nome sai do sha256). Storage fora do ar vira 503 "tente de novo", e o erro nunca leva a chave.
+  - **Cuidados do plano gratuito:** projeto parado 7 dias **pausa** (os arquivos ficam inacessíveis até reativar no
+    painel); limite de projetos ativos por conta; cota mensal de tráfego de saída.
+  - **Ping contra a pausa:** `GET /saude/arquivos` (pública, sem dado, resultado guardado 10 min) confere o bucket;
+    o workflow `.github/workflows/manter-storage.yml` chama todo dia às 08:23. Run vermelho = a API não abriu o bucket.
+    Em repositório público o GitHub desliga agendamento após 60 dias sem commit (avisa por e-mail; reative em Actions).
+  - **Trocar sem perder arquivo** (`python -m canteiro_api.migrar_arquivos`, com `MONGO_URL`, `MONGO_DB` e as
+    `SUPABASE_*` no ambiente; nada gravado em arquivo):
+    1. Rodar o script: copia tudo, lê de volta do bucket e confere o sha256. Não apaga nada.
+    2. No Render: `ARQUIVOS=supabase` (com as duas `SUPABASE_*` já lá) e esperar o deploy.
+    3. Rodar o script de novo: pega o que chegou no banco entre o passo 1 e o 2.
+    4. Abrir alguns comprovantes no app. Então `--apagar-do-banco`: tira do Mongo só o que está conferido no bucket.
+    Arquivo que não confere fica no banco e aparece no relatório (saída com código 1). Rodar de novo é seguro, e
+    termina um `--apagar-do-banco` que parou no meio. **Depois do passo 4 não há volta para `ARQUIVOS=banco`** sem
+    copiar no sentido contrário: os comprovantes migrados só existem no bucket.
 - **Retenção — decisão pendente (LGPD):** hoje nenhum arquivo é apagado. Estornar/desfazer um gasto ou descartar um
   comprovante mantém o arquivo de propósito (é a prova do pagamento e o Desfazer precisa dele). Falta decidir o prazo
   (ex.: descartados apagados após N dias; confirmados enquanto a obra existir + prazo fiscal) e o pedido de exclusão

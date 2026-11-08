@@ -1,5 +1,5 @@
-"""Arquivos privados (comprovantes de gasto): no próprio banco (padrão e o único aceito em produção), em memória
-(testes) ou no disco (só desenvolvimento).
+"""Arquivos privados (comprovantes de gasto): no próprio banco (padrão), num bucket privado do Supabase Storage (os dois
+aceitos em produção), em memória (testes) ou no disco (só desenvolvimento).
 
 Fica atrás de `Arquivos`, como o `Cofre`, para trocar por um bucket privado sem mexer nas rotas. Ninguém acessa o
 arquivo direto: ele só sai pela rota da API, que confere login e tenant, e a própria porta separa por tenant de novo,
@@ -19,6 +19,8 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Protocol
+
+import httpx
 
 from canteiro_dominio.armazenamento import ConflitoDeId
 
@@ -138,15 +140,122 @@ class ArquivosNoBanco:
         return conteudo if hashlib.sha256(conteudo).hexdigest() == indice["sha256"] else None
 
 
-TIPOS = ("banco", "disco", "memoria")
+class ErroArquivos(RuntimeError):
+    """O serviço de arquivos recusou ou não respondeu. A mensagem leva só o status, nunca a chave nem o corpo."""
 
 
-def criar_arquivos(tipo: str, raiz: str, arm=None) -> Arquivos:
+# O tipo vai no envio porque o bucket pode restringir os tipos aceitos (e o Storage confere pelo cabeçalho). A extensão
+# do caminho sai do `tipo_arquivo.detectar`, que olha os bytes: não é o que o navegador declarou.
+_TIPOS_POR_EXTENSAO = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+                       "pdf": "application/pdf"}
+
+
+def _tipo(caminho: str) -> str:
+    return _TIPOS_POR_EXTENSAO.get(caminho.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+
+
+class ArquivosSupabase:
+    """Bucket PRIVADO do Supabase Storage, pela API REST, com a chave secreta do projeto (só no ambiente do Render).
+
+    Tira os bytes do banco: no M0 do Atlas (512 MB para tudo) um banco cheio de fotos para a obra inteira, não só os
+    comprovantes. O Mongo continua dono do comprovante (tamanho, sha256, caminho); o bucket guarda só o arquivo, em
+    `<tenant>/<obra>/<nome>`. O tenant no prefixo é a mesma segunda trava das outras portas: ler pelo tenant errado
+    procura em outra pasta e volta None.
+
+    Grava sem sobrescrever (`x-upsert: false`): o nome sai do sha256 do conteúdo, então "já existe" é o mesmo arquivo e
+    conta como sucesso, e nem um bug de rota troca a foto de um comprovante já revisado.
+    """
+
+    def __init__(self, url: str, chave: str, bucket: str, *, transporte: httpx.AsyncBaseTransport | None = None,
+                 tempo: float = 30.0):
+        if not url.startswith("https://") and transporte is None:
+            raise RuntimeError("SUPABASE_URL tem de ser https.")
+        if not chave or not _PARTE.match(bucket or ""):
+            raise RuntimeError("ARQUIVOS=supabase precisa de SUPABASE_CHAVE_SERVICO e SUPABASE_BUCKET.")
+        self._base = f"{url.rstrip('/')}/storage/v1/object"
+        self._bucket = bucket
+        # A chave nova (sb_secret_...) não é JWT e vai só no `apikey`: o gateway troca por um token para o Storage. A
+        # antiga (service_role) é JWT e o Storage a quer também no Authorization.
+        self._cabecalhos = {"apikey": chave}
+        if chave.startswith("eyJ"):
+            self._cabecalhos["Authorization"] = f"Bearer {chave}"
+        self._transporte = transporte
+        self._tempo = tempo
+
+    def _cliente(self) -> httpx.AsyncClient:
+        # um cliente por chamada: envio de comprovante é raro, e assim nada fica aberto entre deploys nem em teste
+        return httpx.AsyncClient(headers=self._cabecalhos, timeout=self._tempo, transport=self._transporte)
+
+    def _chave_objeto(self, tenant_id: str, caminho: str) -> str:
+        conferir_caminho(tenant_id, caminho)
+        return f"{self._bucket}/{tenant_id}/{caminho}"   # partes já conferidas: nada a escapar na URL
+
+    @staticmethod
+    def _codigo(r: httpx.Response) -> str:
+        # o formato antigo de erro do Storage responde 400 e põe o motivo no corpo
+        try:
+            corpo = r.json()
+        except ValueError:
+            return ""
+        if not isinstance(corpo, dict):
+            return ""
+        return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "message", "statusCode", "httpStatusCode"))
+
+    async def conferir(self) -> None:
+        """O bucket existe e a chave abre: é o ping que conta como atividade do projeto (o gratuito pausa parado)."""
+        try:
+            async with self._cliente() as c:
+                r = await c.get(f"{self._base.removesuffix('/object')}/bucket/{self._bucket}")
+        except httpx.HTTPError as e:
+            raise ErroArquivos(f"O Storage não respondeu ao conferir ({type(e).__name__}).") from None
+        if not r.is_success:
+            raise ErroArquivos(f"O Storage não abriu o bucket (HTTP {r.status_code}).")
+
+    async def salvar(self, tenant_id: str, caminho: str, conteudo: bytes) -> None:
+        objeto = self._chave_objeto(tenant_id, caminho)
+        try:
+            async with self._cliente() as c:
+                r = await c.post(f"{self._base}/{objeto}", content=conteudo,
+                                 headers={"Content-Type": _tipo(caminho), "x-upsert": "false"})
+        except httpx.HTTPError as e:
+            raise ErroArquivos(f"O Storage não respondeu ao gravar ({type(e).__name__}).") from None
+        if r.is_success:
+            return
+        codigo = self._codigo(r)
+        if r.status_code == 409 or any(x in codigo for x in ("Duplicate", "already_exists", "AlreadyExists",
+                                                              "409")):
+            return
+        raise ErroArquivos(f"O Storage recusou o arquivo (HTTP {r.status_code}).")
+
+    async def ler(self, tenant_id: str, caminho: str) -> bytes | None:
+        objeto = self._chave_objeto(tenant_id, caminho)
+        try:
+            async with self._cliente() as c:
+                r = await c.get(f"{self._base}/authenticated/{objeto}")
+        except httpx.HTTPError as e:
+            raise ErroArquivos(f"O Storage não respondeu ao ler ({type(e).__name__}).") from None
+        if r.is_success:
+            return r.content
+        codigo = self._codigo(r)
+        # bucket errado ou apagado também responde 404: é falha de configuração (503), não "comprovante não existe"
+        if "Bucket" not in codigo and (r.status_code == 404
+                                       or any(x in codigo for x in ("not_found", "NoSuchKey", "404"))):
+            return None
+        raise ErroArquivos(f"O Storage não devolveu o arquivo (HTTP {r.status_code}).")
+
+
+TIPOS = ("banco", "supabase", "disco", "memoria")
+
+
+def criar_arquivos(tipo: str, raiz: str, arm=None, *, supabase_url: str = "", supabase_chave: str = "",
+                   supabase_bucket: str = "comprovantes") -> Arquivos:
     """`banco` usa o armazenamento da app (`arm`), que só existe depois que ela sobe."""
     if tipo == "banco":
         if arm is None:
             raise RuntimeError("ARQUIVOS=banco precisa do armazenamento.")
         return ArquivosNoBanco(arm)
+    if tipo == "supabase":
+        return ArquivosSupabase(supabase_url, supabase_chave, supabase_bucket)
     if tipo == "memoria":
         return ArquivosMemoria()
     if tipo == "disco":
