@@ -413,6 +413,11 @@ async def test_supabase_envia_o_tipo_real_e_bucket_errado_nao_vira_arquivo_sumid
     errado = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "apagado", transporte=httpx.MockTransport(storage))
     with pytest.raises(ErroArquivos, match="HTTP 404"):
         await errado.ler(tenant, f"{obra}/a.jpg")
+    # o formato da doc atual põe o motivo só na mensagem
+    antigo = httpx.Response(404, json={"code": "not_found", "message": "Bucket not found", "httpStatusCode": 404})
+    sem_bucket = ArquivosSupabase(URL_FALSA, CHAVE_FALSA, "b", transporte=httpx.MockTransport(lambda _: antigo))
+    with pytest.raises(ErroArquivos):
+        await sem_bucket.ler(tenant, f"{obra}/a.jpg")
 
 
 # --- configuração: produção não sobe com arquivo em lugar que some ---

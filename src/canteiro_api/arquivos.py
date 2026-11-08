@@ -199,7 +199,7 @@ class ArquivosSupabase:
             return ""
         if not isinstance(corpo, dict):
             return ""
-        return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "statusCode", "httpStatusCode"))
+        return " ".join(str(corpo.get(k, "")) for k in ("code", "error", "message", "statusCode", "httpStatusCode"))
 
     async def conferir(self) -> None:
         """O bucket existe e a chave abre: é o ping que conta como atividade do projeto (o gratuito pausa parado)."""
