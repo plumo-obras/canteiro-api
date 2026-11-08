@@ -377,7 +377,8 @@ atual de cada etapa (contrato + aditivos vigentes).
     orçado atual − realizado (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
     executado pela medição e ainda não realizado, no mês corrente.
   - `totais`: `{orcado, realizado, pago, falta, custo_final, desvio, entregue_sem_pagamento, sem_mes}`; `custo_final`
-    = realizado + Σ falta das etapas = `pago + falta`; `desvio` = custo_final − orçado (o estouro que já houve, e gasto
+    = realizado + Σ falta das etapas, que é `pago + falta` salvo quando o pago adiantado passa de tudo o que falta (o
+    crédito que sobra não aparece na série); `desvio` = custo_final − orçado (o estouro que já houve, e gasto
     fora do orçamento); `entregue_sem_pagamento` = realizado − pago (pedido entregue sem pagamento registrado; está no
     mês corrente). Pago adiantado desconta dos primeiros meses, sem mês negativo.
 
