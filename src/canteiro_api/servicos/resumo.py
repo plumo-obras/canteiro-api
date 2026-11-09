@@ -88,7 +88,17 @@ def _mes(idx: int) -> str:
     return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
 
 
-def _resumo_cronograma(c, hoje: date) -> ResumoCronograma:
+def primeiro_mes(e) -> int | None:
+    return next((j for j, x in enumerate(e.percentuais) if x > 0), None)
+
+
+def comecou(e) -> bool:
+    # Pela medição, não só pelo cronograma: na EMEI as Fundações tinham 4,51% medidos (adiantadas) com o primeiro
+    # % previsto só em dezembro, e o resumo anunciava "em dezembro começam as Fundações".
+    return e.medido_acumulado > 0 or e.situacao not in (None, "nao_comecou")
+
+
+def resumo_cronograma(c, hoje: date) -> ResumoCronograma:
     mes = hoje.isoformat()[:7]
     if not c.inicio:
         return ResumoCronograma(cadastrado=False, mes_corrente=mes, termino_contratual=c.prazo.termino_contratual)
@@ -101,14 +111,6 @@ def _resumo_cronograma(c, hoje: date) -> ResumoCronograma:
         medicoes=len(c.medicoes), pct_previsto_na_medicao=p.pct_previsto_na_medicao, pct_medido=p.pct_medido)
     if 0 <= k < len(c.mensal):
         r.previsto_no_mes, r.pct_previsto_acumulado_no_mes = c.mensal[k].previsto, c.mensal[k].pct_previsto_acumulado
-
-    def primeiro_mes(e) -> int | None:
-        return next((j for j, x in enumerate(e.percentuais) if x > 0), None)
-
-    def comecou(e) -> bool:
-        # Pela medição, não só pelo cronograma: na EMEI as Fundações tinham 4,51% medidos (adiantadas) com o primeiro
-        # % previsto só em dezembro, e o resumo anunciava "em dezembro começam as Fundações".
-        return e.medido_acumulado > 0 or e.situacao not in (None, "nao_comecou")
 
     def no_mes(e, j: int) -> EtapaNoMes:
         return EtapaNoMes(etapa=e.etapa, descricao=e.descricao, pct_no_mes=e.percentuais[j],
@@ -150,7 +152,7 @@ def _resumo_cronograma(c, hoje: date) -> ResumoCronograma:
     return r
 
 
-def _resumo_financeiro(o) -> ResumoFinanceiro:
+def resumo_financeiro(o) -> ResumoFinanceiro:
     t = o.totais
     tem = any(v.ativa and v.tipo == "contrato" for v in o.versoes)
     if not tem and not t.comprometido and not t.cotando:
@@ -165,7 +167,7 @@ def _resumo_financeiro(o) -> ResumoFinanceiro:
         gastos=t.gastos)
 
 
-def _resumo_entregas(pedidos: list[dict], hoje: date, insumos: dict[str, dict]) -> ResumoEntregas:
+def resumo_entregas(pedidos: list[dict], hoje: date, insumos: dict[str, dict]) -> ResumoEntregas:
     r = ResumoEntregas()
     semana = hoje + timedelta(days=7)
     for p in sorted(pedidos, key=lambda p: p.get("previsao") or ""):
@@ -212,8 +214,8 @@ async def resumo_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> Resum
     por_id = {x["insumo"]["id"]: x["insumo"] for x in insumos}
     materiais = [x for x in insumos if x["insumo"].get("tipo", "material") == "material"]
     return ResumoDaObra(
-        obra=obra, hoje=hoje.isoformat(), cronograma=_resumo_cronograma(crono, hoje),
-        financeiro=_resumo_financeiro(orc), entregas=_resumo_entregas(pedidos, hoje, por_id),
+        obra=obra, hoje=hoje.isoformat(), cronograma=resumo_cronograma(crono, hoje),
+        financeiro=resumo_financeiro(orc), entregas=resumo_entregas(pedidos, hoje, por_id),
         almoxarifado=ResumoAlmoxarifado(
             insumos=len(materiais),
             falta_comprar=[FaltaResumo(insumo_id=x["insumo"]["id"], nome=x["insumo"]["nome"],
