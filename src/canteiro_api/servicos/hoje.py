@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
+from canteiro_dominio.gastos import soma_nos_gastos_avulsos
 from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, StatusComprovante, StatusProposta
 from canteiro_dominio.regras import A_CAMINHO
 from canteiro_dominio.tipos import fmt_reais, reais
@@ -164,7 +165,8 @@ def _entregas_atrasadas(d: Dados) -> PontoHoje | None:
 def _faltas_por_etapa(d: Dados) -> dict[str, list[dict]]:
     faltas: dict[str, list[dict]] = {}
     for x in d.insumos:
-        if x["conta"]["comprar"] > 0 and x["insumo"].get("etapa"):
+        # serviço não se compra, se contrata e mede: a mesma régua do "falta comprar" do resumo da obra
+        if x["conta"]["comprar"] > 0 and x["insumo"].get("etapa") and x["insumo"].get("tipo", "material") == "material":
             faltas.setdefault(x["insumo"]["etapa"], []).append(x)
     return faltas
 
@@ -275,7 +277,8 @@ def _so_pranchas(d: Dados) -> PontoHoje | None:
 
 
 def _gastos_sem_etapa(d: Dados) -> PontoHoje | None:
-    sem = [g for g in d.gastos if g.get("etapa") is None]
+    # pagamento de pedido não entra: o custo dele já conta pela entrega, e o a_definir de Gastos também o deixa de fora
+    sem = [g for g in d.gastos if g.get("etapa") is None and soma_nos_gastos_avulsos(g)]
     if not sem:
         return None
     n = len(sem)
@@ -329,20 +332,38 @@ def _semana(d: Dados) -> list[EventoHoje]:
     return sorted(eventos, key=lambda x: (x.data, x.tipo))
 
 
+class _LeituraUnica:
+    """Cronograma, orçamento e Conta leem os mesmos pedidos e gastos, cada um por conta própria. Vale só durante uma
+    chamada, em que todos precisam ver o mesmo retrato da obra."""
+
+    def __init__(self, arm):
+        self._arm = arm
+        self._consultas: dict[str, list[dict]] = {}
+
+    async def consultar(self, consulta: Consulta) -> list[dict]:
+        chave = repr(consulta)
+        if chave not in self._consultas:
+            self._consultas[chave] = await self._arm.consultar(consulta)
+        return list(self._consultas[chave])         # lista nova: quem recebe pode ordenar sem afetar os outros
+
+    def __getattr__(self, nome: str):
+        return getattr(self._arm, nome)
+
+
 async def hoje_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> HojeNaObra:
+    arm = _LeituraUnica(arm)
     obra = await obra_do_tenant(arm, tenant_id, obra_id)
     crono = await cronograma.cronograma_da_obra(arm, tenant_id, obra_id)
     orc = await versoes.orcamento_da_obra(arm, tenant_id, obra_id)
     insumos = await estoque.insumos_com_conta(arm, tenant_id, obra_id)
-    abertos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                  Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
+    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
     propostas = await arm.consultar(Consulta("propostas", tenant_id, [
         Filtro("obra_id", "==", obra_id), Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     comprovantes = await arm.consultar(Consulta("comprovantes", tenant_id, [
         Filtro("obra_id", "==", obra_id), Filtro("status", "==", StatusComprovante.A_REVISAR.value)]))
     gastos = await versoes.gastos_da_obra(arm, tenant_id, obra_id)
     por_id = {x["insumo"]["id"]: x["insumo"] for x in insumos}
-    a_caminho = [p for p in abertos if p["status"] in {s.value for s in A_CAMINHO}]
+    a_caminho = [p for p in pedidos if p["status"] in {s.value for s in A_CAMINHO}]
     resumo_c = resumo_cronograma(crono, hoje)
     d = Dados(obra=obra, hoje=hoje, crono=crono, resumo_crono=resumo_c, orc=orc, insumos=insumos,
               pedidos={p["id"]: p for p in a_caminho}, entregas=resumo_entregas(a_caminho, hoje, por_id),

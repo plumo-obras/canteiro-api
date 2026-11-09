@@ -326,7 +326,7 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `pede_voce`, `atencao`, `a_caminho`, `ok`. `pede_voce`: `desfazendo_aprovacao`, `sem_orcamento`, `gastos_a_conferir`.
   Proposta pendente não vira ponto: a tela mostra um cartão para cada uma, e ela conta em `esperando`. `atencao`: `entregas_atrasadas`, `falta_comprar` (`filtro.etapa`), `etapas_estouradas`,
   `etapas_atrasadas`, `itens_sem_preco`, `orcamento_so_pranchas` (só em orçamento), `gastos_sem_etapa`. `a_caminho`:
-  `entregas_semana`. `falta_comprar`: etapas em andamento e as que começam em até 4 semanas (o cronograma é mensal: conta
+  `entregas_semana`. `falta_comprar` (só material; serviço se contrata e mede): etapas em andamento e as que começam em até 4 semanas (o cronograma é mensal: conta
   do dia 1 do 1º mês); sem cronograma, a 1ª etapa do orçamento com falta.
 - `Evento` = `{data, tipo: "entrega" | "inicio_etapa", titulo, detalhe, acao}`, de hoje até hoje + 7, por data.
 
