@@ -10,6 +10,7 @@ from canteiro_dominio.modelos import Movimento, Obra, Recebimento, StatusPedido,
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
+    AprovacaoSaida,
     AvancarCorpo,
     CronogramaCorpo,
     CronogramaObra,
@@ -19,6 +20,8 @@ from ..esquemas import (
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
+    ItemEditado,
+    ItemOrcamentoEdicao,
     LeituraPlanilha,
     Mapeamento,
     MateriaisDoProjeto,
@@ -44,7 +47,7 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import compras, cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -169,18 +172,20 @@ async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile 
     return previa
 
 
-@r.post("/obras/{obra_id}/orcamento/aprovar", response_model=ObraSaida, tags=["orçamento"])
+@r.patch("/obras/{obra_id}/orcamento/itens/{item_id}", response_model=ItemEditado, tags=["orçamento"])
+async def editar_item_orcamento(obra_id: str, item_id: str, corpo: ItemOrcamentoEdicao,
+                                u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    """Preço e quantidade na própria linha. Com o orçamento aprovado, só o preço de item que estava em R$ 0,00."""
+    return await versoes.editar_item(arm, u, obra_id, item_id, corpo.model_dump(exclude_none=True))
+
+
+@r.post("/obras/{obra_id}/orcamento/aprovar", response_model=AprovacaoSaida, tags=["orçamento"])
 async def aprovar_orcamento(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
-    insumos = await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
-    vigentes = [v for v in await versoes.versoes_da_obra(arm, u.tenant_id, obra_id) if v["ativa"]]
-
-    async def tx_corpo(tx):
-        op = await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos, vigentes)
-        o, entrada = executar_e_registrar(tx, u, op)
-        return {**o, "registro_id": entrada["id"]}
-
-    return await arm.em_transacao(tx_corpo)
+    """Tira a obra de `em_orcamento` e, com contrato importado, gera os insumos de Compras."""
+    try:
+        return await compras.aprovar(arm, u, obra_id)
+    except ConflitoDeId:
+        raise Conflito("Alguém cadastrou um destes insumos agora há pouco; aprove de novo.") from None
 
 
 async def _ler_arquivo(arquivo: UploadFile) -> bytes:

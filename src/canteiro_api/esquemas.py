@@ -73,6 +73,7 @@ class ContaSaida(BaseModel):
     falta: int
     comprar: int
     sobra: int = Field(0, description="milésimos que já tem ou vêm além do que precisa (0 sem previsão)")
+    medido: int = Field(0, description="serviço: milésimos já medidos (não é saldo, mas desconta da falta)")
     sem_previsao: bool = Field(False, description="precisa = 0: ninguém lançou a previsão; NÃO quer dizer que não "
                                                   "precisa")
     texto: str = Field("", description="a linha de conta pronta (regras.texto_da_conta), sempre aritmética verdadeira")
@@ -422,6 +423,11 @@ class ObraSaida(Obra):
     registro_id: str | None = Field(None, description="a EntradaRegistro da mudança (null quando nada mudou)")
 
 
+class AprovacaoSaida(ObraSaida):
+    insumos_criados: int = Field(0, description="itens do orçamento que viraram insumo em Compras")
+    insumos_atualizados: int = Field(0, description="insumos que já existiam e receberam a previsão do orçamento")
+
+
 # --- orçamento por planilha ---
 
 class ColunaPlanilha(BaseModel):
@@ -522,6 +528,17 @@ class MateriaisDoProjeto(BaseModel):
     origem: str = Field(min_length=1, max_length=80, description="vai no registro: \"projeto estrutural\"")
     itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
     aplicar: bool = False
+
+
+class ItemOrcamentoEdicao(Entrada):
+    quantidade: int | None = Field(None, description="milésimos; negativa só em aditivo (supressão)")
+    valor_unitario: int | None = Field(None, ge=0, description="centavos")
+
+
+class ItemEditado(BaseModel):
+    item: ItemOrcamento
+    total_versao: int = Field(description="centavos; o total da versão já com a edição")
+    registro_id: str
 
 
 class EstruturaCorpo(Entrada):

@@ -4,10 +4,12 @@ import pytest
 from canteiro_dominio.regras import (
     ItemParaCompras,
     RegraViolada,
+    conta_de_falta,
     insumo_ao_aprovar,
     insumo_com_aditivo,
     itens_para_compras,
     preco_medio,
+    texto_da_conta,
 )
 
 
@@ -66,3 +68,10 @@ def test_ao_aprovar_fica_o_maior_e_nao_troca_preco_ja_lancado():
 def test_aditivo_soma_e_supressao_nao_passa_de_zero():
     assert insumo_com_aditivo({"precisa_ate_o_fim": 5000, "valor_unitario": 300}, compra())["precisa_ate_o_fim"] == 6000
     assert insumo_com_aditivo({"precisa_ate_o_fim": 500}, compra(quantidade=-900))["precisa_ate_o_fim"] == 0
+
+
+def test_servico_medido_nao_falta_e_nao_vira_saldo():
+    c = conta_de_falta(precisa=10_000, saldo=0, a_caminho=2_000, medido=3_000)
+    assert (c.falta, c.saldo, c.medido) == (5_000, 0, 3_000)
+    assert "− medido 3 m²" in texto_da_conta(c, "m²")
+    assert "medido" not in texto_da_conta(conta_de_falta(precisa=10_000, saldo=0), "m²")

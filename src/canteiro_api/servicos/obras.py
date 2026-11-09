@@ -103,7 +103,8 @@ async def insumos_da_obra(arm, tenant_id: str, obra_id: str) -> list[dict]:
 
 
 async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos: list[dict],
-                                     vigentes: list[dict] | None = None) -> Operacao:
+                                     vigentes: list[dict] | None = None,
+                                     aprovacao_id: str | None = None) -> Operacao:
     """Com contrato importado (EAP), aprova o orçado atual (contrato + aditivos vigentes), o mesmo número que a tela
     confirma; sem contrato, a lista de materiais (o caminho do MVP-0)."""
     o = await obra_do_tenant(tx, u.tenant_id, obra_id)
@@ -111,7 +112,8 @@ async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos:
         raise Conflito("O orçamento já foi aprovado.")
     lidas = [await tx.obter("versoes_orcamento", u.tenant_id, v["id"]) for v in vigentes or []]
     # relidas na transação: se alguma importação ou desfazer mudou as versões nesse meio-tempo, o total seria outro
-    if any(not v or not v["ativa"] for v in lidas):
+    if any(not v or not v["ativa"] for v in lidas) or [(v["total"], v.get("edicoes", 0)) for v in lidas] != [
+            (v["total"], v.get("edicoes", 0)) for v in vigentes or []]:
         raise Conflito("O orçamento mudou agora há pouco; confira e aprove de novo.")
     if any(v["tipo"] == "contrato" for v in lidas):
         n, total, oque = sum(v["itens"] for v in lidas), sum(v["total"] for v in lidas), "item"
@@ -134,7 +136,8 @@ async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos:
     qtd_itens = f"{n} " + (oque if n == 1 else {"item": "itens", "insumo": "insumos"}[oque])
     return Operacao(obra_id=obra_id, aplicar=aplicar,
                     texto=lambda d: f"Aprovou o orçamento de {o['nome']} ({qtd_itens}, {fmt_reais(total)})",
-                    desfazer=lambda d: {"op": "reabrir_orcamento", "obra_id": obra_id})
+                    desfazer=lambda d: {"op": "reabrir_orcamento", "obra_id": obra_id,
+                                        **({"aprovacao_id": aprovacao_id} if aprovacao_id else {})})
 
 
 async def preparar_reabrir(tx, u: UsuarioAtual, receita: dict) -> Operacao:

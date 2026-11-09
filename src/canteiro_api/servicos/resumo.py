@@ -32,7 +32,11 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
         return []
     insumos = estoque.ativos(await arm.consultar(Consulta("insumos", tenant_id)))
     saldos = {s["id"]: s["saldo"] for s in await arm.consultar(Consulta("saldos", tenant_id))}
-    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
+    # os conferidos vêm só para a medição de serviço, que continua valendo depois de o pedido fechar
+    com_conferidos = await arm.consultar(Consulta("pedidos", tenant_id, [
+        Filtro("status", "in", [*estoque.PEDIDOS_ABERTOS, StatusPedido.CONFERIDO.value])]))
+    pedidos = [p for p in com_conferidos if p["status"] in estoque.PEDIDOS_ABERTOS]
+    medido = estoque.medido_por_insumo(com_conferidos)
     pendentes = await arm.consultar(Consulta("propostas", tenant_id,
                                              [Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     # o prazo projetado depende do orçamento e das medições: só se calcula para a obra que tem cronograma montado
@@ -51,7 +55,7 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
     saida = []
     for o in obras:
         ped = pedidos_de.get(o["id"], [])
-        contas = estoque.com_conta(insumos_de.get(o["id"], []), saldos, ped)
+        contas = estoque.com_conta(insumos_de.get(o["id"], []), saldos, ped, medido)
         # a última atividade é a entrada mais nova do registro: uma leitura de 1 documento por obra
         ultima = await arm.consultar(Consulta("registro", tenant_id, [Filtro("obra_id", "==", o["id"])],
                                               [("criado_em", "desc")], limite=1))

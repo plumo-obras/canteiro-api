@@ -48,7 +48,7 @@ from ..nucleo import (
     obra_do_tenant,
     registrar,
 )
-from . import cronograma, fornecedores, gastos, obras, pedidos, versoes
+from . import compras, cronograma, fornecedores, gastos, obras, pedidos, versoes
 from .estoque import (
     id_derivado,
     linhas_de,
@@ -388,6 +388,7 @@ _DESFAZER = {
     "restaurar_obra": obras.preparar_restaurar,
     "reabrir_orcamento": obras.preparar_reabrir,
     "desligar_versao": versoes.preparar_desligar,
+    "editar_item_orcamento": versoes.preparar_desfazer_item,
     "restaurar_insumos": preparar_restaurar_insumos,
     "editar_arvore": gastos.preparar_desfazer_arvore,
     "estornar_gasto": gastos.preparar_estorno_gasto,
@@ -409,6 +410,12 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
     if receita_previa.get("op") == "restaurar_insumos" and receita_previa.get("arquivar"):
         await recusar_se_ha_pedido_aberto(arm, u.tenant_id, receita_previa["obra_id"],
                                           [x["id"] for x in receita_previa["arquivar"]])
+    elif receita_previa.get("op") == "desligar_versao" and (receita_previa.get("compras") or {}).get("arquivar"):
+        await recusar_se_ha_pedido_aberto(arm, u.tenant_id, receita_previa["compras"]["obra_id"],
+                                          [x["id"] for x in receita_previa["compras"]["arquivar"]])
+    elif (receita_previa.get("op") == "reabrir_orcamento" and receita_previa.get("aprovacao_id")
+          and not previa["desfeito"]):
+        await compras.desfazer_aprovacao(arm, u, receita_previa)
     # a árvore de gasto depende do orçamento da obra, e consultar o orçamento não pode ser dentro da transação
     base_arvore = (await gastos.base_para_desfazer_arvore(arm, u.tenant_id, receita_previa)
                    if receita_previa.get("op") == "editar_arvore" else None)

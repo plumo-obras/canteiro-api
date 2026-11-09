@@ -28,19 +28,22 @@ class Conta:
     # Ninguém lançou quanto a obra precisa (precisa = 0). Não quer dizer que não precisa: quer dizer que o sistema não
     # sabe. Foi o "precisa 0 … = falta 0" que levou o agente a concluir "a obra não precisa de cimento".
     sem_previsao: bool = False
+    # Serviço já medido. Não é saldo (serviço não fica guardado em lugar nenhum), mas também não falta mais comprar.
+    medido: int = 0
 
 
-def conta_de_falta(*, precisa: int, saldo: int, a_caminho: int = 0, cotando: int = 0, transferencia: int = 0) -> Conta:
-    """falta = precisa − saldo − a caminho − em cotação − transferência (em milésimos).
+def conta_de_falta(*, precisa: int, saldo: int, a_caminho: int = 0, cotando: int = 0, transferencia: int = 0,
+                   medido: int = 0) -> Conta:
+    """falta = precisa − saldo − a caminho − em cotação − transferência − medido (em milésimos).
 
     Descontar o que está em cotação evita a compra em dobro (erro achado no protótipo: o pedido de compra incluía itens
     já cotados). Saldo negativo (baixa registrada antes da entrada) conta como zero para não inflar a falta.
     """
-    disponivel = max(0, saldo) + a_caminho + cotando + transferencia
+    disponivel = max(0, saldo) + a_caminho + cotando + transferencia + medido
     sem_previsao = precisa <= 0
     falta = max(0, precisa - disponivel)
     sobra = 0 if sem_previsao else max(0, disponivel - precisa)
-    return Conta(precisa, saldo, a_caminho, cotando, transferencia, falta, falta, sobra, sem_previsao)
+    return Conta(precisa, saldo, a_caminho, cotando, transferencia, falta, falta, sobra, sem_previsao, medido)
 
 
 def texto_da_conta(c: Conta, unidade: str) -> str:
@@ -59,12 +62,14 @@ def texto_da_conta(c: Conta, unidade: str) -> str:
                 f" · saldo {saldo} · a caminho {f(c.a_caminho)} · em cotação {f(c.cotando)}"
                 f" · transferência {f(c.transferencia)}")
     if c.sobra:
-        disponivel = max(0, c.saldo) + c.a_caminho + c.cotando + c.transferencia
+        disponivel = max(0, c.saldo) + c.a_caminho + c.cotando + c.transferencia + c.medido
         return (f"saldo {saldo} + a caminho {f(c.a_caminho)} + em cotação {f(c.cotando)}"
-                f" + transferência {f(c.transferencia)} = {f(disponivel)} para precisa {f(c.precisa)}:"
+                f" + transferência {f(c.transferencia)}{f' + medido {f(c.medido)}' if c.medido else ''}"
+                f" = {f(disponivel)} para precisa {f(c.precisa)}:"
                 f" sobra {f(c.sobra)}, falta 0")
     return (f"precisa {f(c.precisa)} − saldo {saldo} − a caminho {f(c.a_caminho)} − em cotação {f(c.cotando)}"
-            f" − transferência {f(c.transferencia)} = falta {f(c.falta)}")
+            f" − transferência {f(c.transferencia)}{f' − medido {f(c.medido)}' if c.medido else ''}"
+            f" = falta {f(c.falta)}")
 
 
 _SINAL = {

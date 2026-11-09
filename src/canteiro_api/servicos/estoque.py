@@ -137,7 +137,19 @@ def valor_em_aberto(p: dict) -> int:
                for x in linhas_de(p) if x["quantidade"])
 
 
-def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) -> list[dict]:
+def medido_por_insumo(pedidos: list[dict]) -> dict[str, int]:
+    """O que já foi medido de cada serviço. Serviço não entra no almoxarifado, então o que chegou não vira saldo:
+    sem somar isto, o serviço entregue voltaria inteiro para "Falta comprar" assim que o pedido fechasse."""
+    medido: dict[str, int] = {}
+    for p in pedidos:
+        for x in linhas_de(p):
+            if x.get("tipo") == TipoInsumo.SERVICO.value and x.get("recebida"):
+                medido[x["insumo_id"]] = medido.get(x["insumo_id"], 0) + x["recebida"]
+    return medido
+
+
+def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict],
+              medido: dict[str, int] | None = None) -> list[dict]:
     """Junta insumos, saldos e pedidos abertos já lidos. Separado da leitura para o resumo de obras reaproveitar a
     mesma conta lendo o tenant inteiro de uma vez. A caminho é o que falta entregar em cada linha: a parte que já
     chegou está no saldo, e contá-la de novo esconderia uma falta."""
@@ -152,6 +164,7 @@ def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) 
     saida = []
     for i in insumos:
         c = conta_de_falta(precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0),
+                           medido=(medido or {}).get(i["id"], 0),
                            a_caminho=a_caminho.get(i["id"], 0), cotando=cotando.get(i["id"], 0), transferencia=0)
         saida.append({"insumo": i, "conta": {**asdict(c), "texto": texto_da_conta(c, i.get("unidade", ""))}})
     return saida
@@ -194,7 +207,8 @@ async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     todos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
     abertos = [p for p in todos if p["status"] in PEDIDOS_ABERTOS]
     precos = ultimos_precos(todos)
-    return [{**x, "ultimo_preco": precos.get(x["insumo"]["id"])} for x in com_conta(insumos, saldos, abertos)]
+    return [{**x, "ultimo_preco": precos.get(x["insumo"]["id"])}
+            for x in com_conta(insumos, saldos, abertos, medido_por_insumo(todos))]
 
 
 def _nome_chave(nome: str) -> str:
