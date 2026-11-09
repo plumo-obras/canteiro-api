@@ -148,7 +148,8 @@ e o comprovante enviado de manhã sumiria antes da revisão.
   ~350 MB: hora de subir o plano (M10/Flex) ou mover os arquivos para um bucket privado (a porta `Arquivos` já isola a
   troca; o GCS vem junto com o Firestore). Arquivo duplicado não ocupa espaço de novo (o nome sai do sha256 do
   conteúdo), e como pedaços e índice vão na mesma transação, envio interrompido não deixa sobra.
-- **Alternativa: bucket privado no Supabase Storage (`ARQUIVOS=supabase`).** Tira os bytes do M0 (1 GB grátis
+- **Bucket privado no Supabase Storage (`ARQUIVOS=supabase`) — o modo de PRODUÇÃO desde 09/11/2026** (projeto em
+  us-east-1, perto do Render em Virginia; os 9 comprovantes da época migrados e apagados do Mongo). Tira os bytes do M0 (1 GB grátis
   no Storage, à parte dos 512 MB do Atlas); o Mongo continua com o documento do comprovante (tamanho, sha256,
   caminho). Implementado em `ArquivosSupabase` (`src/canteiro_api/arquivos.py`), pela API REST do Storage:
   - **Montar:** projeto no Supabase (região São Paulo, por LGPD) → Storage → bucket **privado** `comprovantes`
