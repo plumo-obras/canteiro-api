@@ -27,7 +27,15 @@ from ..esquemas import (
     PreviaOrcamento,
 )
 from ..modelos import doc
-from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant
+from ..nucleo import (
+    Conflito,
+    ErroNegocio,
+    Operacao,
+    evento,
+    executar_e_registrar,
+    obra_do_tenant,
+    recusar_se_desfazendo,
+)
 from .estoque import _nome_chave, criado, gravar_insumo_novo, id_insumo, receita_insumos
 from .importacao import decodificar
 from .obras import insumos_da_obra
@@ -370,7 +378,7 @@ def _arredonda(d: Decimal) -> int:
 
 async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo: str, m: Mapeamento,
                    aplicar: bool) -> PreviaOrcamento:
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
     faltando = [r for c, r in (("nome", "descrição"), ("unidade", "unidade"), ("quantidade", "quantidade"))
                 if getattr(m, c) is None]
     if faltando:
@@ -456,7 +464,7 @@ async def materiais_do_projeto(arm, u: UsuarioAtual, obra_id: str, corpo: Materi
     """A lista de materiais das pranchas entra como a lista de materiais da planilha: a mesma prévia (novo ou atualiza,
     com o antes), os mesmos lotes e o mesmo Desfazer. O "precisa" de cada insumo passa a ser o do projeto; a conta do
     que falta comprar (precisa − saldo − a caminho) é a de sempre."""
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
     existentes = {_nome_chave(i["nome"]): i for i in await insumos_da_obra(arm, u.tenant_id, obra_id)}
     itens: dict[str, dict] = {}
     erros: list[ErroLinha] = []

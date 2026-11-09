@@ -1,6 +1,6 @@
 """Obra: criar (onboarding), corrigir os dados e aprovar o orçamento, que tira a obra de `em_orcamento`."""
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import Obra
+from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, Obra
 from canteiro_dominio.tipos import fmt_reais
 
 from ..auth import UsuarioAtual
@@ -144,12 +144,13 @@ async def preparar_reabrir(tx, u: UsuarioAtual, receita: dict) -> Operacao:
     o = await tx.obter("obras", u.tenant_id, receita["obra_id"])
     if not o:
         raise NaoEncontrado("Obra não encontrada.")
-    if o["status"] != "em_andamento":
+    if o["status"] not in ("em_andamento", DESFAZENDO_APROVACAO):
         raise Conflito("A obra já mudou de situação desde então; não dá para desfazer.")
+    campos = {"status": "em_orcamento", "desfazendo_registro_id": None}
 
     def aplicar():
-        tx.atualizar("obras", u.tenant_id, o["id"], {"status": "em_orcamento"})
-        return {**o, "status": "em_orcamento"}
+        tx.atualizar("obras", u.tenant_id, o["id"], campos)
+        return {**o, **campos}
 
     return Operacao(obra_id=o["id"], aplicar=aplicar,
                     texto=lambda d: f"Desfeito: orçamento de {o['nome']} reaberto", desfazer=lambda d: None)

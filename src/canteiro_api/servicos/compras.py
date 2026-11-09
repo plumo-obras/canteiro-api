@@ -6,13 +6,13 @@ depois de uma queda no meio continua de onde parou. O rastro para o Desfazer fic
 na receita: a lista inteira não caberia num documento.
 """
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import Insumo, Saldo, StatusPedido, TipoVersao, agora
+from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, Insumo, Saldo, StatusPedido, TipoVersao, agora
 from canteiro_dominio.regras import RegraViolada, chave_do_nome, insumo_ao_aprovar, itens_para_compras
 
 from ..armazenamento.base import normalizar
 from ..auth import UsuarioAtual
 from ..modelos import doc
-from ..nucleo import Conflito, executar_e_registrar, obra_do_tenant
+from ..nucleo import Conflito, executar_e_registrar, obra_do_tenant, recusar_se_desfazendo
 from . import obras, orcamento, versoes
 from .estoque import gravar_insumo_novo, id_derivado, id_insumo
 
@@ -80,6 +80,7 @@ def _id_aprovacao(tenant_id: str, obra_id: str, vigentes: list[dict]) -> str:
 
 async def aprovar(arm, u: UsuarioAtual, obra_id: str) -> dict:
     o = await obra_do_tenant(arm, u.tenant_id, obra_id)
+    recusar_se_desfazendo(o)
     if o["status"] != "em_orcamento":
         raise Conflito("O orçamento já foi aprovado.")
     insumos = await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
@@ -103,25 +104,37 @@ async def aprovar(arm, u: UsuarioAtual, obra_id: str) -> dict:
 
 
 # --- desfazer ---
+#
+# Também em lotes, e também repetível: a 1ª rodada marca a obra (`desfazendo_aprovacao`), e o registro só fica desfeito
+# na transação final, que devolve a obra para `em_orcamento`. Se parar no meio, por queda ou por 409, o insumo já
+# revertido sai da conta (arquivado, ou sem o rastro da aprovação) e rodar o Desfazer de novo continua dali.
 
-def _intacto(i: dict, saldo: dict | None) -> bool:
-    """Saldo zerado e no instante do cadastro: qualquer movimento troca o `atualizado_em`, mesmo entrada e saída que se
-    anulam."""
-    return saldo is None or (saldo["saldo"] == 0 and normalizar(saldo["atualizado_em"]) == normalizar(i["criado_em"]))
+def _intacto(i: dict, saldo: dict | None, com_movimento: set[str]) -> bool:
+    """Saldo no instante do cadastro: nada se mexeu. Se o instante mudou, ainda vale quando todo movimento foi
+    estornado: é assim que a pessoa resolve o que travou o Desfazer. Entrada e saída que se anulam sem estorno não
+    contam: o material passou pela obra."""
+    if saldo is None:
+        return True
+    return saldo["saldo"] == 0 and (normalizar(saldo["atualizado_em"]) == normalizar(i["criado_em"])
+                                    or i["id"] not in com_movimento)
 
 
 def _mudou(i: dict) -> bool:
     return any(i.get(k) != x for k, x in i["aprovacao"]["depois"].items())
 
 
-def _reverter_lote(u: UsuarioAtual, lote: list[dict]):
+def _reverter_lote(u: UsuarioAtual, lote: list[dict], vistos: dict[str, object]):
+    """`vistos` = o `atualizado_em` de cada saldo na conferência: se mudou, entrou movimento depois dela."""
     async def corpo(tx):
         lidos = [(await tx.obter("insumos", u.tenant_id, x["id"]), await tx.obter("saldos", u.tenant_id, x["id"]))
                  for x in lote]
         for i, saldo in lidos:
-            if _mudou(i) or (i["aprovacao"]["antes"] is None and not _intacto(i, saldo)):
-                raise Conflito(f"{i['nome']} teve movimento ou mudou desde então; não dá para desfazer.")
-            if i["aprovacao"]["antes"] is None:
+            novo = i["aprovacao"]["antes"] is None
+            mexeu = saldo is not None and (saldo["saldo"] != 0
+                                           or normalizar(saldo["atualizado_em"]) != vistos.get(i["id"]))
+            if _mudou(i) or (novo and mexeu):
+                raise Conflito(f"{i['nome']} teve movimento ou mudou desde então; resolva e desfaça de novo.")
+            if novo:
                 tx.atualizar("insumos", u.tenant_id, i["id"], {"arquivado": True})
                 if saldo is not None:
                     # o saldo foi lido para decidir: a transação grava nele (regra da porta)
@@ -131,16 +144,8 @@ def _reverter_lote(u: UsuarioAtual, lote: list[dict]):
     return corpo
 
 
-async def desfazer_aprovacao(arm, u: UsuarioAtual, receita: dict) -> None:
-    """Fora da transação do Desfazer, porque consulta e pode não caber numa só: confere tudo antes de mexer em qualquer
-    insumo, e só então reverte em lotes. Quem vira o status de volta é a transação do Desfazer, por último.
-
-    Sobra a janela de alguém dar entrada num insumo entre a conferência e o lote dele: o lote relê cada insumo para não
-    apagar o movimento e o Desfazer para com 409, com os lotes anteriores já fora de Compras."""
-    obra_id, aprovacao_id = receita["obra_id"], receita["aprovacao_id"]
-    o = await arm.obter("obras", u.tenant_id, obra_id)
-    if not o or o["status"] != "em_andamento":
-        return                         # a transação do Desfazer dá a resposta certa para isso
+async def _conferir(arm, u: UsuarioAtual, obra_id: str, aprovacao_id: str) -> tuple[list[dict], dict]:
+    """O que falta reverter e o `atualizado_em` de cada saldo, depois de conferir que tudo pode ser revertido."""
     if any(v["ativa"] and v.get("gerou_compras") for v in await versoes.versoes_da_obra(arm, u.tenant_id, obra_id)):
         raise Conflito("Há aditivo lançado depois da aprovação; desfaça o aditivo primeiro.")
     gerados = [i for i in await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
@@ -155,11 +160,41 @@ async def desfazer_aprovacao(arm, u: UsuarioAtual, receita: dict) -> None:
                                    "antes de desfazer a aprovação.")
     saldos = {s["id"]: s for s in await arm.consultar(Consulta("saldos", u.tenant_id,
                                                                [Filtro("obra_id", "==", obra_id)]))}
+    com_movimento: set[str] = set()
+    if any(s["id"] in novos and normalizar(s["atualizado_em"]) != normalizar(novos[s["id"]]["criado_em"])
+           for s in saldos.values()):
+        movimentos = await arm.consultar(Consulta("movimentos", u.tenant_id, [Filtro("obra_id", "==", obra_id)]))
+        estornados = {m["desfaz"] for m in movimentos if m.get("desfaz")}
+        com_movimento = {m["insumo_id"] for m in movimentos if not m.get("desfaz") and m["id"] not in estornados}
     for i in gerados:
         if _mudou(i):
             raise Conflito(f"{i['nome']} foi editado depois da aprovação; não dá para desfazer.")
-        if i["id"] in novos and not _intacto(i, saldos.get(i["id"])):
-            raise Conflito(f"{i['nome']} teve movimento depois da aprovação; não dá para desfazer.")
-    for k in range(0, len(gerados), INSUMOS_POR_LOTE):
-        await arm.em_transacao(_reverter_lote(u, gerados[k:k + INSUMOS_POR_LOTE]))
+        if i["id"] in novos and not _intacto(i, saldos.get(i["id"]), com_movimento):
+            raise Conflito(f"{i['nome']} teve movimento depois da aprovação; estorne-o antes de desfazer a aprovação.")
+    return gerados, {k: normalizar(s["atualizado_em"]) for k, s in saldos.items()}
 
+
+def _marcar(u: UsuarioAtual, obra_id: str, entrada_id: str):
+    async def corpo(tx):
+        o = await tx.obter("obras", u.tenant_id, obra_id)
+        if o["status"] not in ("em_andamento", DESFAZENDO_APROVACAO):
+            raise Conflito("A obra já mudou de situação desde então; não dá para desfazer.")
+        tx.atualizar("obras", u.tenant_id, obra_id,
+                     {"status": DESFAZENDO_APROVACAO, "desfazendo_registro_id": entrada_id})
+    return corpo
+
+
+async def desfazer_aprovacao(arm, u: UsuarioAtual, entrada_id: str, receita: dict) -> None:
+    """Fora da transação do Desfazer, porque consulta e pode não caber numa só. Quem devolve a obra para `em_orcamento`
+    é a transação do Desfazer, por último."""
+    obra_id, aprovacao_id = receita["obra_id"], receita["aprovacao_id"]
+    o = await arm.obter("obras", u.tenant_id, obra_id)
+    if not o or o["status"] not in ("em_andamento", DESFAZENDO_APROVACAO):
+        return                         # a transação do Desfazer dá a resposta certa para isso
+    # a 1ª conferência é antes de marcar: se já há o que trave, a obra continua aprovada, sem nada pela metade
+    await _conferir(arm, u, obra_id, aprovacao_id)
+    await arm.em_transacao(_marcar(u, obra_id, entrada_id))
+    # a de agora pega o que foi gravado antes de a marca valer; daqui em diante nada novo entra em Compras
+    gerados, vistos = await _conferir(arm, u, obra_id, aprovacao_id)
+    for k in range(0, len(gerados), INSUMOS_POR_LOTE):
+        await arm.em_transacao(_reverter_lote(u, gerados[k:k + INSUMOS_POR_LOTE], vistos))

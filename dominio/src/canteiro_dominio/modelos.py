@@ -24,12 +24,20 @@ class Documento(BaseModel):
     criado_em: datetime = Field(default_factory=agora)
 
 
+# O Desfazer da aprovação roda em lotes e pode parar no meio: enquanto não termina, a obra não está aprovada nem em
+# orçamento, e Compras está pela metade.
+DESFAZENDO_APROVACAO = "desfazendo_aprovacao"
+
+
 class Obra(Documento):
     nome: str
     cidade: str = ""
     cep: str = ""
     verba: Centavos = 0
-    status: str = "em_andamento"          # em_andamento | em_orcamento | concluida
+    # em_andamento | em_orcamento | concluida | desfazendo_aprovacao
+    status: str = "em_andamento"
+    # Na obra em `desfazendo_aprovacao`: o registro cujo Desfazer ficou pela metade, para a tela oferecer retomar.
+    desfazendo_registro_id: str | None = None
     # Dados do onboarding: todos opcionais, porque a obra nasce com o nome e o resto chega quando a pessoa souber.
     endereco: str = ""
     uf: str = ""

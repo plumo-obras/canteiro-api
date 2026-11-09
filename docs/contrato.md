@@ -298,8 +298,12 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   preço só entra se o dele for 0. Mesmo nome com unidades diferentes (no orçamento, ou contra o cadastrado) → 422
   listando os itens, sem aprovar. Grava em lotes e só a última transação vira o status e o registro (repetir depois de
   uma queda é seguro). Desfazer: arquiva os insumos gerados (reaprovar reaproveita os IDs) e devolve os atualizados; 409
-  se algum gerado teve pedido não cancelado ou movimento, se foi editado depois, ou se há aditivo lançado após a
-  aprovação (desfaça o aditivo primeiro).
+  se algum gerado teve pedido não cancelado ou movimento não estornado, se foi editado depois, ou se há aditivo lançado
+  após a aprovação (desfaça o aditivo primeiro). **Em lotes e retomável:** se parar no meio (queda ou 409), a obra fica
+  com `status: "desfazendo_aprovacao"` e `desfazendo_registro_id` (o registro a desfazer de novo); o mesmo
+  `POST /registro/{id}/desfazer` continua de onde parou e só no fim a obra volta a `em_orcamento`. Nesse estado Compras
+  está pela metade, e criar pedido, receber entrega, lançar movimento, cadastrar ou importar insumo, editar linha,
+  importar versão e aprovar → 409; cancelar pedido e estornar movimento continuam valendo, para resolver o que travou.
 - **Com a obra aprovada:** aditivo mexe em Compras na hora (item novo vira insumo, item existente soma, supressão reduz
   até 0; até 200 itens por aditivo; unidade diferente → 422), e o Desfazer do aditivo volta isso. Trocar o contrato →
   409 "desfaça a aprovação ou lance um aditivo".

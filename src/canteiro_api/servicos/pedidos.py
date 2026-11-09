@@ -26,6 +26,7 @@ from ..nucleo import (
     insumo_da_obra,
     obra_do_tenant,
     receita_inversa,
+    recusar_se_desfazendo,
     verbo_desfazer,
 )
 from .estoque import dia_local, id_derivado, linhas_de, preparar_estorno, preparar_movimento
@@ -54,7 +55,7 @@ async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: Pedido
     """`status` = aprovado quando a compra já foi decidida (proposta aprovada, ou a pessoa marcou na tela): pedir uma
     segunda aprovação do mesmo pedido seria burocracia sem informação nova. A etapa de cada linha é conferida contra o
     orçamento antes da transação (é consulta, e a transação só lê por ID)."""
-    await obra_do_tenant(tx, u.tenant_id, obra_id)
+    recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, obra_id))
     if corpo.fornecedor_id and not await tx.obter("fornecedores", u.tenant_id, corpo.fornecedor_id):
         raise NaoEncontrado("Fornecedor não encontrado.")
     linhas: list[LinhaPedido] = []
@@ -111,6 +112,7 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
     """Registra uma entrega: `entregas` = [(índice da linha, quantidade)]. Material entra no almoxarifado; serviço só
     soma o medido. Status vira conferido quando nada mais falta, senão parcial."""
     p = _normalizado(await _pedido(tx, u.tenant_id, pedido_id))
+    recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, p["obra_id"]))
     de = StatusPedido(p["status"])
     if de not in PODE_RECEBER:
         raise RegraViolada(f"{p['numero']} está {de.value}: não recebe entrega.")

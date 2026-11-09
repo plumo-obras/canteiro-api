@@ -415,7 +415,7 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
                                           [x["id"] for x in receita_previa["compras"]["arquivar"]])
     elif (receita_previa.get("op") == "reabrir_orcamento" and receita_previa.get("aprovacao_id")
           and not previa["desfeito"]):
-        await compras.desfazer_aprovacao(arm, u, receita_previa)
+        await compras.desfazer_aprovacao(arm, u, entrada_id, receita_previa)
     # a árvore de gasto depende do orçamento da obra, e consultar o orçamento não pode ser dentro da transação
     base_arvore = (await gastos.base_para_desfazer_arvore(arm, u.tenant_id, receita_previa)
                    if receita_previa.get("op") == "editar_arvore" else None)

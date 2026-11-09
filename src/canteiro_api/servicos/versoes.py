@@ -52,6 +52,7 @@ from ..nucleo import (
     executar_e_registrar,
     obra_do_tenant,
     receita_inversa,
+    recusar_se_desfazendo,
     verbo_desfazer,
 )
 from .estoque import (
@@ -301,6 +302,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     itens, ignoradas, erros, avisos = _ler(grade, m, tipo)
     versoes = await versoes_da_obra(arm, u.tenant_id, obra_id)
     vigente = _contrato_vigente(versoes)
+    recusar_se_desfazendo(o)
     aprovada = o["status"] != "em_orcamento"
     if aprovada and vigente and tipo == TipoVersao.CONTRATO:
         # Compras já saiu deste contrato: trocá-lo deixaria os insumos e os pedidos descolados do orçamento
@@ -630,6 +632,7 @@ async def _preparar_editar_item(tx, u: UsuarioAtual, obra_id: str, item_id: str,
                                 insumo_id: str | None, preco: int | None) -> Operacao:
     # a corrida com a aprovação se resolve na versão: esta transação e a da aprovação gravam nela
     o = await obra_do_tenant(tx, u.tenant_id, obra_id)
+    recusar_se_desfazendo(o)
     item = await tx.obter("itens_orcamento", u.tenant_id, item_id)
     if not item or item["obra_id"] != obra_id:
         raise NaoEncontrado("Item do orçamento não encontrado nesta obra.")

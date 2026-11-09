@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import EntradaRegistro
+from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, EntradaRegistro
 
 from .armazenamento.base import normalizar
 from .auth import UsuarioAtual
@@ -79,6 +79,13 @@ def receita_inversa(receita: dict) -> dict:
 
 def verbo_desfazer(receita: dict) -> str:
     return "Refeito" if receita.get("refazer") else "Desfeito"
+
+
+def recusar_se_desfazendo(obra: dict) -> None:
+    """Compras está pela metade: nada novo entra nela até o Desfazer da aprovação terminar. Cancelar pedido e estornar
+    movimento continuam valendo, porque são o caminho para resolver o que travou o Desfazer."""
+    if obra["status"] == DESFAZENDO_APROVACAO:
+        raise Conflito("O Desfazer da aprovação desta obra parou no meio; termine-o antes de continuar.")
 
 
 async def obra_do_tenant(leitor, tenant_id: str, obra_id: str) -> dict:

@@ -1,5 +1,6 @@
 """Aprovar o orçamento gera Compras; aditivo com a obra aprovada mexe nelas; editar a linha do orçamento."""
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from conftest import nova_vila
@@ -412,3 +413,130 @@ async def test_servico_entregue_nao_volta_para_falta_comprar(vila):
     lista = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
     # as outras 3 linhas seguem faltando; a entregue não
     assert next(x for x in lista if x["obra"]["id"] == obra)["falta_comprar"] == 3
+
+
+# --- Desfazer da aprovação pela metade ---
+
+async def _obra(vila, obra):
+    return next(x for x in (await vila.http.get("/obras", headers=vila.h)).json() if x["id"] == obra)
+
+
+async def _para_no_segundo_lote(vila, obra, monkeypatch):
+    """Aprova e derruba o Desfazer depois do 1º lote: um insumo revertido, três ainda em Compras."""
+    await _contrato(vila, obra)
+    a = await _aprovar(vila, obra)
+    monkeypatch.setattr(compras, "INSUMOS_POR_LOTE", 1)
+    original, lotes = compras._reverter_lote, []
+
+    def quebra(*args):
+        lotes.append(1)
+        if len(lotes) == 2:
+            raise RuntimeError("queda simulada")
+        return original(*args)
+
+    monkeypatch.setattr(compras, "_reverter_lote", quebra)
+    with pytest.raises(RuntimeError):
+        await _desfazer(vila, a["registro_id"])
+    monkeypatch.setattr(compras, "_reverter_lote", original)
+    return a
+
+
+async def test_queda_no_meio_do_desfazer_fica_marcada_e_continua(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    a = await _para_no_segundo_lote(vila, obra, monkeypatch)
+    o = await _obra(vila, obra)
+    assert (o["status"], o["desfazendo_registro_id"]) == ("desfazendo_aprovacao", a["registro_id"])
+    assert len(await _insumos(vila, obra)) == 3
+    assert (await registro(vila, a["registro_id"]))["desfeito"] is False
+
+    r = await _desfazer(vila, a["registro_id"])
+    assert r.status_code == 200, r.text
+    o = await _obra(vila, obra)
+    assert (o["status"], o["desfazendo_registro_id"]) == ("em_orcamento", None)
+    assert await _insumos(vila, obra) == {}
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 409
+    # e a obra volta a ser aprovável, com tudo de novo em Compras
+    assert (await _aprovar(vila, obra))["insumos_criados"] == 4
+
+
+async def test_pela_metade_nada_novo_entra_em_compras(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    await _para_no_segundo_lote(vila, obra, monkeypatch)
+    ins = await _insumos(vila, obra)
+    i = next(iter(ins.values()))["insumo"]
+    item = (await orcamento(vila, obra))["itens"][1]
+    h = vila.h
+    for r in [
+        await vila.http.post(f"/obras/{obra}/orcamento/aprovar", headers=h),
+        await vila.http.post(f"/obras/{obra}/pedidos", headers=h, json={"fornecedor": "F", "aprovado": True, "linhas": [
+            {"insumo_id": i["id"], "quantidade": qtd(1), "valor_unitario": 1, "etapa": "1"}]}),
+        await vila.http.post(f"/obras/{obra}/movimentos", headers=h, json={
+            "insumo_id": i["id"], "tipo": "ajuste", "quantidade": qtd(1), "chave_idempotencia": uuid.uuid4().hex}),
+        await vila.http.post(f"/obras/{obra}/insumos", headers=h, json={"nome": "Novo", "unidade": "un"}),
+        await vila.http.patch(_url(obra, item["id"]), headers=h, json={"valor_unitario": 1}),
+        await versao(vila, obra, TAPUME, mapa(linha_cabecalho=1), tipo="aditivo", aplicar=True),
+    ]:
+        assert r.status_code == 409 and "parou no meio" in r.json()["detail"], r.text
+    assert len(await _insumos(vila, obra)) == 3
+
+
+async def test_409_no_meio_do_desfazer_se_resolve_e_continua(vila, arm, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    a = await _para_no_segundo_lote(vila, obra, monkeypatch)
+    resta = next(iter((await _insumos(vila, obra)).values()))["insumo"]
+    # um movimento que escapou da marca
+    await arm.atualizar("saldos", vila.tenant_id, resta["id"], {"saldo": qtd(1), "atualizado_em": datetime.now(UTC)})
+    r = await _desfazer(vila, a["registro_id"])
+    assert r.status_code == 409 and resta["nome"] in r.json()["detail"]
+    assert (await _obra(vila, obra))["status"] == "desfazendo_aprovacao"
+    assert (await registro(vila, a["registro_id"]))["desfeito"] is False
+
+    await arm.atualizar("saldos", vila.tenant_id, resta["id"], {"saldo": 0})    # resolvido
+    r = await _desfazer(vila, a["registro_id"])
+    assert r.status_code == 200, r.text
+    assert (await _obra(vila, obra))["status"] == "em_orcamento" and await _insumos(vila, obra) == {}
+
+
+async def test_conferencia_que_recusa_na_primeira_rodada_nao_marca_a_obra(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _contrato(vila, obra)
+    a = await _aprovar(vila, obra)
+    esc = (await _insumos(vila, obra))["Escavação manual de valas"]["insumo"]
+    await _pedido(vila, obra, esc["id"])
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 409
+    o = await _obra(vila, obra)
+    assert (o["status"], o["desfazendo_registro_id"]) == ("em_andamento", None)
+    assert len(await _insumos(vila, obra)) == 4
+
+
+async def test_estornar_o_movimento_libera_o_desfazer(vila):
+    obra = (await nova_obra(vila))["id"]
+    r = await vila.http.post(f"/obras/{obra}/orcamento/estrutura", headers=vila.h, json={
+        "itens": [{"nome": "Aço", "unidade": "kg", "quantidade": qtd(100), "valor_unitario": 669}],
+        "aplicar": True, "chave_idempotencia": uuid.uuid4().hex})
+    assert r.status_code == 201, r.text
+    a = await _aprovar(vila, obra)
+    aco = (await _insumos(vila, obra))["Aço"]["insumo"]
+    m = await vila.http.post(f"/obras/{obra}/movimentos", headers=vila.h, json={
+        "insumo_id": aco["id"], "tipo": "entrada", "quantidade": qtd(1), "chave_idempotencia": uuid.uuid4().hex})
+    assert m.status_code == 201, m.text
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 409
+    assert (await _desfazer(vila, m.json()["registro_id"])).status_code == 200
+    d = await _desfazer(vila, a["registro_id"])
+    assert d.status_code == 200, d.text
+    assert await _insumos(vila, obra) == {}
+
+
+async def test_entrada_e_saida_que_se_anulam_sem_estorno_seguram_o_desfazer(vila):
+    obra = (await nova_obra(vila))["id"]
+    r = await vila.http.post(f"/obras/{obra}/orcamento/estrutura", headers=vila.h, json={
+        "itens": [{"nome": "Aço", "unidade": "kg", "quantidade": qtd(100), "valor_unitario": 669}],
+        "aplicar": True, "chave_idempotencia": uuid.uuid4().hex})
+    assert r.status_code == 201, r.text
+    a = await _aprovar(vila, obra)
+    aco = (await _insumos(vila, obra))["Aço"]["insumo"]
+    for tipo, extra in (("entrada", {}), ("saida", {"destino": "bloco A", "etapa": aco["etapa"]})):
+        corpo = {"insumo_id": aco["id"], "tipo": tipo, "quantidade": qtd(1), "chave_idempotencia": uuid.uuid4().hex}
+        m = await vila.http.post(f"/obras/{obra}/movimentos", headers=vila.h, json={**corpo, **extra})
+        assert m.status_code == 201, m.text
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 409

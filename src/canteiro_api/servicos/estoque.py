@@ -29,6 +29,7 @@ from ..nucleo import (
     executar_e_registrar,
     insumo_da_obra,
     obra_do_tenant,
+    recusar_se_desfazendo,
     verbo_desfazer,
 )
 
@@ -57,6 +58,8 @@ async def preparar_movimento(tx, u: UsuarioAtual, *, obra_id: str, insumo_id: st
                              origem_doc: str | None = None,
                              origem: str = "tela", desfaz: str | None = None, conferir_curva: bool = True,
                              insumo: dict | None = None) -> Operacao:
+    if not desfaz:
+        recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, obra_id))
     insumo = insumo or await insumo_da_obra(tx, u.tenant_id, obra_id, insumo_id)
     if insumo.get("tipo") == TipoInsumo.SERVICO.value:
         raise RegraViolada(f"{insumo['nome']} é serviço: não tem estoque para entrar, sair ou ajustar.")
@@ -347,7 +350,7 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
     (arquivado) com o mesmo nome é reaproveitado.
     """
     nome = nome_limpo(nome)
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
     existentes = ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
