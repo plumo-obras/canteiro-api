@@ -320,11 +320,11 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
 - `GET /obras/{obra_id}/hoje?hoje=AAAA-MM-DD` (qualquer papel; padrão: hoje em São Paulo; sem chamada ao modelo) →
   `{hoje, resumo: {situacao, frase, esperando, semana_atual, semanas_total}, pontos: [Ponto], mais, semana: [Evento]}`.
   `situacao` = `no_prazo` | `atrasada` | `sem_medicao` (a mesma regra do placar); `frase` só diz a situação; `esperando` =
-  pontos `pede_voce` (mesmo os cortados); `semana_atual` é `null` sem cronograma ou antes do início, e passa de
+  propostas pendentes + pontos `pede_voce` (mesmo os cortados); `semana_atual` é `null` sem cronograma ou antes do início, e passa de
   `semanas_total` se a obra atrasar; `mais` = pontos fora do limite.
 - `Ponto` = `{tipo, prioridade, titulo, detalhe, acao: {tela, rotulo, filtro?}}`, no máximo 6, um por tipo, em ordem
-  `pede_voce`, `atencao`, `a_caminho`, `ok`. `pede_voce`: `desfazendo_aprovacao`, `sem_orcamento`, `aprovacoes_pendentes`,
-  `gastos_a_conferir`. `atencao`: `entregas_atrasadas`, `falta_comprar` (`filtro.etapa`), `etapas_estouradas`,
+  `pede_voce`, `atencao`, `a_caminho`, `ok`. `pede_voce`: `desfazendo_aprovacao`, `sem_orcamento`, `gastos_a_conferir`.
+  Proposta pendente não vira ponto: a tela mostra um cartão para cada uma, e ela conta em `esperando`. `atencao`: `entregas_atrasadas`, `falta_comprar` (`filtro.etapa`), `etapas_estouradas`,
   `etapas_atrasadas`, `itens_sem_preco`, `orcamento_so_pranchas` (só em orçamento), `gastos_sem_etapa`. `a_caminho`:
   `entregas_semana`. `falta_comprar`: etapas em andamento e as que começam em até 4 semanas (o cronograma é mensal: conta
   do dia 1 do 1º mês); sem cronograma, a 1ª etapa do orçamento com falta.

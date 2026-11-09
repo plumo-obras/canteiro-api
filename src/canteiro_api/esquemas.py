@@ -913,7 +913,7 @@ class EventoHoje(BaseModel):
 class ResumoHoje(BaseModel):
     situacao: Literal["no_prazo", "atrasada", "sem_medicao"]
     frase: str
-    esperando: int = Field(description="quantos pontos pede_voce existem, mesmo os cortados pelo limite")
+    esperando: int = Field(description="propostas pendentes + pontos pede_voce, mesmo os cortados pelo limite")
     semana_atual: int | None = Field(None, description="null sem cronograma ou antes do início; passa do total se "
                                                        "a obra atrasar")
     semanas_total: int | None = None

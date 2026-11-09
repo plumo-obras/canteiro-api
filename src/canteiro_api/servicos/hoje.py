@@ -80,7 +80,6 @@ class Dados:
     insumos: list[dict]
     pedidos: dict[str, dict]
     entregas: object
-    propostas: list[dict]
     comprovantes: list[dict]
     gastos: list[dict]
 
@@ -116,17 +115,6 @@ def _sem_orcamento(d: Dados) -> PontoHoje | None:
     return PontoHoje(tipo="sem_orcamento", prioridade="pede_voce", titulo="Esta obra ainda não tem orçamento.",
                      detalhe="Envie as pranchas no Projeto, ou importe a planilha no Orçamento, para começar.",
                      acao=AcaoHoje(tela="projeto", rotulo="Ir para o Projeto"))
-
-
-def _aprovacoes(d: Dados) -> PontoHoje | None:
-    if not d.propostas:
-        return None
-    n = len(d.propostas)
-    titulos = [p["titulo"] for p in d.propostas if p.get("titulo")]
-    return PontoHoje(tipo="aprovacoes_pendentes", prioridade="pede_voce",
-                     titulo=f"{_plural(n, 'aprovação esperando', 'aprovações esperando')} você.",
-                     detalhe=f"{_lista(titulos)}." if titulos else "O mestre de obras preparou e só você executa.",
-                     acao=AcaoHoje(tela="aprovacoes", rotulo="Ver aprovações"))
 
 
 def _valor_lido(c: dict) -> int | None:
@@ -317,7 +305,7 @@ def _entregas_semana(d: Dados) -> PontoHoje | None:
 
 # a ordem aqui é a ordem dentro da mesma prioridade
 _PONTOS: tuple[Callable[[Dados], PontoHoje | None], ...] = (
-    _desfazendo, _sem_orcamento, _aprovacoes, _gastos_a_conferir, _entregas_atrasadas, _falta_comprar,
+    _desfazendo, _sem_orcamento, _gastos_a_conferir, _entregas_atrasadas, _falta_comprar,
     _etapas_estouradas, _etapas_atrasadas, _itens_sem_preco, _so_pranchas, _gastos_sem_etapa, _entregas_semana,
 )
 
@@ -355,16 +343,17 @@ async def hoje_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> HojeNaO
     gastos = await versoes.gastos_da_obra(arm, tenant_id, obra_id)
     por_id = {x["insumo"]["id"]: x["insumo"] for x in insumos}
     a_caminho = [p for p in abertos if p["status"] in {s.value for s in A_CAMINHO}]
-    propostas.sort(key=lambda x: x["criado_em"], reverse=True)
     resumo_c = resumo_cronograma(crono, hoje)
     d = Dados(obra=obra, hoje=hoje, crono=crono, resumo_crono=resumo_c, orc=orc, insumos=insumos,
               pedidos={p["id"]: p for p in a_caminho}, entregas=resumo_entregas(a_caminho, hoje, por_id),
-              propostas=propostas, comprovantes=comprovantes, gastos=gastos)
+              comprovantes=comprovantes, gastos=gastos)
     pontos = sorted((p for p in (f(d) for f in _PONTOS) if p is not None), key=lambda p: _ORDEM[p.prioridade])
     situacao, frase = _resumo(obra, resumo_c.atraso_decimos)
     semana_atual, semanas_total = _semanas(crono, hoje)
     return HojeNaObra(hoje=hoje.isoformat(),
                       resumo=ResumoHoje(situacao=situacao, frase=frase,
-                                        esperando=sum(p.prioridade == "pede_voce" for p in pontos),
+                                        # as propostas não viram ponto (a tela já mostra um cartão para cada), mas
+                                        # continuam sendo coisas esperando a pessoa
+                                        esperando=sum(p.prioridade == "pede_voce" for p in pontos) + len(propostas),
                                         semana_atual=semana_atual, semanas_total=semanas_total),
                       pontos=pontos[:MAX_PONTOS], mais=max(0, len(pontos) - MAX_PONTOS), semana=_semana(d))

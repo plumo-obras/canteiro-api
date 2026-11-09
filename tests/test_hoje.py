@@ -8,7 +8,7 @@ from test_gastos import _campo, _leitura
 from test_gastos_orcamento import _gasto
 from test_obras_orcamento import nova_obra
 from test_orcamento_versoes import mapa
-from test_pedidos_propostas import proposta
+from test_pedidos_propostas import pedido_corpo, proposta
 
 from canteiro_dominio.tipos import qtd
 
@@ -69,12 +69,16 @@ async def test_viewer_le_e_outro_tenant_e_404(vila, http, arm, config):
     assert (await intruso.http.get(f"/obras/{obra}/hoje", headers=intruso.h)).status_code == 404
 
 
-async def test_aprovacoes_pendentes(vila):
-    r = await vila.http.post("/propostas", headers=vila.h, json=proposta(vila, chave_idempotencia=uuid.uuid4().hex))
-    assert r.status_code == 201, r.text
-    p = _ponto(await _hoje(vila, vila.obra), "aprovacoes_pendentes")
-    assert (p["prioridade"], p["acao"]["tela"]) == ("pede_voce", "aprovacoes")
-    assert "esperando você" in p["titulo"]
+async def test_proposta_conta_em_esperando_sem_ocupar_vaga_de_ponto(vila):
+    antes = (await _hoje(vila, vila.obra))["resumo"]["esperando"]
+    # quantidades diferentes: duas propostas iguais seriam a mesma, travada
+    for q in (11, 12):
+        corpo = proposta(vila, dados=pedido_corpo(vila, q=q), chave_idempotencia=uuid.uuid4().hex)
+        r = await vila.http.post("/propostas", headers=vila.h, json=corpo)
+        assert r.status_code == 201, r.text
+    h = await _hoje(vila, vila.obra)
+    assert _ponto(h, "aprovacoes_pendentes") is None
+    assert h["resumo"]["esperando"] - antes == 2
 
 
 async def test_comprovantes_para_conferir_somam_o_que_foi_lido(vila, arm):
