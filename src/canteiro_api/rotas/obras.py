@@ -17,6 +17,7 @@ from ..esquemas import (
     DesembolsoObra,
     EstruturaCorpo,
     EtapaRef,
+    HojeNaObra,
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
@@ -48,6 +49,7 @@ from ..esquemas import (
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
 from ..servicos import compras, cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import hoje as hoje_servico
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -205,6 +207,14 @@ async def resumo_da_obra(obra_id: str, hoje: date | None = Query(None, descripti
                                                                                   "Paulo"),
                          u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
     return await resumo.resumo_da_obra(arm, u.tenant_id, obra_id, hoje or datetime.now(estoque.FUSO).date())
+
+
+@r.get("/obras/{obra_id}/hoje", response_model=HojeNaObra)
+async def hoje_na_obra(obra_id: str,
+                       hoje: date | None = Query(None, description="AAAA-MM-DD; padrão: hoje em São Paulo"),
+                       u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_arm)):
+    """O que importa hoje na obra, calculado na API: nenhuma chamada ao modelo."""
+    return await hoje_servico.hoje_da_obra(arm, u.tenant_id, obra_id, hoje or datetime.now(estoque.FUSO).date())
 
 
 @r.get("/obras/{obra_id}/insumos", response_model=list[InsumoComConta])
