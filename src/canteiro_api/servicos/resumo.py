@@ -43,7 +43,6 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
     com_cronograma = {c["obra_id"] for c in await arm.consultar(Consulta("cronogramas", tenant_id)) if c.get("etapas")}
     com_orcamento = {v["obra_id"] for v in await arm.consultar(Consulta("versoes_orcamento", tenant_id))
                      if v["ativa"] and v["tipo"] == TipoVersao.CONTRATO}
-    com_orcamento |= {i["obra_id"] for i in insumos if i.get("precisa_ate_o_fim", 0) > 0}
 
     def por_obra(docs: list[dict]) -> dict[str, list[dict]]:
         g: dict[str, list[dict]] = {}
@@ -52,6 +51,10 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
         return g
 
     insumos_de, pedidos_de, pendentes_de = por_obra(insumos), por_obra(pedidos), por_obra(pendentes)
+    for o in obras:
+        if o["status"] == "em_orcamento" and o["id"] in insumos_de:
+            insumos_de[o["id"]] = estoque.sem_aprovacao_abandonada(insumos_de[o["id"]])
+    com_orcamento |= {obra for obra, docs in insumos_de.items() if any(i.get("precisa_ate_o_fim", 0) > 0 for i in docs)}
     saida = []
     for o in obras:
         ped = pedidos_de.get(o["id"], [])

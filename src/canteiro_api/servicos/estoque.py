@@ -203,8 +203,7 @@ def ultimos_precos(pedidos: list[dict]) -> dict[str, dict]:
 async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra; e o preço
     da última compra. Uma consulta de pedidos só (todos os da obra) serve às duas coisas."""
-    insumos = ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
-                                                  [("nome", "asc")])))
+    insumos = await insumos_ativos(arm, tenant_id, obra_id)
     saldos = {s["id"]: s["saldo"] for s in
               await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
     todos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
@@ -233,12 +232,42 @@ def ativos(insumos: list[dict]) -> list[dict]:
     return [i for i in insumos if not i.get("arquivado")]
 
 
+def mudou_desde_a_aprovacao(i: dict) -> bool:
+    return any(i.get(k) != x for k, x in i["aprovacao"]["depois"].items())
+
+
+def _criado_por_aprovacao(i: dict) -> bool:
+    return bool(i.get("aprovacao")) and i["aprovacao"]["antes"] is None
+
+
+def sem_aprovacao_abandonada(insumos: list[dict]) -> list[dict]:
+    """Os insumos de uma obra `em_orcamento`, sem o que uma aprovação que não terminou deixou no caminho. Os lotes
+    gravam antes de o status virar, e nessa situação todo insumo com rastro é sobra: aprovação concluída e desfeita
+    arquiva o que criou e tira o rastro do que atualizou. O criado some; o atualizado aparece como era."""
+    saida = []
+    for i in insumos:
+        if not i.get("aprovacao"):
+            saida.append(i)
+        elif not _criado_por_aprovacao(i):
+            saida.append(i if mudou_desde_a_aprovacao(i) else {**i, **i["aprovacao"]["antes"]})
+    return saida
+
+
+async def insumos_ativos(leitor, tenant_id: str, obra_id: str) -> list[dict]:
+    """Os insumos que a obra tem de verdade, sem os arquivados e sem as sobras de aprovação abandonada."""
+    insumos = ativos(await leitor.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
+                                                     [("nome", "asc")])))
+    o = await leitor.obter("obras", tenant_id, obra_id)
+    return sem_aprovacao_abandonada(insumos) if o and o["status"] == "em_orcamento" else insumos
+
+
 def gravar_insumo_novo(tx, d: dict, existente: dict | None) -> None:
     """Grava o insumo de ID derivado do nome. `existente` é o que a transação leu nesse ID: arquivado (cadastro
-    desfeito) é reaproveitado; ativo quer dizer que alguém cadastrou o mesmo nome agora há pouco."""
+    desfeito) ou sobra de aprovação abandonada é reaproveitado; ativo quer dizer que alguém cadastrou o mesmo nome
+    agora há pouco."""
     if existente is None:
         tx.criar("insumos", d)
-    elif existente.get("arquivado"):
+    elif existente.get("arquivado") or _criado_por_aprovacao(existente):
         tx.salvar("insumos", d)
     else:
         raise Conflito(f"'{d['nome']}' já está cadastrado nesta obra.")
@@ -351,7 +380,7 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
     """
     nome = nome_limpo(nome)
     recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
-    existentes = ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))
+    existentes = await insumos_ativos(arm, u.tenant_id, obra_id)
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
     ins = Insumo(id=id_insumo(u.tenant_id, obra_id, nome), tenant_id=u.tenant_id,

@@ -304,9 +304,10 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     vigente = _contrato_vigente(versoes)
     recusar_se_desfazendo(o)
     aprovada = o["status"] != "em_orcamento"
-    if aprovada and vigente and tipo == TipoVersao.CONTRATO:
-        # Compras já saiu deste contrato: trocá-lo deixaria os insumos e os pedidos descolados do orçamento
-        raise Conflito("O orçamento já foi aprovado: desfaça a aprovação ou lance um aditivo.")
+    if tipo == TipoVersao.CONTRATO and aprovada and (vigente or o.get("aprovada")):
+        # Compras já saiu do orçamento aprovado: um contrato novo deixaria os insumos e os pedidos descolados dele
+        raise Conflito("O orçamento já foi aprovado: desfaça a aprovação ou lance um aditivo." if vigente
+                       else "O orçamento já foi aprovado: desfaça a aprovação para importar o contrato.")
     descricoes_contrato = None
     if tipo == TipoVersao.ADITIVO and vigente:
         descricoes_contrato = await _apropriar_aditivo(arm, u.tenant_id, vigente, itens, escolhidas)
@@ -498,6 +499,9 @@ async def preparar_desligar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
                 if receita.get("reativar") else None)
     contrato = await tx.obter("versoes_orcamento", u.tenant_id, v["contrato_id"]) if v.get("contrato_id") else None
     o = await obra_do_tenant(tx, u.tenant_id, v["obra_id"])
+    if v["tipo"] == TipoVersao.CONTRATO and o.get("aprovada"):
+        # sem esta trava, tirar o contrato abriria espaço para importar outro com a obra aprovada
+        raise Conflito("O orçamento já foi aprovado: desfaça a aprovação antes de retirar o contrato.")
     compras = await preparar_restaurar_insumos(tx, u, receita["compras"]) if receita.get("compras") else None
 
     def aplicar():

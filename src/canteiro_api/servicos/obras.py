@@ -1,5 +1,4 @@
 """Obra: criar (onboarding), corrigir os dados e aprovar o orçamento, que tira a obra de `em_orcamento`."""
-from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, Obra
 from canteiro_dominio.tipos import fmt_reais
 
@@ -17,7 +16,7 @@ from ..nucleo import (
     registrar,
     verbo_desfazer,
 )
-from .estoque import ativos, id_derivado
+from .estoque import id_derivado, insumos_ativos
 
 # Como cada campo aparece no texto do registro ("Atualizou a obra X: área, padrão").
 ROTULOS = {
@@ -99,7 +98,7 @@ async def preparar_restaurar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
 
 async def insumos_da_obra(arm, tenant_id: str, obra_id: str) -> list[dict]:
     # a transação portável só lê por ID; a lista de insumos vem antes, por consulta
-    return ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)])))
+    return await insumos_ativos(arm, tenant_id, obra_id)
 
 
 async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos: list[dict],
@@ -112,8 +111,11 @@ async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos:
         raise Conflito("O orçamento já foi aprovado.")
     lidas = [await tx.obter("versoes_orcamento", u.tenant_id, v["id"]) for v in vigentes or []]
     # relidas na transação: se alguma importação ou desfazer mudou as versões nesse meio-tempo, o total seria outro
-    if any(not v or not v["ativa"] for v in lidas) or [(v["total"], v.get("edicoes", 0)) for v in lidas] != [
-            (v["total"], v.get("edicoes", 0)) for v in vigentes or []]:
+    # `aditivos` entra porque um aditivo novo não está na lista: ele só aparece no contador do contrato relido
+    def estado(v: dict) -> tuple:
+        return v["total"], v.get("edicoes", 0), v.get("aditivos", 0)
+
+    if any(not v or not v["ativa"] for v in lidas) or [estado(v) for v in lidas] != [estado(v) for v in vigentes or []]:
         raise Conflito("O orçamento mudou agora há pouco; confira e aprove de novo.")
     if any(v["tipo"] == "contrato" for v in lidas):
         n, total, oque = sum(v["itens"] for v in lidas), sum(v["total"] for v in lidas), "item"
@@ -126,12 +128,12 @@ async def preparar_aprovar_orcamento(tx, u: UsuarioAtual, obra_id: str, insumos:
         total = sum(i["precisa_ate_o_fim"] * i.get("valor_unitario", 0) // 1000 for i in orcados)
 
     def aplicar():
-        tx.atualizar("obras", u.tenant_id, obra_id, {"status": "em_andamento"})
+        tx.atualizar("obras", u.tenant_id, obra_id, {"status": "em_andamento", "aprovada": True})
         for v in lidas:
             # o que a transação leu para decidir ela também grava (regra da porta: conflito igual no Mongo e Firestore)
             tx.atualizar("versoes_orcamento", u.tenant_id, v["id"], {"aditivos": v.get("aditivos", 0)})
         evento(tx, u.tenant_id, "orcamento.aprovado", obra_id, {oque + "s": n, "total": total})
-        return {**o, "status": "em_andamento"}
+        return {**o, "status": "em_andamento", "aprovada": True}
 
     qtd_itens = f"{n} " + (oque if n == 1 else {"item": "itens", "insumo": "insumos"}[oque])
     return Operacao(obra_id=obra_id, aplicar=aplicar,
@@ -146,7 +148,7 @@ async def preparar_reabrir(tx, u: UsuarioAtual, receita: dict) -> Operacao:
         raise NaoEncontrado("Obra não encontrada.")
     if o["status"] not in ("em_andamento", DESFAZENDO_APROVACAO):
         raise Conflito("A obra já mudou de situação desde então; não dá para desfazer.")
-    campos = {"status": "em_orcamento", "desfazendo_registro_id": None}
+    campos = {"status": "em_orcamento", "desfazendo_registro_id": None, "aprovada": False}
 
     def aplicar():
         tx.atualizar("obras", u.tenant_id, o["id"], campos)

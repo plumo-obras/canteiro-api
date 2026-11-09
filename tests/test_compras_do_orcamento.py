@@ -4,10 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 from conftest import nova_vila
-from test_obras_orcamento import nova_obra, registro, xlsx
+from test_obras_orcamento import importar, nova_obra, registro, xlsx
 from test_orcamento_versoes import ADITIVO, CABECALHO, CONTRATO, mapa, orcamento, versao
 
-from canteiro_api.servicos import compras, obras
+from canteiro_api.nucleo import Conflito
+from canteiro_api.servicos import compras, obras, versoes
 from canteiro_dominio.tipos import qtd, reais
 
 ETAPA = ["1", None, None, "FUNDAÇÕES", None, None, None, None]
@@ -540,3 +541,143 @@ async def test_entrada_e_saida_que_se_anulam_sem_estorno_seguram_o_desfazer(vila
         m = await vila.http.post(f"/obras/{obra}/movimentos", headers=vila.h, json={**corpo, **extra})
         assert m.status_code == 201, m.text
     assert (await _desfazer(vila, a["registro_id"])).status_code == 409
+
+
+# --- achados da revisão: troca de contrato, aprovação abandonada e corrida com aditivo ---
+
+async def test_retirar_o_contrato_com_a_obra_aprovada_e_recusado(vila):
+    obra = (await nova_obra(vila))["id"]
+    c = await _contrato(vila, obra)
+    a = await _aprovar(vila, obra)
+    r = await _desfazer(vila, c["registro_id"])
+    assert r.status_code == 409 and "aprovação" in r.json()["detail"]
+    assert (await orcamento(vila, obra))["totais"]["contratado"] > 0
+    # desfeita a aprovação, o contrato sai
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 200
+    assert (await _desfazer(vila, c["registro_id"])).status_code == 200
+
+
+async def test_importar_contrato_com_a_obra_aprovada_sem_vigente_e_recusado(vila):
+    obra = (await nova_obra(vila))["id"]
+    plan = xlsx(["Descrição", "Un", "Qtd", "Unit"], ["Cal", "sc", 10, 20])
+    await importar(vila, plan, {"planilha": "Orçamento", "linha_cabecalho": 1, "nome": 0, "unidade": 1, "quantidade": 2,
+                                "valor_unitario": 3}, aplicar=True, obra=obra)
+    await _aprovar(vila, obra)
+    r = await versao(vila, obra, CONTRATO, mapa(), aplicar=True)
+    assert r.status_code == 409 and "desfaça a aprovação" in r.json()["detail"]
+
+
+async def test_obra_antiga_que_nunca_foi_aprovada_ainda_importa_e_retira_o_contrato(vila):
+    # o seed fica em_andamento sem ter passado pelo Aprovar, como as obras de antes desse fluxo
+    assert (await _obra(vila, vila.obra))["aprovada"] is False
+    c = await _contrato(vila, vila.obra)
+    assert (await _desfazer(vila, c["registro_id"])).status_code == 200
+
+
+async def _falha_na_final(vila, obra, monkeypatch):
+    """Os lotes gravam, mas a transação final não vira o status: a aprovação fica abandonada."""
+    original = obras.preparar_aprovar_orcamento
+
+    async def falha(*a, **k):
+        raise Conflito("O orçamento mudou agora há pouco; confira e aprove de novo.")
+
+    monkeypatch.setattr(obras, "preparar_aprovar_orcamento", falha)
+    r = await vila.http.post(f"/obras/{obra}/orcamento/aprovar", headers=vila.h)
+    assert r.status_code == 409, r.text
+    monkeypatch.setattr(obras, "preparar_aprovar_orcamento", original)
+
+
+async def _tem_orcamento(vila, obra):
+    lista = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
+    return next(x for x in lista if x["obra"]["id"] == obra)
+
+
+async def test_aprovacao_abandonada_nao_aparece_em_compras(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    c = await _contrato(vila, obra)
+    await _falha_na_final(vila, obra, monkeypatch)
+    assert await _insumos(vila, obra) == {}
+    assert (await _tem_orcamento(vila, obra))["falta_comprar"] == 0
+    # sem o contrato, as sobras não contam como orçamento nem deixam aprovar
+    assert (await _desfazer(vila, c["registro_id"])).status_code == 200
+    assert (await _tem_orcamento(vila, obra))["tem_orcamento"] is False
+    r = await vila.http.post(f"/obras/{obra}/orcamento/aprovar", headers=vila.h)
+    assert r.status_code == 422
+
+
+async def test_reaprovar_depois_de_edicao_nao_deixa_orfaos(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    await _contrato(vila, obra)
+    await _falha_na_final(vila, obra, monkeypatch)
+    item = await _item(vila, obra, "Sanitário em canteiro")
+    r = await vila.http.patch(_url(obra, item["id"]), headers=vila.h, json={"quantidade": qtd(3)})
+    assert r.status_code == 200, r.text
+    a = await _aprovar(vila, obra)            # outra aprovação: a edição mudou o ID dela
+    assert (a["insumos_criados"], a["insumos_atualizados"]) == (4, 0)
+    assert (await _insumos(vila, obra))["Sanitário em canteiro"]["insumo"]["precisa_ate_o_fim"] == qtd(3)
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 200
+    assert await _insumos(vila, obra) == {}
+
+
+async def test_desistir_e_reimportar_nao_deixa_sobra_em_compras(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    c = await _contrato(vila, obra)
+    await _falha_na_final(vila, obra, monkeypatch)
+    assert (await _desfazer(vila, c["registro_id"])).status_code == 200
+    await _contrato(vila, obra, SEM_PRECO, mapa(linha_cabecalho=1))
+    a = await _aprovar(vila, obra)
+    assert (a["insumos_criados"], a["insumos_atualizados"]) == (2, 0)
+    assert set(await _insumos(vila, obra)) == {"Areia média", "Brita"}
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 200
+    assert await _insumos(vila, obra) == {}
+
+
+async def test_insumo_ja_cadastrado_volta_ao_original_depois_de_tentativa_abandonada(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    await vila.http.post(f"/obras/{obra}/insumos", headers=vila.h, json={
+        "nome": "Brita", "unidade": "m³", "precisa_ate_o_fim": qtd(1), "valor_unitario": 0})
+    await _contrato(vila, obra, SEM_PRECO, mapa(linha_cabecalho=1))
+    await _falha_na_final(vila, obra, monkeypatch)
+    # enquanto a tentativa está abandonada, ele aparece como era
+    assert (await _insumos(vila, obra))["Brita"]["insumo"]["precisa_ate_o_fim"] == qtd(1)
+    item = await _item(vila, obra, "Areia média")
+    await vila.http.patch(_url(obra, item["id"]), headers=vila.h, json={"valor_unitario": 500})
+    a = await _aprovar(vila, obra)
+    assert (a["insumos_criados"], a["insumos_atualizados"]) == (1, 1)
+    assert (await _insumos(vila, obra))["Brita"]["insumo"]["precisa_ate_o_fim"] == qtd(5)
+    assert (await _desfazer(vila, a["registro_id"])).status_code == 200
+    brita = (await _insumos(vila, obra))["Brita"]["insumo"]
+    assert (brita["precisa_ate_o_fim"], brita["valor_unitario"]) == (qtd(1), 0)
+
+
+async def test_cadastrar_o_mesmo_nome_de_uma_sobra_funciona(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    await _contrato(vila, obra, SEM_PRECO, mapa(linha_cabecalho=1))
+    await _falha_na_final(vila, obra, monkeypatch)
+    r = await vila.http.post(f"/obras/{obra}/insumos", headers=vila.h, json={"nome": "Brita", "unidade": "m³"})
+    assert r.status_code == 201, r.text
+    assert set(await _insumos(vila, obra)) == {"Brita"}
+
+
+async def test_aditivo_que_entra_durante_a_aprovacao_da_conflito(vila, monkeypatch):
+    obra = (await nova_obra(vila))["id"]
+    await _contrato(vila, obra)
+    original = versoes.itens_das_versoes
+    feito = []
+
+    async def com_aditivo(*a, **k):
+        # depois de a aprovação ler as versões, um aditivo é gravado por outra pessoa
+        if not feito:
+            feito.append(1)
+            r = await versao(vila, obra, TAPUME, mapa(linha_cabecalho=1), tipo="aditivo", aplicar=True)
+            assert r.status_code == 201, r.text[:300]
+        return await original(*a, **k)
+
+    monkeypatch.setattr(versoes, "itens_das_versoes", com_aditivo)
+    r = await vila.http.post(f"/obras/{obra}/orcamento/aprovar", headers=vila.h)
+    assert r.status_code == 409 and "mudou" in r.json()["detail"]
+    assert await _status(vila, obra) == "em_orcamento"
+    # aprovando de novo, o aditivo entra
+    monkeypatch.undo()
+    await _aprovar(vila, obra)
+    assert "Tapume de chapa de madeira" in await _insumos(vila, obra)

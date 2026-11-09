@@ -2,7 +2,6 @@
 import csv
 import io
 
-from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import Insumo, Movimento, Saldo, TipoMovimento
 from canteiro_dominio.tipos import qtd
 
@@ -10,7 +9,7 @@ from ..auth import UsuarioAtual
 from ..esquemas import ErroLinha, LinhaImportada, Previa
 from ..modelos import doc
 from ..nucleo import ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant, recusar_se_desfazendo
-from .estoque import _nome_chave, ativos, criado, gravar_insumo_novo, id_insumo, nome_limpo, receita_insumos
+from .estoque import _nome_chave, criado, gravar_insumo_novo, id_insumo, insumos_ativos, nome_limpo, receita_insumos
 
 COLUNAS = ["nome", "unidade", "saldo", "precisa_ate_o_fim", "curva"]
 MAX_LINHAS = 2000
@@ -88,7 +87,7 @@ def ler_csv(conteudo: bytes, nomes_existentes: set[str]) -> tuple[list[LinhaImpo
 async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, aplicar: bool) -> Previa:
     recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
     existentes = {i["nome"] for i in
-                  ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))}
+                  await insumos_ativos(arm, u.tenant_id, obra_id)}
     linhas, erros = ler_csv(conteudo, existentes)
     if not aplicar or erros:
         # com qualquer erro nada é gravado: a pessoa corrige a planilha e manda de novo

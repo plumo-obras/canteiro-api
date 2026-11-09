@@ -38,6 +38,9 @@ class Obra(Documento):
     status: str = "em_andamento"
     # Na obra em `desfazendo_aprovacao`: o registro cujo Desfazer ficou pela metade, para a tela oferecer retomar.
     desfazendo_registro_id: str | None = None
+    # Passou pelo "Aprovar". Obra antiga fica `em_andamento` sem nunca ter tido aprovação, e ela ainda pode importar
+    # o contrato: é o `status` sozinho que não distingue as duas.
+    aprovada: bool = False
     # Dados do onboarding: todos opcionais, porque a obra nasce com o nome e o resto chega quando a pessoa souber.
     endereco: str = ""
     uf: str = ""

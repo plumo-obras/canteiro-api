@@ -306,7 +306,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   importar versão e aprovar → 409; cancelar pedido e estornar movimento continuam valendo, para resolver o que travou.
 - **Com a obra aprovada:** aditivo mexe em Compras na hora (item novo vira insumo, item existente soma, supressão reduz
   até 0; até 200 itens por aditivo; unidade diferente → 422), e o Desfazer do aditivo volta isso. Trocar o contrato →
-  409 "desfaça a aprovação ou lance um aditivo".
+  409 "desfaça a aprovação ou lance um aditivo"; importar contrato sem nenhum vigente e retirar o contrato também dão
+  409 quando a obra passou pelo Aprovar (`Obra.aprovada`). Obra antiga em andamento, que nunca foi aprovada, segue
+  podendo. Uma aprovação que parou antes de virar o status não aparece em Compras nem conta em `tem_orcamento`.
 - Sem contrato (lista de materiais), a aprovação não gera nada: só muda o status.
   Já aprovado → 409; sem contrato vigente **e** sem insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o
   orçamento de X (N itens, R$ total)" com o orçado atual (contrato + aditivos vigentes; sem contrato, "N insumos" da

@@ -14,7 +14,7 @@ from ..auth import UsuarioAtual
 from ..modelos import doc
 from ..nucleo import Conflito, executar_e_registrar, obra_do_tenant, recusar_se_desfazendo
 from . import obras, orcamento, versoes
-from .estoque import gravar_insumo_novo, id_derivado, id_insumo
+from .estoque import ativos, gravar_insumo_novo, id_derivado, id_insumo, mudou_desde_a_aprovacao
 
 # Até 2 escritas por insumo (ele e o saldo): folgado nas 500 da transação.
 INSUMOS_POR_LOTE = 200
@@ -58,9 +58,13 @@ def _gravar_lote(u: UsuarioAtual, obra_id: str, aprovacao_id: str, lote: list[di
             if x["existe"]:
                 if not lido or lido.get("arquivado"):
                     raise Conflito(f"'{c.nome}' mudou agora há pouco; aprove de novo.")
-                depois = insumo_ao_aprovar(lido, c)
+                # sobra de uma tentativa abandonada: a base é o que ele era antes dela, para o Desfazer voltar até lá
+                a = lido.get("aprovacao")
+                sobra = a is not None and a["antes"] is not None and not mudou_desde_a_aprovacao(lido)
+                base = {**lido, **a["antes"]} if sobra else lido
+                depois = insumo_ao_aprovar(base, c)
                 tx.atualizar("insumos", u.tenant_id, x["id"], {**depois, "aprovacao": {
-                    "id": aprovacao_id, "antes": {k: lido.get(k) for k in depois}, "depois": depois}})
+                    "id": aprovacao_id, "antes": {k: base.get(k) for k in depois}, "depois": depois}})
                 continue
             depois = {"precisa_ate_o_fim": c.quantidade, "valor_unitario": c.valor_unitario, "etapa": c.etapa}
             d = doc(Insumo(id=x["id"], tenant_id=u.tenant_id, obra_id=obra_id, nome=c.nome, unidade=c.unidade,
@@ -71,6 +75,32 @@ def _gravar_lote(u: UsuarioAtual, obra_id: str, aprovacao_id: str, lote: list[di
             tx.salvar("saldos", doc(Saldo(id=x["id"], tenant_id=u.tenant_id, obra_id=obra_id, saldo=0,
                                           atualizado_em=d["criado_em"])))
     return corpo
+
+
+def _limpar_lote(u: UsuarioAtual, lote: list[dict]):
+    async def corpo(tx):
+        lidos = [await tx.obter("insumos", u.tenant_id, x["id"]) for x in lote]
+        for i in lidos:
+            a = i.get("aprovacao")
+            if a is None or i.get("arquivado"):
+                continue
+            if a["antes"] is None:
+                tx.atualizar("insumos", u.tenant_id, i["id"], {"arquivado": True})
+            else:
+                volta = {} if mudou_desde_a_aprovacao(i) else a["antes"]
+                tx.atualizar("insumos", u.tenant_id, i["id"], {**volta, "aprovacao": None})
+    return corpo
+
+
+async def _limpar_abandonados(arm, u: UsuarioAtual, obra_id: str, aprovacao_id: str | None, plano: list[dict]) -> None:
+    """O que uma tentativa abandonada gravou e esta aprovação não vai regravar (a pessoa desistiu e reimportou). Sem
+    isto, assim que a obra saísse de `em_orcamento` essas sobras apareceriam em Compras."""
+    no_plano = {x["id"] for x in plano}
+    insumos = ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))
+    sobras = [i for i in insumos
+              if i.get("aprovacao") and i["aprovacao"]["id"] != aprovacao_id and i["id"] not in no_plano]
+    for k in range(0, len(sobras), INSUMOS_POR_LOTE):
+        await arm.em_transacao(_limpar_lote(u, sobras[k:k + INSUMOS_POR_LOTE]))
 
 
 def _id_aprovacao(tenant_id: str, obra_id: str, vigentes: list[dict]) -> str:
@@ -90,8 +120,9 @@ async def aprovar(arm, u: UsuarioAtual, obra_id: str) -> dict:
         itens = await versoes.itens_das_versoes(arm, u.tenant_id, obra_id, vigentes)
         plano = _plano(u, obra_id, itens, vigentes, insumos)
         aprovacao_id = _id_aprovacao(u.tenant_id, obra_id, vigentes)
-        for i in range(0, len(plano), INSUMOS_POR_LOTE):
-            await arm.em_transacao(_gravar_lote(u, obra_id, aprovacao_id, plano[i:i + INSUMOS_POR_LOTE]))
+    await _limpar_abandonados(arm, u, obra_id, aprovacao_id, plano)
+    for i in range(0, len(plano), INSUMOS_POR_LOTE):
+        await arm.em_transacao(_gravar_lote(u, obra_id, aprovacao_id, plano[i:i + INSUMOS_POR_LOTE]))
 
     async def tx_corpo(tx):
         op = await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos, vigentes, aprovacao_id)
@@ -119,10 +150,6 @@ def _intacto(i: dict, saldo: dict | None, com_movimento: set[str]) -> bool:
                                     or i["id"] not in com_movimento)
 
 
-def _mudou(i: dict) -> bool:
-    return any(i.get(k) != x for k, x in i["aprovacao"]["depois"].items())
-
-
 def _reverter_lote(u: UsuarioAtual, lote: list[dict], vistos: dict[str, object]):
     """`vistos` = o `atualizado_em` de cada saldo na conferência: se mudou, entrou movimento depois dela."""
     async def corpo(tx):
@@ -132,7 +159,7 @@ def _reverter_lote(u: UsuarioAtual, lote: list[dict], vistos: dict[str, object])
             novo = i["aprovacao"]["antes"] is None
             mexeu = saldo is not None and (saldo["saldo"] != 0
                                            or normalizar(saldo["atualizado_em"]) != vistos.get(i["id"]))
-            if _mudou(i) or (novo and mexeu):
+            if mudou_desde_a_aprovacao(i) or (novo and mexeu):
                 raise Conflito(f"{i['nome']} teve movimento ou mudou desde então; resolva e desfaça de novo.")
             if novo:
                 tx.atualizar("insumos", u.tenant_id, i["id"], {"arquivado": True})
@@ -167,7 +194,7 @@ async def _conferir(arm, u: UsuarioAtual, obra_id: str, aprovacao_id: str) -> tu
         estornados = {m["desfaz"] for m in movimentos if m.get("desfaz")}
         com_movimento = {m["insumo_id"] for m in movimentos if not m.get("desfaz") and m["id"] not in estornados}
     for i in gerados:
-        if _mudou(i):
+        if mudou_desde_a_aprovacao(i):
             raise Conflito(f"{i['nome']} foi editado depois da aprovação; não dá para desfazer.")
         if i["id"] in novos and not _intacto(i, saldos.get(i["id"]), com_movimento):
             raise Conflito(f"{i['nome']} teve movimento depois da aprovação; estorne-o antes de desfazer a aprovação.")
