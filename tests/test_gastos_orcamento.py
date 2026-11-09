@@ -78,7 +78,7 @@ async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
     assert t["realizado"] == antes["totais"]["realizado"] + fund["atual"] + 100
     assert t["saldo"] == antes["totais"]["saldo"] - fund["atual"] - 100
     assert t["gastos"] == {"total": fund["atual"] + 100, "nas_etapas": fund["atual"] + 100, "fora_do_orcamento": 0,
-                           "na_lista_padrao": 0, "sem_etapa_do_orcamento": 0}
+                           "na_lista_padrao": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0}
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
     assert fin["realizado"] == t["realizado"] and fin["gastos"] == t["gastos"]
     # placar: gasto + falta gastar fecham no orçado (o saldo não serve: desconta também o comprometido)
@@ -198,3 +198,63 @@ async def test_revisao_aceita_etapa_do_orcamento_e_descarta_a_da_lista_padrao(vi
     assert r.status_code == 200, r.text
     cl = (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["revisao"]["classificacao"]
     assert [(o["etapa"], o["rotulo"]) for o in cl["opcoes"]] == [("2", "2 FUNDAÇÕES")]
+
+
+# --- "ver depois": gasto confirmado sem etapa ---
+
+async def test_gasto_sem_etapa_conta_na_obra_e_se_define_depois(vila):
+    o = await nova_obra(vila)
+    obra = o["id"]
+    await _contrato(vila, obra)
+    antes = (await orcamento(vila, obra))["totais"]
+    r = await _gasto(vila, obra, valor=70000, etapa=None)
+    gasto_id, reg = r["gasto"]["id"], r["registro_id"]
+    assert r["gasto"]["etapa"] is None
+
+    [g] = (await vila.http.get(f"/obras/{obra}/gastos", headers=vila.h)).json()
+    assert (g["etapa"], g["etapa_nome"], g["etapa_origem"]) == (None, "Sem etapa", "a_definir")
+    res = (await vila.http.get(f"/obras/{obra}/gastos/resumo", headers=vila.h)).json()
+    assert (res["total"], res["a_definir"]) == (70000, 70000)
+    assert [(e["etapa"], e["nome"], e["origem"], e["total"]) for e in res["etapas"]] == [
+        (None, "Sem etapa", "a_definir", 70000)]
+
+    t = (await orcamento(vila, obra))["totais"]
+    assert t["realizado"] - antes["realizado"] == 70000
+    assert t["comprometido"] - antes["comprometido"] == 70000
+    assert t["gastos"]["a_definir"] == 70000 and t["gastos"]["nas_etapas"] == 0
+    assert all(e["realizado"] == 0 for e in (await orcamento(vila, obra))["etapas"])
+
+    # definir depois, com Desfazer que devolve o "sem etapa"
+    d = await vila.http.patch(f"/gastos/{gasto_id}", headers=vila.h, json={"etapa": "2"})
+    assert d.status_code == 200, d.text
+    t = (await orcamento(vila, obra))["totais"]
+    assert (t["gastos"]["a_definir"], t["gastos"]["nas_etapas"]) == (0, 70000)
+    await _desfazer(vila, d.json()["registro_id"])
+    [g] = (await vila.http.get(f"/obras/{obra}/gastos", headers=vila.h)).json()
+    assert g["etapa"] is None
+
+    # estornar o próprio gasto tira das contas
+    assert (await vila.http.post(f"/registro/{reg}/desfazer", headers=vila.h)).status_code == 200
+    assert (await orcamento(vila, obra))["totais"]["gastos"]["a_definir"] == 0
+
+
+async def test_gasto_sem_etapa_em_obra_sem_orcamento_e_topico_sem_etapa(vila):
+    o = await nova_obra(vila)
+    r = await _gasto(vila, o["id"], etapa=None)
+    assert r["gasto"]["etapa"] is None
+    c = await vila.http.post(f"/obras/{o['id']}/comprovantes", headers=vila.h,
+                             files={"arquivo": ("pix.jpg", JPEG + secrets.token_bytes(16), "image/jpeg")})
+    com_topico = await vila.http.post(f"/comprovantes/{c.json()['id']}/confirmar", headers=vila.h,
+                                      json=_confirmacao(etapa=None, topico_id="qualquer"))
+    assert com_topico.status_code == 422
+
+
+async def test_etapa_criada_na_hora_vale_direto_no_confirmar(vila):
+    o = await nova_obra(vila)
+    obra = o["id"]
+    await _contrato(vila, obra)
+    e = await vila.http.post(f"/obras/{obra}/etapas-extras", headers=vila.h, json={"nome": "Muro de arrimo"})
+    assert e.status_code == 201, e.text
+    r = await _gasto(vila, obra, etapa=e.json()["chave"])
+    assert r["gasto"]["etapa"] == e.json()["chave"]
+    assert (await orcamento(vila, obra))["totais"]["gastos"]["fora_do_orcamento"] == r["gasto"]["valor"]

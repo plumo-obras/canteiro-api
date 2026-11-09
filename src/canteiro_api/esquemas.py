@@ -73,6 +73,7 @@ class ContaSaida(BaseModel):
     falta: int
     comprar: int
     sobra: int = Field(0, description="milésimos que já tem ou vêm além do que precisa (0 sem previsão)")
+    medido: int = Field(0, description="serviço: milésimos já medidos (não é saldo, mas desconta da falta)")
     sem_previsao: bool = Field(False, description="precisa = 0: ninguém lançou a previsão; NÃO quer dizer que não "
                                                   "precisa")
     texto: str = Field("", description="a linha de conta pronta (regras.texto_da_conta), sempre aritmética verdadeira")
@@ -164,6 +165,8 @@ class PedidoDados(Entrada):
 
 class PedidoCorpo(PedidoDados):
     aprovado: bool = Field(False, description="true: nasce aprovado (compra já decidida); false: em cotação")
+    chave_idempotencia: str | None = Field(None, min_length=8, max_length=64,
+                                           description="a mesma chave devolve o pedido já criado, sem duplicar")
 
 
 class PedidoEdicao(Entrada):
@@ -422,6 +425,11 @@ class ObraSaida(Obra):
     registro_id: str | None = Field(None, description="a EntradaRegistro da mudança (null quando nada mudou)")
 
 
+class AprovacaoSaida(ObraSaida):
+    insumos_criados: int = Field(0, description="itens do orçamento que viraram insumo em Compras")
+    insumos_atualizados: int = Field(0, description="insumos que já existiam e receberam a previsão do orçamento")
+
+
 # --- orçamento por planilha ---
 
 class ColunaPlanilha(BaseModel):
@@ -524,6 +532,17 @@ class MateriaisDoProjeto(BaseModel):
     aplicar: bool = False
 
 
+class ItemOrcamentoEdicao(Entrada):
+    quantidade: int | None = Field(None, description="milésimos; negativa só em aditivo (supressão)")
+    valor_unitario: int | None = Field(None, ge=0, description="centavos")
+
+
+class ItemEditado(BaseModel):
+    item: ItemOrcamento
+    total_versao: int = Field(description="centavos; o total da versão já com a edição")
+    registro_id: str
+
+
 class EstruturaCorpo(Entrada):
     """Os materiais do projeto lançados como uma versão do orçamento (uma etapa \"Estrutura\"), em vez da lista de
     materiais. Reaproveita a importação de versão: vira contrato se a obra ainda não tem um, ou aditivo se já tem."""
@@ -621,6 +640,7 @@ class GastosNoOrcamentoSaida(BaseModel):
     na_lista_padrao: int = Field(0, description="obra sem orçamento: gastos na lista padrão de etapas")
     sem_etapa_do_orcamento: int = Field(0, description="numa etapa que não é do orçamento vigente nem extra (lista "
                                                        "padrão de antes do orçamento): falta reclassificar")
+    a_definir: int = Field(0, description='confirmados sem etapa ("ver depois"): falta escolher a etapa')
 
 
 class TotaisOrcamento(_Andamento):
@@ -734,6 +754,8 @@ class ResumoObra(BaseModel):
     nf_para_conferir: int = Field(description="pedidos recebidos esperando conferência")
     ultima_atividade: datetime | None = Field(None, description="última entrada do registro da obra")
     prazo: Prazo | None = Field(None, description="o mesmo do GET /obras/{id}/cronograma; null sem cronograma")
+    tem_orcamento: bool = Field(False, description="contrato vigente, ou algum insumo com previsão (o que permite "
+                                                   "aprovar a obra)")
 
 
 
@@ -1223,7 +1245,7 @@ class ConfirmarCorpo(Entrada):
     data_pagamento: str = Field(max_length=10, description="AAAA-MM-DD")
     favorecido: str = Field(max_length=300)
     descricao: str = Field(max_length=400)
-    etapa: str = Field(max_length=80)
+    etapa: str | None = Field(max_length=80, description='null = "ver depois": conta na obra e em nenhuma etapa')
     topico_id: str | None = Field(None, max_length=80)
     fornecedor_id: str | None = Field(None, max_length=80)
     pedido_id: str | None = Field(None, max_length=80, description="o gasto é o pagamento deste pedido")
@@ -1358,7 +1380,7 @@ class TopicoNoResumo(BaseModel):
 
 
 class EtapaNoResumo(BaseModel):
-    etapa: str
+    etapa: str | None = Field(description="null = gastos sem etapa, a definir")
     nome: str
     origem: Origem
     total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
@@ -1372,4 +1394,5 @@ class ResumoGastos(BaseModel):
     tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
     sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
+    a_definir: int = Field(0, description='parte do total confirmada sem etapa ("ver depois")')
     etapas: list[EtapaNoResumo]

@@ -29,6 +29,7 @@ from ..nucleo import (
     executar_e_registrar,
     insumo_da_obra,
     obra_do_tenant,
+    recusar_se_desfazendo,
     verbo_desfazer,
 )
 
@@ -57,6 +58,8 @@ async def preparar_movimento(tx, u: UsuarioAtual, *, obra_id: str, insumo_id: st
                              origem_doc: str | None = None,
                              origem: str = "tela", desfaz: str | None = None, conferir_curva: bool = True,
                              insumo: dict | None = None) -> Operacao:
+    if not desfaz:
+        recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, obra_id))
     insumo = insumo or await insumo_da_obra(tx, u.tenant_id, obra_id, insumo_id)
     if insumo.get("tipo") == TipoInsumo.SERVICO.value:
         raise RegraViolada(f"{insumo['nome']} é serviço: não tem estoque para entrar, sair ou ajustar.")
@@ -137,7 +140,19 @@ def valor_em_aberto(p: dict) -> int:
                for x in linhas_de(p) if x["quantidade"])
 
 
-def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) -> list[dict]:
+def medido_por_insumo(pedidos: list[dict]) -> dict[str, int]:
+    """O que já foi medido de cada serviço. Serviço não entra no almoxarifado, então o que chegou não vira saldo:
+    sem somar isto, o serviço entregue voltaria inteiro para "Falta comprar" assim que o pedido fechasse."""
+    medido: dict[str, int] = {}
+    for p in pedidos:
+        for x in linhas_de(p):
+            if x.get("tipo") == TipoInsumo.SERVICO.value and x.get("recebida"):
+                medido[x["insumo_id"]] = medido.get(x["insumo_id"], 0) + x["recebida"]
+    return medido
+
+
+def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict],
+              medido: dict[str, int] | None = None) -> list[dict]:
     """Junta insumos, saldos e pedidos abertos já lidos. Separado da leitura para o resumo de obras reaproveitar a
     mesma conta lendo o tenant inteiro de uma vez. A caminho é o que falta entregar em cada linha: a parte que já
     chegou está no saldo, e contá-la de novo esconderia uma falta."""
@@ -152,6 +167,7 @@ def com_conta(insumos: list[dict], saldos: dict[str, int], pedidos: list[dict]) 
     saida = []
     for i in insumos:
         c = conta_de_falta(precisa=i["precisa_ate_o_fim"], saldo=saldos.get(i["id"], 0),
+                           medido=(medido or {}).get(i["id"], 0),
                            a_caminho=a_caminho.get(i["id"], 0), cotando=cotando.get(i["id"], 0), transferencia=0)
         saida.append({"insumo": i, "conta": {**asdict(c), "texto": texto_da_conta(c, i.get("unidade", ""))}})
     return saida
@@ -187,14 +203,14 @@ def ultimos_precos(pedidos: list[dict]) -> dict[str, dict]:
 async def insumos_com_conta(arm, tenant_id: str, obra_id: str) -> list[dict]:
     """A Conta de cada insumo: saldo da projeção, a caminho e cotando somados dos pedidos abertos da obra; e o preço
     da última compra. Uma consulta de pedidos só (todos os da obra) serve às duas coisas."""
-    insumos = ativos(await arm.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
-                                                  [("nome", "asc")])))
+    insumos = await insumos_ativos(arm, tenant_id, obra_id)
     saldos = {s["id"]: s["saldo"] for s in
               await arm.consultar(Consulta("saldos", tenant_id, [Filtro("obra_id", "==", obra_id)]))}
     todos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
     abertos = [p for p in todos if p["status"] in PEDIDOS_ABERTOS]
     precos = ultimos_precos(todos)
-    return [{**x, "ultimo_preco": precos.get(x["insumo"]["id"])} for x in com_conta(insumos, saldos, abertos)]
+    return [{**x, "ultimo_preco": precos.get(x["insumo"]["id"])}
+            for x in com_conta(insumos, saldos, abertos, medido_por_insumo(todos))]
 
 
 def _nome_chave(nome: str) -> str:
@@ -216,12 +232,42 @@ def ativos(insumos: list[dict]) -> list[dict]:
     return [i for i in insumos if not i.get("arquivado")]
 
 
+def mudou_desde_a_aprovacao(i: dict) -> bool:
+    return any(i.get(k) != x for k, x in i["aprovacao"]["depois"].items())
+
+
+def _criado_por_aprovacao(i: dict) -> bool:
+    return bool(i.get("aprovacao")) and i["aprovacao"]["antes"] is None
+
+
+def sem_aprovacao_abandonada(insumos: list[dict]) -> list[dict]:
+    """Os insumos de uma obra `em_orcamento`, sem o que uma aprovação que não terminou deixou no caminho. Os lotes
+    gravam antes de o status virar, e nessa situação todo insumo com rastro é sobra: aprovação concluída e desfeita
+    arquiva o que criou e tira o rastro do que atualizou. O criado some; o atualizado aparece como era."""
+    saida = []
+    for i in insumos:
+        if not i.get("aprovacao"):
+            saida.append(i)
+        elif not _criado_por_aprovacao(i):
+            saida.append(i if mudou_desde_a_aprovacao(i) else {**i, **i["aprovacao"]["antes"]})
+    return saida
+
+
+async def insumos_ativos(leitor, tenant_id: str, obra_id: str) -> list[dict]:
+    """Os insumos que a obra tem de verdade, sem os arquivados e sem as sobras de aprovação abandonada."""
+    insumos = ativos(await leitor.consultar(Consulta("insumos", tenant_id, [Filtro("obra_id", "==", obra_id)],
+                                                     [("nome", "asc")])))
+    o = await leitor.obter("obras", tenant_id, obra_id)
+    return sem_aprovacao_abandonada(insumos) if o and o["status"] == "em_orcamento" else insumos
+
+
 def gravar_insumo_novo(tx, d: dict, existente: dict | None) -> None:
     """Grava o insumo de ID derivado do nome. `existente` é o que a transação leu nesse ID: arquivado (cadastro
-    desfeito) é reaproveitado; ativo quer dizer que alguém cadastrou o mesmo nome agora há pouco."""
+    desfeito) ou sobra de aprovação abandonada é reaproveitado; ativo quer dizer que alguém cadastrou o mesmo nome
+    agora há pouco."""
     if existente is None:
         tx.criar("insumos", d)
-    elif existente.get("arquivado"):
+    elif existente.get("arquivado") or _criado_por_aprovacao(existente):
         tx.salvar("insumos", d)
     else:
         raise Conflito(f"'{d['nome']}' já está cadastrado nesta obra.")
@@ -333,8 +379,8 @@ async def criar_insumo(arm, u: UsuarioAtual, obra_id: str, *, nome: str, unidade
     (arquivado) com o mesmo nome é reaproveitado.
     """
     nome = nome_limpo(nome)
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
-    existentes = ativos(await arm.consultar(Consulta("insumos", u.tenant_id, [Filtro("obra_id", "==", obra_id)])))
+    recusar_se_desfazendo(await obra_do_tenant(arm, u.tenant_id, obra_id))
+    existentes = await insumos_ativos(arm, u.tenant_id, obra_id)
     if any(_nome_chave(i["nome"]) == _nome_chave(nome) for i in existentes):
         raise Conflito(f"'{nome}' já está cadastrado nesta obra.")
     ins = Insumo(id=id_insumo(u.tenant_id, obra_id, nome), tenant_id=u.tenant_id,

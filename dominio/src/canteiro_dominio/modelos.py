@@ -24,12 +24,23 @@ class Documento(BaseModel):
     criado_em: datetime = Field(default_factory=agora)
 
 
+# O Desfazer da aprovação roda em lotes e pode parar no meio: enquanto não termina, a obra não está aprovada nem em
+# orçamento, e Compras está pela metade.
+DESFAZENDO_APROVACAO = "desfazendo_aprovacao"
+
+
 class Obra(Documento):
     nome: str
     cidade: str = ""
     cep: str = ""
     verba: Centavos = 0
-    status: str = "em_andamento"          # em_andamento | em_orcamento | concluida
+    # em_andamento | em_orcamento | concluida | desfazendo_aprovacao
+    status: str = "em_andamento"
+    # Na obra em `desfazendo_aprovacao`: o registro cujo Desfazer ficou pela metade, para a tela oferecer retomar.
+    desfazendo_registro_id: str | None = None
+    # Passou pelo "Aprovar". Obra antiga fica `em_andamento` sem nunca ter tido aprovação, e ela ainda pode importar
+    # o contrato: é o `status` sozinho que não distingue as duas.
+    aprovada: bool = False
     # Dados do onboarding: todos opcionais, porque a obra nasce com o nome e o resto chega quando a pessoa souber.
     endereco: str = ""
     uf: str = ""
@@ -88,6 +99,8 @@ class VersaoOrcamento(Documento):
     assinatura: str = ""                   # hash do arquivo + tipo: a mesma chave com outro arquivo é conflito
     # [{etapa, descricao}] das etapas desta versão: os selects de apropriação leem só as versões, sem os 500 itens
     lista_etapas: list[dict[str, str]] = Field(default_factory=list)
+    edicoes: int = 0                       # linhas editadas à mão: aprovar confere que nada mudou no meio dela
+    gerou_compras: bool = False            # aditivo que entrou com a obra aprovada e já mexeu em Compras
 
 
 class ItemOrcamento(Documento):
@@ -128,6 +141,10 @@ class Insumo(Documento):
     precisa_ate_o_fim: Milesimos = 0       # quanto a obra ainda vai consumir (orçamento/planejamento)
     curva: CurvaABC = CurvaABC.B           # curva A exige destino na baixa
     valor_unitario: Centavos = 0           # preço unitário do orçamento; 0 = sem preço
+    etapa: str | None = None               # etapa do orçamento onde ele mais pesa: agrupa Compras e sugere a do pedido
+    # Quando veio da aprovação do orçamento: {id, antes (None = criado por ela), depois}. Fica no insumo, e não na
+    # receita do registro, porque um orçamento de 2.000 linhas não caberia num documento só.
+    aprovacao: dict[str, Any] | None = None
     # cadastro desfeito pelo registro: a porta não apaga documento, então ele sai das listas e da Conta. O ID fica
     # reservado: cadastrar o mesmo nome de novo reaproveita este documento.
     arquivado: bool = False
@@ -215,6 +232,8 @@ class Pedido(Documento):
     # Soma dos gastos confirmados como pagamento deste pedido. Só informa: o custo do pedido já conta no realizado
     # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.soma_nos_gastos_avulsos`).
     pago: Centavos = 0
+    recebido_em: str | None = None         # "AAAA-MM-DD", dia da última entrega (None = nada chegou)
+    assinatura: str = ""                   # hash do corpo: a mesma chave com outro conteúdo é conflito
 
     @model_validator(mode="before")
     @classmethod
@@ -389,7 +408,8 @@ class Gasto(Documento):
     favorecido: str                        # quem recebeu o dinheiro, como no comprovante
     fornecedor_id: str | None = None
     descricao: str
-    etapa: str                             # código da etapa do orçamento, chave da lista padrão ou "x-<id>" (extra)
+    # código da etapa do orçamento, chave da lista padrão ou "x-<id>" (extra); None = "ver depois", ainda a definir
+    etapa: str | None = None
     topico_id: str | None = None
     pedido_id: str | None = None
     quem: str = ""

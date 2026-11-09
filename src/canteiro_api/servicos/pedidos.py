@@ -5,7 +5,9 @@ almoxarifado das linhas de material na mesma transação e deixa o resto "a cami
 encerrar o pedido. Só a última entrega pode ser desfeita: desfazer uma do meio deixaria as seguintes contando em cima de
 uma quantidade que não existe mais.
 """
-from canteiro_dominio.modelos import LinhaPedido, Pedido, Recebimento, StatusPedido, TipoInsumo, TipoMovimento
+import hashlib
+
+from canteiro_dominio.modelos import LinhaPedido, Pedido, Recebimento, StatusPedido, TipoInsumo, TipoMovimento, agora
 from canteiro_dominio.regras import (
     PODE_RECEBER,
     RegraViolada,
@@ -26,14 +28,24 @@ from ..nucleo import (
     insumo_da_obra,
     obra_do_tenant,
     receita_inversa,
+    recusar_se_desfazendo,
     verbo_desfazer,
 )
-from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
+from .estoque import dia_local, id_derivado, linhas_de, preparar_estorno, preparar_movimento
 
 
 def id_contador(tenant_id: str) -> str:
     # O Firestore não tem sequência nem índice único: o número sai de um documento-contador lido e gravado na transação.
     return f"contador-pedidos-{tenant_id}"
+
+
+def id_pedido(tenant_id: str, obra_id: str, chave: str) -> str:
+    return id_derivado(tenant_id, "pedido", obra_id, chave)
+
+
+def assinatura_do_pedido(corpo: PedidoDados) -> str:
+    """O status de hoje não serve para comparar: o pedido anda depois de criado, e a repetição ainda é a mesma."""
+    return hashlib.sha256(corpo.model_dump_json(exclude={"chave_idempotencia"}).encode()).hexdigest()
 
 
 def id_recebimento(tenant_id: str, pedido_id: str, chave: str) -> str:
@@ -50,11 +62,12 @@ def _lista(nomes: list[str]) -> str:
 
 
 async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: PedidoDados,
-                                status: StatusPedido = StatusPedido.EM_COTACAO) -> Operacao:
+                                status: StatusPedido = StatusPedido.EM_COTACAO, *, id_: str | None = None,
+                                assinatura: str = "") -> Operacao:
     """`status` = aprovado quando a compra já foi decidida (proposta aprovada, ou a pessoa marcou na tela): pedir uma
     segunda aprovação do mesmo pedido seria burocracia sem informação nova. A etapa de cada linha é conferida contra o
     orçamento antes da transação (é consulta, e a transação só lê por ID)."""
-    await obra_do_tenant(tx, u.tenant_id, obra_id)
+    recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, obra_id))
     if corpo.fornecedor_id and not await tx.obter("fornecedores", u.tenant_id, corpo.fornecedor_id):
         raise NaoEncontrado("Fornecedor não encontrado.")
     linhas: list[LinhaPedido] = []
@@ -69,7 +82,8 @@ async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: Pedido
     n = (contador["ultimo"] if contador else 0) + 1
     p = Pedido(tenant_id=u.tenant_id, numero=f"PED-{n:04d}", obra_id=obra_id, fornecedor=corpo.fornecedor.strip(),
                fornecedor_id=corpo.fornecedor_id, linhas=linhas, valor=sum(x.total for x in linhas),
-               previsao=corpo.previsao, observacao=corpo.observacao.strip(), status=status)
+               previsao=corpo.previsao, observacao=corpo.observacao.strip(), status=status, assinatura=assinatura,
+               **({"id": id_} if id_ else {}))
 
     def aplicar() -> dict:
         tx.salvar("contadores", {"id": id_contador(u.tenant_id), "tenant_id": u.tenant_id, "ultimo": n})
@@ -111,6 +125,7 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
     """Registra uma entrega: `entregas` = [(índice da linha, quantidade)]. Material entra no almoxarifado; serviço só
     soma o medido. Status vira conferido quando nada mais falta, senão parcial."""
     p = _normalizado(await _pedido(tx, u.tenant_id, pedido_id))
+    recusar_se_desfazendo(await obra_do_tenant(tx, u.tenant_id, p["obra_id"]))
     de = StatusPedido(p["status"])
     if de not in PODE_RECEBER:
         raise RegraViolada(f"{p['numero']} está {de.value}: não recebe entrega.")
@@ -144,7 +159,7 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
 
     def aplicar() -> dict:
         rec.movimentos = [m.aplicar()["id"] for m in movimentos]
-        campos = {"linhas": linhas, "status": para.value, "recebimentos": numero}
+        campos = {"linhas": linhas, "status": para.value, "recebimentos": numero, "recebido_em": dia_local(agora())}
         tx.atualizar("pedidos", u.tenant_id, pedido_id, campos)
         tx.criar("recebimentos", doc(rec))
         evento(tx, u.tenant_id, "pedido.recebimento", p["obra_id"],
@@ -168,7 +183,8 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
 
     return Operacao(obra_id=p["obra_id"], aplicar=aplicar, texto=texto,
                     desfazer=lambda d: {"op": "desfazer_recebimento", "recebimento_id": rec.id,
-                                        "status_antes": de.value, "status_depois": para.value})
+                                        "status_antes": de.value, "status_depois": para.value,
+                                        "recebido_em_antes": p.get("recebido_em")})
 
 
 async def preparar_desfazer_recebimento(tx, u: UsuarioAtual, receita: dict) -> Operacao:
@@ -189,7 +205,8 @@ async def preparar_desfazer_recebimento(tx, u: UsuarioAtual, receita: dict) -> O
     def aplicar() -> dict:
         for e in estornos:
             e.aplicar()
-        campos = {"linhas": linhas, "status": voltou, "recebimentos": rec["numero"] - 1}
+        campos = {"linhas": linhas, "status": voltou, "recebimentos": rec["numero"] - 1,
+                  "recebido_em": receita.get("recebido_em_antes")}
         tx.atualizar("pedidos", u.tenant_id, p["id"], campos)
         tx.atualizar("recebimentos", u.tenant_id, rec["id"], {"desfeito": True})
         evento(tx, u.tenant_id, "pedido.status", p["obra_id"],

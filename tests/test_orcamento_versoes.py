@@ -23,7 +23,7 @@ CONTRATO = xlsx(
     [None, None, None, "Subtotal 2", None, None, None, 17270.07],
     [None, None, None, "TOTAL GERAL", None, None, None, 21075.96],
 )
-ADITIVO = xlsx(
+LINHAS_ADITIVO = [
     ["1º termo aditivo"],
     CABECALHO,
     ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
@@ -31,7 +31,8 @@ ADITIVO = xlsx(
     ["2", None, None, "FUNDAÇÕES", None, None, None, None],
     ["2.2.1", "93358", "SINAPI", "Escavação manual de valas (supressão)", "m³", -10.76, 57.12, 614.61],
     ["2.9", "92915", "SINAPI", "Armação de aço CA-60 5,0mm", "m²", 1, 11.15, 11.15],
-)
+]
+ADITIVO = xlsx(*LINHAS_ADITIVO)
 
 
 def mapa(linha_cabecalho=4, **kw):
@@ -219,7 +220,9 @@ async def test_aditivo_com_etapa_nova(vila):
 async def test_aprovar_soma_os_aditivos_vigentes(vila):
     o = await nova_obra(vila)
     await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)
-    await versao(vila, o["id"], ADITIVO, mapa(linha_cabecalho=2), tipo="aditivo", aplicar=True)
+    # o aço na mesma unidade do contrato: em duas unidades, a aprovação recusa (não dá para somar em Compras)
+    aditivo = xlsx(*(["kg" if x[0] == "2.9" and c == "m²" else c for c in x] for x in LINHAS_ADITIVO))
+    await versao(vila, o["id"], aditivo, mapa(linha_cabecalho=2), tipo="aditivo", aplicar=True)
     r = await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)
     reg = await registro(vila, r.json()["registro_id"])
     assert reg["texto"] == f"Aprovou o orçamento de {o['nome']} (8 itens, R$ 40.192,78)"

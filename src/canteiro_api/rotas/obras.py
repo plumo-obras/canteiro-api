@@ -10,6 +10,7 @@ from canteiro_dominio.modelos import Movimento, Obra, Recebimento, StatusPedido,
 
 from ..auth import UsuarioAtual, exigir, usuario_atual
 from ..esquemas import (
+    AprovacaoSaida,
     AvancarCorpo,
     CronogramaCorpo,
     CronogramaObra,
@@ -19,6 +20,8 @@ from ..esquemas import (
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
+    ItemEditado,
+    ItemOrcamentoEdicao,
     LeituraPlanilha,
     Mapeamento,
     MateriaisDoProjeto,
@@ -44,7 +47,7 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import compras, cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
 
 r = APIRouter(tags=["obras e almoxarifado"])
 admin = exigir(Papel.ADMIN)
@@ -169,18 +172,20 @@ async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile 
     return previa
 
 
-@r.post("/obras/{obra_id}/orcamento/aprovar", response_model=ObraSaida, tags=["orçamento"])
+@r.patch("/obras/{obra_id}/orcamento/itens/{item_id}", response_model=ItemEditado, tags=["orçamento"])
+async def editar_item_orcamento(obra_id: str, item_id: str, corpo: ItemOrcamentoEdicao,
+                                u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    """Preço e quantidade na própria linha. Com o orçamento aprovado, só o preço de item que estava em R$ 0,00."""
+    return await versoes.editar_item(arm, u, obra_id, item_id, corpo.model_dump(exclude_none=True))
+
+
+@r.post("/obras/{obra_id}/orcamento/aprovar", response_model=AprovacaoSaida, tags=["orçamento"])
 async def aprovar_orcamento(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
-    await obra_do_tenant(arm, u.tenant_id, obra_id)
-    insumos = await obras.insumos_da_obra(arm, u.tenant_id, obra_id)
-    vigentes = [v for v in await versoes.versoes_da_obra(arm, u.tenant_id, obra_id) if v["ativa"]]
-
-    async def tx_corpo(tx):
-        op = await obras.preparar_aprovar_orcamento(tx, u, obra_id, insumos, vigentes)
-        o, entrada = executar_e_registrar(tx, u, op)
-        return {**o, "registro_id": entrada["id"]}
-
-    return await arm.em_transacao(tx_corpo)
+    """Tira a obra de `em_orcamento` e, com contrato importado, gera os insumos de Compras."""
+    try:
+        return await compras.aprovar(arm, u, obra_id)
+    except ConflitoDeId:
+        raise Conflito("Alguém cadastrou um destes insumos agora há pouco; aprove de novo.") from None
 
 
 async def _ler_arquivo(arquivo: UploadFile) -> bytes:
@@ -298,18 +303,41 @@ async def listar_pedidos(obra_id: str, status_: list[StatusPedido] | None = Quer
 
 
 @r.post("/obras/{obra_id}/pedidos", response_model=PedidoSaida, status_code=status.HTTP_201_CREATED,
-        tags=["pedidos"])
-async def criar_pedido(obra_id: str, corpo: PedidoCorpo, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+        tags=["pedidos"], responses={200: {"description": "repetição da mesma chave: devolve o pedido já criado"}})
+async def criar_pedido(obra_id: str, corpo: PedidoCorpo, response: Response, u: UsuarioAtual = Depends(admin),
+                       arm=Depends(_arm)):
     await obra_do_tenant(arm, u.tenant_id, obra_id)
+    chave = corpo.chave_idempotencia
+    id_ = pedidos.id_pedido(u.tenant_id, obra_id, chave) if chave else None
+    id_registro = estoque.id_derivado(u.tenant_id, "registro", id_) if id_ else None
+    assinatura = pedidos.assinatura_do_pedido(corpo) if id_ else ""
+
+    def repeticao(ja: dict) -> dict:
+        if ja["assinatura"] != assinatura:
+            raise Conflito("Esta chave de idempotência já foi usada para outro pedido.")
+        response.status_code = status.HTTP_200_OK
+        return {**ja, "registro_id": id_registro}
+
+    # antes de validar: o orçamento pode ter mudado depois do 1º envio, e a repetição só devolve o que já existe
+    if id_ and (ja := await arm.obter("pedidos", u.tenant_id, id_)):
+        return repeticao(ja)
     await versoes.validar_etapa(arm, u.tenant_id, obra_id, [x.etapa for x in corpo.linhas])
 
     async def tx_corpo(tx):
+        if id_ and (ja := await tx.obter("pedidos", u.tenant_id, id_)):
+            return ja, False
         op = await pedidos.preparar_criar_pedido(
-            tx, u, obra_id, corpo, status=StatusPedido.APROVADO if corpo.aprovado else StatusPedido.EM_COTACAO)
-        pedido, entrada = executar_e_registrar(tx, u, op)
-        return {**pedido, "registro_id": entrada["id"]}
+            tx, u, obra_id, corpo, status=StatusPedido.APROVADO if corpo.aprovado else StatusPedido.EM_COTACAO,
+            id_=id_, assinatura=assinatura)
+        pedido, entrada = executar_e_registrar(tx, u, op, registro_id=id_registro)
+        return {**pedido, "registro_id": entrada["id"]}, True
 
-    return await arm.em_transacao(tx_corpo)
+    try:
+        pedido, criado = await arm.em_transacao(tx_corpo)
+    except ConflitoDeId:
+        # dois envios da mesma chave ao mesmo tempo: o outro gravou primeiro
+        pedido, criado = await arm.obter("pedidos", u.tenant_id, id_), False
+    return pedido if criado else repeticao(pedido)
 
 
 @r.post("/pedidos/{pedido_id}/avancar", response_model=PedidoSaida, tags=["pedidos"])

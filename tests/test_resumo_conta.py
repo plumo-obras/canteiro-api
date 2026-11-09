@@ -1,5 +1,7 @@
 """Página inicial (resumo das obras) e conta (perfil, chave própria sem o segredo, créditos)."""
 from conftest import nova_vila
+from test_obras_orcamento import nova_obra
+from test_orcamento_versoes import CONTRATO, mapa, versao
 from test_pedidos_propostas import pedido_corpo, proposta
 
 from canteiro_dominio.tipos import novo_id
@@ -126,3 +128,17 @@ async def test_situacao_da_chave_sem_o_segredo(vila, http, arm, config):
 async def test_conta_exige_sessao(vila):
     assert (await vila.http.get("/conta")).status_code == 401
     assert (await vila.http.get("/conta/chave-anthropic")).status_code == 401
+
+
+async def test_tem_orcamento_no_resumo_de_obras(vila):
+    async def tem(obra):
+        lista = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
+        return next(x for x in lista if x["obra"]["id"] == obra)["tem_orcamento"]
+
+    o = await nova_obra(vila)
+    assert await tem(o["id"]) is False
+    r = await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)
+    assert r.status_code == 201, r.text[:300]
+    assert await tem(o["id"]) is True
+    # a Casa Vila Nova tem insumos com previsão, sem contrato importado
+    assert await tem(vila.obra) is True

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.etapas import (
     CHAVES_FIXAS,
+    SEM_ETAPA,
     EtapaNaArvore,
     ativar_extra,
     ativar_topico,
@@ -434,9 +435,9 @@ async def confirmar(arm, u: UsuarioAtual, comprovante_id: str, corpo: ConfirmarC
                              hoje=hoje())
     if corpo.fornecedor_id and not await arm.obter("fornecedores", u.tenant_id, corpo.fornecedor_id):
         raise ErroNegocio("Fornecedor não encontrado.")
-    no = next(e for e in arvore if e.chave == corpo.etapa)
-    topico = next((t for t in no.topicos if t.id == corpo.topico_id), None)
-    rotulo = f"{no.nome} › {topico.nome}" if topico else no.nome
+    no = next((e for e in arvore if e.chave == corpo.etapa), None)
+    topico = next((t for t in no.topicos if t.id == corpo.topico_id), None) if no else None
+    rotulo = (f"{no.nome} › {topico.nome}" if topico else no.nome) if no else SEM_ETAPA.lower()
     g = doc(Gasto(tenant_id=u.tenant_id, obra_id=obra_id, comprovante_id=comprovante_id, valor=corpo.valor,
                   data_pagamento=corpo.data_pagamento, favorecido=validado.favorecido,
                   fornecedor_id=corpo.fornecedor_id, descricao=validado.descricao, etapa=corpo.etapa,
@@ -586,7 +587,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     topicos_por_id = {t["id"]: t for t in topicos}
     ordem = {e.chave: i for i, e in enumerate(montar_arvore(extras, [], base))}
 
-    por_etapa: dict[str, dict[str | None, int]] = {}
+    por_etapa: dict[str | None, dict[str | None, int]] = {}
     pedidos = 0
     for g in gastos:
         if not soma_nos_gastos_avulsos(g):
@@ -595,8 +596,9 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
         t = por_etapa.setdefault(g["etapa"], {})
         t[g.get("topico_id")] = t.get(g.get("topico_id"), 0) + g["valor"]
 
-    def posicao(k: str):
-        return (origem_da_etapa(k, orcamento) == "sem_etapa_do_orcamento", ordem.get(k, len(ordem)), k)
+    def posicao(k: str | None):
+        fora = origem_da_etapa(k, orcamento) in ("sem_etapa_do_orcamento", "a_definir")
+        return (fora, k is None, ordem.get(k, len(ordem)), k or "")
 
     etapas = []
     for chave in sorted(por_etapa, key=posicao):
@@ -612,7 +614,8 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     no_orcamento = gastos_no_orcamento(gastos, orcamento)
     return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
             "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
-            "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "etapas": etapas}
+            "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "a_definir": no_orcamento.a_definir,
+            "etapas": etapas}
 
 
 # --- reclassificar: mudar a etapa de um gasto já confirmado ---

@@ -1,4 +1,5 @@
 """Regras de negócio. Contas ficam aqui (código determinístico), nunca no modelo de IA."""
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .modelos import Movimento, StatusPedido, TipoMovimento
@@ -27,19 +28,22 @@ class Conta:
     # Ninguém lançou quanto a obra precisa (precisa = 0). Não quer dizer que não precisa: quer dizer que o sistema não
     # sabe. Foi o "precisa 0 … = falta 0" que levou o agente a concluir "a obra não precisa de cimento".
     sem_previsao: bool = False
+    # Serviço já medido. Não é saldo (serviço não fica guardado em lugar nenhum), mas também não falta mais comprar.
+    medido: int = 0
 
 
-def conta_de_falta(*, precisa: int, saldo: int, a_caminho: int = 0, cotando: int = 0, transferencia: int = 0) -> Conta:
-    """falta = precisa − saldo − a caminho − em cotação − transferência (em milésimos).
+def conta_de_falta(*, precisa: int, saldo: int, a_caminho: int = 0, cotando: int = 0, transferencia: int = 0,
+                   medido: int = 0) -> Conta:
+    """falta = precisa − saldo − a caminho − em cotação − transferência − medido (em milésimos).
 
     Descontar o que está em cotação evita a compra em dobro (erro achado no protótipo: o pedido de compra incluía itens
     já cotados). Saldo negativo (baixa registrada antes da entrada) conta como zero para não inflar a falta.
     """
-    disponivel = max(0, saldo) + a_caminho + cotando + transferencia
+    disponivel = max(0, saldo) + a_caminho + cotando + transferencia + medido
     sem_previsao = precisa <= 0
     falta = max(0, precisa - disponivel)
     sobra = 0 if sem_previsao else max(0, disponivel - precisa)
-    return Conta(precisa, saldo, a_caminho, cotando, transferencia, falta, falta, sobra, sem_previsao)
+    return Conta(precisa, saldo, a_caminho, cotando, transferencia, falta, falta, sobra, sem_previsao, medido)
 
 
 def texto_da_conta(c: Conta, unidade: str) -> str:
@@ -58,12 +62,14 @@ def texto_da_conta(c: Conta, unidade: str) -> str:
                 f" · saldo {saldo} · a caminho {f(c.a_caminho)} · em cotação {f(c.cotando)}"
                 f" · transferência {f(c.transferencia)}")
     if c.sobra:
-        disponivel = max(0, c.saldo) + c.a_caminho + c.cotando + c.transferencia
+        disponivel = max(0, c.saldo) + c.a_caminho + c.cotando + c.transferencia + c.medido
         return (f"saldo {saldo} + a caminho {f(c.a_caminho)} + em cotação {f(c.cotando)}"
-                f" + transferência {f(c.transferencia)} = {f(disponivel)} para precisa {f(c.precisa)}:"
+                f" + transferência {f(c.transferencia)}{f' + medido {f(c.medido)}' if c.medido else ''}"
+                f" = {f(disponivel)} para precisa {f(c.precisa)}:"
                 f" sobra {f(c.sobra)}, falta 0")
     return (f"precisa {f(c.precisa)} − saldo {saldo} − a caminho {f(c.a_caminho)} − em cotação {f(c.cotando)}"
-            f" − transferência {f(c.transferencia)} = falta {f(c.falta)}")
+            f" − transferência {f(c.transferencia)}{f' − medido {f(c.medido)}' if c.medido else ''}"
+            f" = falta {f(c.falta)}")
 
 
 _SINAL = {
@@ -120,6 +126,77 @@ PODE_RECEBER = A_CAMINHO
 def falta_na_linha(linha) -> int:
     """O que ainda está a caminho numa linha do pedido. Entrega a mais não vira falta negativa."""
     return max(0, linha["quantidade"] - linha.get("recebida", 0))
+
+
+# --- do orçamento para Compras ---
+
+@dataclass(frozen=True)
+class ItemParaCompras:
+    """Um insumo que o orçamento pede: as linhas de mesmo nome juntas. Quantidade com sinal (supressão de aditivo)."""
+    nome: str
+    unidade: str
+    quantidade: int
+    valor_unitario: int
+    total: int
+    etapa: str | None
+
+
+def chave_do_nome(nome: str) -> str:
+    """"Areia  média" e "areia média" são o mesmo insumo."""
+    return " ".join(nome.split()).casefold()
+
+
+def preco_medio(total: int, quantidade: int) -> int:
+    """Unitário em centavos que dá `total` em `quantidade` milésimos, arredondado ao centavo. Nunca negativo: uma
+    supressão a preço maior que o do contrato pode deixar o total negativo com quantidade positiva, e aí não existe
+    preço médio. Fica 0, que é o "sem preço" de sempre: a pessoa informa no pedido, e a planilha, que está certa, não
+    trava a aprovação."""
+    return max(0, (total * 1000 + quantidade // 2) // quantidade) if quantidade > 0 else 0
+
+
+def itens_para_compras(itens: Iterable[dict]) -> list[ItemParaCompras]:
+    """Junta as linhas do orçamento pelo nome. A mesma coisa em duas etapas é um insumo só, para o almoxarifado ter um
+    saldo só; a soma é das quantidades, o preço é o médio ponderado e a etapa é a de maior valor (a de maior quantidade
+    no empate, como num orçamento ainda sem preços; depois, a primeira)."""
+    grupos: dict[str, dict] = {}
+    unidades: dict[str, list[str]] = {}
+    for x in itens:
+        if x["tipo"] != "item":
+            continue
+        chave = chave_do_nome(x["descricao"])
+        g = grupos.setdefault(chave, {"nome": " ".join(x["descricao"].split()), "unidade": x["unidade"],
+                                      "quantidade": 0, "total": 0, "etapas": {}})
+        if g["unidade"].strip().casefold() != x["unidade"].strip().casefold():
+            unidades.setdefault(g["nome"], [g["unidade"]]).append(x["unidade"])
+            continue
+        g["quantidade"] += x["quantidade"]
+        g["total"] += x["total"]
+        por_etapa = g["etapas"].setdefault(x.get("etapa") or None, [0, 0])
+        por_etapa[0] += x["total"]
+        por_etapa[1] += x["quantidade"]
+    if unidades:
+        lista = "; ".join(f"{n} ({' e '.join(dict.fromkeys(u))})" for n, u in unidades.items())
+        raise RegraViolada(f"Mesmo item com unidades diferentes no orçamento: {lista}. Corrija antes de continuar.")
+    return [ItemParaCompras(nome=g["nome"], unidade=g["unidade"], quantidade=g["quantidade"],
+                            valor_unitario=preco_medio(g["total"], g["quantidade"]), total=g["total"],
+                            etapa=max(g["etapas"], key=lambda e: tuple(g["etapas"][e])))
+            for g in grupos.values()]
+
+
+def insumo_ao_aprovar(insumo: dict, item: ItemParaCompras) -> dict:
+    """O que muda num insumo que já existia quando o orçamento é aprovado. Não soma: quem cadastrou antes já estava
+    prevendo o mesmo material, e somar dobraria a compra."""
+    return {"precisa_ate_o_fim": max(insumo.get("precisa_ate_o_fim", 0), item.quantidade),
+            "valor_unitario": insumo.get("valor_unitario", 0) or item.valor_unitario,
+            "etapa": insumo.get("etapa") or item.etapa}
+
+
+def insumo_com_aditivo(insumo: dict, item: ItemParaCompras) -> dict:
+    """O que muda num insumo quando entra um aditivo com a obra aprovada. Aqui soma, porque aditivo é acréscimo ao que
+    já foi aprovado; supressão reduz, sem passar de zero."""
+    return {"precisa_ate_o_fim": max(0, insumo.get("precisa_ate_o_fim", 0) + item.quantidade),
+            "valor_unitario": insumo.get("valor_unitario", 0) or item.valor_unitario,
+            "etapa": insumo.get("etapa") or item.etapa}
 
 
 def cnpj_valido(cnpj: str) -> bool:

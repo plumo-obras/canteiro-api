@@ -4,7 +4,7 @@ import re
 from datetime import date, timedelta
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import StatusPedido, StatusProposta
+from canteiro_dominio.modelos import StatusPedido, StatusProposta, TipoVersao
 from canteiro_dominio.regras import A_CAMINHO, falta_na_linha
 
 from ..esquemas import (
@@ -32,11 +32,17 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
         return []
     insumos = estoque.ativos(await arm.consultar(Consulta("insumos", tenant_id)))
     saldos = {s["id"]: s["saldo"] for s in await arm.consultar(Consulta("saldos", tenant_id))}
-    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
+    # os conferidos vêm só para a medição de serviço, que continua valendo depois de o pedido fechar
+    com_conferidos = await arm.consultar(Consulta("pedidos", tenant_id, [
+        Filtro("status", "in", [*estoque.PEDIDOS_ABERTOS, StatusPedido.CONFERIDO.value])]))
+    pedidos = [p for p in com_conferidos if p["status"] in estoque.PEDIDOS_ABERTOS]
+    medido = estoque.medido_por_insumo(com_conferidos)
     pendentes = await arm.consultar(Consulta("propostas", tenant_id,
                                              [Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     # o prazo projetado depende do orçamento e das medições: só se calcula para a obra que tem cronograma montado
     com_cronograma = {c["obra_id"] for c in await arm.consultar(Consulta("cronogramas", tenant_id)) if c.get("etapas")}
+    com_orcamento = {v["obra_id"] for v in await arm.consultar(Consulta("versoes_orcamento", tenant_id))
+                     if v["ativa"] and v["tipo"] == TipoVersao.CONTRATO}
 
     def por_obra(docs: list[dict]) -> dict[str, list[dict]]:
         g: dict[str, list[dict]] = {}
@@ -45,10 +51,14 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
         return g
 
     insumos_de, pedidos_de, pendentes_de = por_obra(insumos), por_obra(pedidos), por_obra(pendentes)
+    for o in obras:
+        if o["status"] == "em_orcamento" and o["id"] in insumos_de:
+            insumos_de[o["id"]] = estoque.sem_aprovacao_abandonada(insumos_de[o["id"]])
+    com_orcamento |= {obra for obra, docs in insumos_de.items() if any(i.get("precisa_ate_o_fim", 0) > 0 for i in docs)}
     saida = []
     for o in obras:
         ped = pedidos_de.get(o["id"], [])
-        contas = estoque.com_conta(insumos_de.get(o["id"], []), saldos, ped)
+        contas = estoque.com_conta(insumos_de.get(o["id"], []), saldos, ped, medido)
         # a última atividade é a entrada mais nova do registro: uma leitura de 1 documento por obra
         ultima = await arm.consultar(Consulta("registro", tenant_id, [Filtro("obra_id", "==", o["id"])],
                                               [("criado_em", "desc")], limite=1))
@@ -61,7 +71,8 @@ async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
             nf_para_conferir=sum(1 for p in ped if p["status"] == StatusPedido.RECEBIDO.value),
             ultima_atividade=ultima[0]["criado_em"] if ultima else None,
             prazo=(await cronograma.cronograma_da_obra(arm, tenant_id, o["id"])).prazo
-            if o["id"] in com_cronograma else None))
+            if o["id"] in com_cronograma else None,
+            tem_orcamento=o["id"] in com_orcamento))
     return saida
 
 

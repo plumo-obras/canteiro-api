@@ -12,7 +12,7 @@ async def test_conta_da_casa_vila_nova(vila):
     aco = await vila.conta("aço")
     # 3.940 − 140 − 3.200 a caminho − 600 em cotação = 0: não comprar de novo
     assert aco == {"precisa": qtd(3940), "saldo": qtd(140), "a_caminho": qtd(3200), "cotando": qtd(600),
-                   "transferencia": 0, "falta": 0, "comprar": 0, "sobra": 0, "sem_previsao": False,
+                   "transferencia": 0, "falta": 0, "comprar": 0, "sobra": 0, "sem_previsao": False, "medido": 0,
                    "texto": "precisa 3.940 kg − saldo 140 kg − a caminho 3.200 kg − em cotação 600 kg − "
                             "transferência 0 kg = falta 0 kg"}
     cimento = await vila.conta("cimento")

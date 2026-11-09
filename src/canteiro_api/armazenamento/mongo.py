@@ -30,7 +30,7 @@ INDICES: dict[str, list[list[str]]] = {
     "obras": [["tenant_id", "nome", "_id"]],
     "insumos": [["tenant_id", "obra_id", "nome", "_id"], ["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
     "saldos": [["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
-    "versoes_orcamento": [["tenant_id", "obra_id", "_id"]],
+    "versoes_orcamento": [["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
     "itens_orcamento": [["tenant_id", "versao_id", "_id"]],
     "recebimentos": [["tenant_id", "pedido_id", "_id"]],
     "medicoes": [["tenant_id", "obra_id", "_id"]],
