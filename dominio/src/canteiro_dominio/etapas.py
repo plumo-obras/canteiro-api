@@ -68,6 +68,7 @@ ETAPAS_FIXAS: tuple[EtapaFixa, ...] = (
 CHAVES_FIXAS = frozenset(e.chave for e in ETAPAS_FIXAS)
 _NOMES_FIXOS = {e.chave: e.nome for e in ETAPAS_FIXAS}
 OUTROS = "outros"
+SEM_ETAPA = "Sem etapa"
 # Etapa extra é "x-" + o ID do documento: não colide com chave fixa e não muda quando a pessoa renomeia.
 PREFIXO_EXTRA = "x-"
 MAX_EXTRAS_POR_OBRA = 20
@@ -103,7 +104,8 @@ def validar_nome(nome: str, *, ja_usados: Iterable[str] = ()) -> str:
 # De onde vem a etapa de um gasto: do orçamento da obra, da lista padrão (obra sem orçamento), extra da obra, ou uma
 # chave que não está mais na árvore (gasto lançado na lista padrão antes de a obra importar orçamento, ou etapa de
 # uma versão desfeita): esse é o "sem etapa do orçamento", que a pessoa reclassifica.
-Origem = Literal["orcamento", "padrao", "extra", "sem_etapa_do_orcamento"]
+# "a_definir" é o gasto que a pessoa confirmou sem etapa ("ver depois").
+Origem = Literal["orcamento", "padrao", "extra", "sem_etapa_do_orcamento", "a_definir"]
 
 
 def _chave_sem_numero(descricao: str) -> str:
@@ -121,8 +123,10 @@ def nome_etapa_orcamento(etapa: str, descricao: str) -> str:
     return descricao if _chave_sem_numero(descricao) == etapa else f"{etapa} {descricao}"
 
 
-def origem_da_etapa(chave: str, etapas_orcamento: Collection[str]) -> Origem:
+def origem_da_etapa(chave: str | None, etapas_orcamento: Collection[str]) -> Origem:
     """`etapas_orcamento` = as chaves das etapas do orçamento vigente (vazio = obra sem orçamento)."""
+    if chave is None:
+        return "a_definir"
     if chave.startswith(PREFIXO_EXTRA):
         return "extra"
     if chave in etapas_orcamento:
@@ -132,9 +136,11 @@ def origem_da_etapa(chave: str, etapas_orcamento: Collection[str]) -> Origem:
     return "sem_etapa_do_orcamento"
 
 
-def nome_da_etapa(chave: str, *, orcamento: dict[str, str], extras: dict[str, str]) -> str:
+def nome_da_etapa(chave: str | None, *, orcamento: dict[str, str], extras: dict[str, str]) -> str:
     """Nome para mostrar de qualquer chave gravada num gasto. `orcamento` = {etapa: descrição} vigente; `extras` =
     {id: nome}, inclusive as arquivadas (o gasto antigo continua com nome)."""
+    if chave is None:
+        return SEM_ETAPA
     if chave in orcamento:
         return nome_etapa_orcamento(chave, orcamento[chave])
     if chave.startswith(PREFIXO_EXTRA) and chave.removeprefix(PREFIXO_EXTRA) in extras:

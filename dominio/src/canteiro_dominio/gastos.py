@@ -14,7 +14,7 @@ class GastoValidado:
     descricao: str
 
 
-def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao: str, etapa: str,
+def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao: str, etapa: str | None,
                   topico_id: str | None, arvore: list[EtapaNaArvore], hoje: date) -> GastoValidado:
     """O que a pessoa confirmou na revisão. Devolve os textos já arrumados (espaços), que é o que se grava."""
     if valor <= 0:
@@ -36,7 +36,10 @@ def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao
         raise RegraViolada("Diga em poucas palavras o que foi pago.")
     if len(desc) > MAX_DESCRICAO:
         raise RegraViolada(f"Descrição: até {MAX_DESCRICAO} caracteres.")
-    validar_classificacao(arvore, etapa, topico_id)
+    if etapa is not None:
+        validar_classificacao(arvore, etapa, topico_id)
+    elif topico_id is not None:
+        raise RegraViolada("Escolha a etapa do tópico, ou deixe sem tópico para definir depois.")
     return GastoValidado(favorecido=fav, descricao=desc)
 
 
@@ -59,6 +62,7 @@ class GastosNoOrcamento:
     - `sem_etapa_do_orcamento`: obra com orçamento, gastos numa chave que não é etapa dele nem extra (lançados na
       lista padrão antes de a obra importar o orçamento, ou numa etapa de versão desfeita). A pessoa reclassifica
       para levá-los a uma etapa; até lá contam só nos totais.
+    - `a_definir`: confirmados sem etapa ("ver depois"). Também só nos totais, até a pessoa escolher a etapa.
 
     Nos totais da obra entram todos: é tudo dinheiro que saiu.
     """
@@ -66,6 +70,7 @@ class GastosNoOrcamento:
     fora_do_orcamento: int = 0
     na_lista_padrao: int = 0
     sem_etapa_do_orcamento: int = 0
+    a_definir: int = 0
 
     @property
     def nas_etapas(self) -> int:
@@ -73,12 +78,12 @@ class GastosNoOrcamento:
 
     @property
     def total(self) -> int:
-        return self.nas_etapas + self.fora_do_orcamento + self.na_lista_padrao + self.sem_etapa_do_orcamento
+        return self.nas_etapas + self.fora_das_etapas
 
     @property
     def fora_das_etapas(self) -> int:
         """O que conta nos totais da obra sem estar em etapa nenhuma do orçamento."""
-        return self.fora_do_orcamento + self.na_lista_padrao + self.sem_etapa_do_orcamento
+        return self.fora_do_orcamento + self.na_lista_padrao + self.sem_etapa_do_orcamento + self.a_definir
 
 
 def gastos_no_orcamento(gastos: Iterable[dict], etapas_orcamento: Collection[str]) -> GastosNoOrcamento:
@@ -95,6 +100,8 @@ def gastos_no_orcamento(gastos: Iterable[dict], etapas_orcamento: Collection[str
             r.fora_do_orcamento += g["valor"]
         elif origem == "padrao":
             r.na_lista_padrao += g["valor"]
+        elif origem == "a_definir":
+            r.a_definir += g["valor"]
         else:
             r.sem_etapa_do_orcamento += g["valor"]
     return r

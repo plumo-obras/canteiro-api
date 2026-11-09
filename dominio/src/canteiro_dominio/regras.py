@@ -1,4 +1,5 @@
 """Regras de negócio. Contas ficam aqui (código determinístico), nunca no modelo de IA."""
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .modelos import Movimento, StatusPedido, TipoMovimento
@@ -120,6 +121,74 @@ PODE_RECEBER = A_CAMINHO
 def falta_na_linha(linha) -> int:
     """O que ainda está a caminho numa linha do pedido. Entrega a mais não vira falta negativa."""
     return max(0, linha["quantidade"] - linha.get("recebida", 0))
+
+
+# --- do orçamento para Compras ---
+
+@dataclass(frozen=True)
+class ItemParaCompras:
+    """Um insumo que o orçamento pede: as linhas de mesmo nome juntas. Quantidade com sinal (supressão de aditivo)."""
+    nome: str
+    unidade: str
+    quantidade: int
+    valor_unitario: int
+    total: int
+    etapa: str | None
+
+
+def chave_do_nome(nome: str) -> str:
+    """"Areia  média" e "areia média" são o mesmo insumo."""
+    return " ".join(nome.split()).casefold()
+
+
+def preco_medio(total: int, quantidade: int) -> int:
+    """Unitário em centavos que dá `total` em `quantidade` milésimos, arredondado ao centavo."""
+    return (total * 1000 + quantidade // 2) // quantidade if quantidade > 0 else 0
+
+
+def itens_para_compras(itens: Iterable[dict]) -> list[ItemParaCompras]:
+    """Junta as linhas do orçamento pelo nome. A mesma coisa em duas etapas é um insumo só, para o almoxarifado ter um
+    saldo só; a soma é das quantidades, o preço é o médio ponderado e a etapa é a de maior valor (a de maior quantidade
+    no empate, como num orçamento ainda sem preços; depois, a primeira)."""
+    grupos: dict[str, dict] = {}
+    unidades: dict[str, list[str]] = {}
+    for x in itens:
+        if x["tipo"] != "item":
+            continue
+        chave = chave_do_nome(x["descricao"])
+        g = grupos.setdefault(chave, {"nome": " ".join(x["descricao"].split()), "unidade": x["unidade"],
+                                      "quantidade": 0, "total": 0, "etapas": {}})
+        if g["unidade"].strip().casefold() != x["unidade"].strip().casefold():
+            unidades.setdefault(g["nome"], [g["unidade"]]).append(x["unidade"])
+            continue
+        g["quantidade"] += x["quantidade"]
+        g["total"] += x["total"]
+        por_etapa = g["etapas"].setdefault(x.get("etapa") or None, [0, 0])
+        por_etapa[0] += x["total"]
+        por_etapa[1] += x["quantidade"]
+    if unidades:
+        lista = "; ".join(f"{n} ({' e '.join(dict.fromkeys(u))})" for n, u in unidades.items())
+        raise RegraViolada(f"Mesmo item com unidades diferentes no orçamento: {lista}. Corrija antes de continuar.")
+    return [ItemParaCompras(nome=g["nome"], unidade=g["unidade"], quantidade=g["quantidade"],
+                            valor_unitario=preco_medio(g["total"], g["quantidade"]), total=g["total"],
+                            etapa=max(g["etapas"], key=lambda e: tuple(g["etapas"][e])))
+            for g in grupos.values()]
+
+
+def insumo_ao_aprovar(insumo: dict, item: ItemParaCompras) -> dict:
+    """O que muda num insumo que já existia quando o orçamento é aprovado. Não soma: quem cadastrou antes já estava
+    prevendo o mesmo material, e somar dobraria a compra."""
+    return {"precisa_ate_o_fim": max(insumo.get("precisa_ate_o_fim", 0), item.quantidade),
+            "valor_unitario": insumo.get("valor_unitario", 0) or item.valor_unitario,
+            "etapa": insumo.get("etapa") or item.etapa}
+
+
+def insumo_com_aditivo(insumo: dict, item: ItemParaCompras) -> dict:
+    """O que muda num insumo quando entra um aditivo com a obra aprovada. Aqui soma, porque aditivo é acréscimo ao que
+    já foi aprovado; supressão reduz, sem passar de zero."""
+    return {"precisa_ate_o_fim": max(0, insumo.get("precisa_ate_o_fim", 0) + item.quantidade),
+            "valor_unitario": insumo.get("valor_unitario", 0) or item.valor_unitario,
+            "etapa": insumo.get("etapa") or item.etapa}
 
 
 def cnpj_valido(cnpj: str) -> bool:
