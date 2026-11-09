@@ -621,6 +621,7 @@ class GastosNoOrcamentoSaida(BaseModel):
     na_lista_padrao: int = Field(0, description="obra sem orçamento: gastos na lista padrão de etapas")
     sem_etapa_do_orcamento: int = Field(0, description="numa etapa que não é do orçamento vigente nem extra (lista "
                                                        "padrão de antes do orçamento): falta reclassificar")
+    a_definir: int = Field(0, description='confirmados sem etapa ("ver depois"): falta escolher a etapa')
 
 
 class TotaisOrcamento(_Andamento):
@@ -1225,7 +1226,7 @@ class ConfirmarCorpo(Entrada):
     data_pagamento: str = Field(max_length=10, description="AAAA-MM-DD")
     favorecido: str = Field(max_length=300)
     descricao: str = Field(max_length=400)
-    etapa: str = Field(max_length=80)
+    etapa: str | None = Field(max_length=80, description='null = "ver depois": conta na obra e em nenhuma etapa')
     topico_id: str | None = Field(None, max_length=80)
     fornecedor_id: str | None = Field(None, max_length=80)
     pedido_id: str | None = Field(None, max_length=80, description="o gasto é o pagamento deste pedido")
@@ -1360,7 +1361,7 @@ class TopicoNoResumo(BaseModel):
 
 
 class EtapaNoResumo(BaseModel):
-    etapa: str
+    etapa: str | None = Field(description="null = gastos sem etapa, a definir")
     nome: str
     origem: Origem
     total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
@@ -1374,4 +1375,5 @@ class ResumoGastos(BaseModel):
     tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
     sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
+    a_definir: int = Field(0, description='parte do total confirmada sem etapa ("ver depois")')
     etapas: list[EtapaNoResumo]

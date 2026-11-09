@@ -477,7 +477,8 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                                gastos=GastosNoOrcamentoSaida(total=avulsos.total, nas_etapas=avulsos.nas_etapas,
                                                              fora_do_orcamento=avulsos.fora_do_orcamento,
                                                              na_lista_padrao=avulsos.na_lista_padrao,
-                                                             sem_etapa_do_orcamento=avulsos.sem_etapa_do_orcamento),
+                                                             sem_etapa_do_orcamento=avulsos.sem_etapa_do_orcamento,
+                                                             a_definir=avulsos.a_definir),
                                **andamento))
 
 
