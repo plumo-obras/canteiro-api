@@ -23,6 +23,7 @@ from ..esquemas import (
     LinhaIgnorada,
     LinhaOrcamento,
     Mapeamento,
+    MateriaisDoProjeto,
     PreviaOrcamento,
 )
 from ..modelos import doc
@@ -394,7 +395,8 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     return previa.model_copy(update={"aplicado": True, "registro_ids": registros})
 
 
-def _gravar_lote(u: UsuarioAtual, obra_id: str, lote: list[LinhaOrcamento], existentes: dict[str, dict], parte: str):
+def _gravar_lote(u: UsuarioAtual, obra_id: str, lote: list[LinhaOrcamento], existentes: dict[str, dict], parte: str,
+                 titulo: str = "o orçamento", assunto: str = "do orçamento"):
     """Um lote = uma transação = uma entrada no registro. O Desfazer arquiva os insumos novos e devolve aos atualizados
     os valores de antes; para isso o insumo atualizado é relido aqui dentro (o da prévia pode ter mudado)."""
     campos = ("precisa_ate_o_fim", "valor_unitario", "curva")
@@ -437,10 +439,71 @@ def _gravar_lote(u: UsuarioAtual, obra_id: str, lote: list[LinhaOrcamento], exis
             return total
 
         op = Operacao(obra_id=obra_id, aplicar=aplicar,
-                      texto=lambda total: f"Importou o orçamento: {len(novos)} novos, {len(restaurar)} atualizados "
+                      texto=lambda total: f"Importou {titulo}: {len(novos)} novos, {len(restaurar)} atualizados "
                                           f"({fmt_reais(total)}){parte}",
-                      desfazer=lambda _: receita_insumos(obra_id, f"importação do orçamento{parte}", arquivar=novos,
+                      desfazer=lambda _: receita_insumos(obra_id, f"importação {assunto}{parte}", arquivar=novos,
                                                          restaurar=restaurar))
         _, reg = executar_e_registrar(tx, u, op)
         return reg["id"]
     return corpo
+
+
+# o tradutor escreve a unidade em ASCII ("m3"); o almoxarifado usa a do orçamento ("m³")
+_UNIDADE = {"m3": "m³", "m2": "m²"}
+
+
+async def materiais_do_projeto(arm, u: UsuarioAtual, obra_id: str, corpo: MateriaisDoProjeto) -> PreviaOrcamento:
+    """A lista de materiais das pranchas entra como a lista de materiais da planilha: a mesma prévia (novo ou atualiza,
+    com o antes), os mesmos lotes e o mesmo Desfazer. O "precisa" de cada insumo passa a ser o do projeto; a conta do
+    que falta comprar (precisa − saldo − a caminho) é a de sempre."""
+    await obra_do_tenant(arm, u.tenant_id, obra_id)
+    existentes = {_nome_chave(i["nome"]): i for i in await insumos_da_obra(arm, u.tenant_id, obra_id)}
+    itens: dict[str, dict] = {}
+    erros: list[ErroLinha] = []
+    for n, m in enumerate(corpo.itens, start=1):
+        nome, unidade = m.nome.strip(), _UNIDADE.get(m.unidade.strip().casefold(), m.unidade.strip())
+        chave = _nome_chave(nome)
+        total = _arredonda(Decimal(m.quantidade) * m.valor_unitario / 1000)
+        if chave in itens:
+            x = itens[chave]
+            if x["unidade"].casefold() != unidade.casefold():
+                erros.append(ErroLinha(linha=n, campo="unidade", mensagem=f"'{nome}' aparece com duas unidades."))
+                continue
+            x["linhas"].append(n)
+            x["quantidade"] += m.quantidade
+            x["total"] += total
+            continue
+        itens[chave] = {"linhas": [n], "nome": nome, "unidade": unidade, "quantidade": m.quantidade, "total": total,
+                        "saldo": 0, "curva": None}
+    lista = list(itens.values())
+    _curva_abc(lista)
+    linhas: list[LinhaOrcamento] = []
+    for x in lista:
+        atual = existentes.get(_nome_chave(x["nome"]))
+        if atual and atual["unidade"].strip().casefold() != x["unidade"].casefold():
+            erros.append(ErroLinha(linha=x["linhas"][0], campo="unidade",
+                                   mensagem=f"'{atual['nome']}' já está cadastrado em {atual['unidade']} nesta obra."))
+            continue
+        unit = _arredonda(Decimal(x["total"]) * 1000 / x["quantidade"])
+        linhas.append(LinhaOrcamento(
+            linhas=x["linhas"], nome=x["nome"], unidade=x["unidade"], quantidade=x["quantidade"], valor_unitario=unit,
+            total=_arredonda(Decimal(x["quantidade"]) * unit / 1000), curva=x["curva"], saldo=0,
+            situacao="atualiza" if atual else "novo",
+            precisa_antes=atual.get("precisa_ate_o_fim", 0) if atual else None,
+            valor_antes=atual.get("valor_unitario", 0) if atual else None))
+    erros.sort(key=lambda e: e.linha)
+    previa = PreviaOrcamento(
+        aplicado=False, linhas=linhas, ignoradas=[], erros=erros, total=sum(x.total for x in linhas),
+        novos=sum(x.situacao == "novo" for x in linhas), atualizados=sum(x.situacao == "atualiza" for x in linhas),
+        juntadas=sum(len(x.linhas) - 1 for x in linhas))
+    if not corpo.aplicar or erros:
+        return previa
+    origem = corpo.origem.strip()
+    lotes = [linhas[i:i + LINHAS_POR_TRANSACAO] for i in range(0, len(linhas), LINHAS_POR_TRANSACAO)]
+    registros = []
+    for k, lote in enumerate(lotes, start=1):
+        parte = f" — parte {k} de {len(lotes)}" if len(lotes) > 1 else ""
+        gravar = _gravar_lote(u, obra_id, lote, existentes, parte, titulo=f"os materiais do {origem}",
+                              assunto=f"dos materiais do {origem}")
+        registros.append(await arm.em_transacao(gravar))
+    return previa.model_copy(update={"aplicado": True, "registro_ids": registros})

@@ -14,12 +14,14 @@ from ..esquemas import (
     CronogramaCorpo,
     CronogramaObra,
     DesembolsoObra,
+    EstruturaCorpo,
     EtapaRef,
     InsumoComConta,
     InsumoCorpo,
     InsumoSaida,
     LeituraPlanilha,
     Mapeamento,
+    MateriaisDoProjeto,
     MedicaoCorpo,
     MedicaoSaida,
     MovimentoCorpo,
@@ -104,6 +106,31 @@ async def importar_orcamento(obra_id: str, arquivo: UploadFile = File(...), mape
         return await orcamento.importar(arm, u, obra_id, conteudo, arquivo.filename or "", m, aplicar)
     except ConflitoDeId:
         raise Conflito("Alguém cadastrou um destes insumos agora há pouco; envie a planilha de novo.") from None
+
+
+@r.post("/obras/{obra_id}/orcamento/materiais", response_model=PreviaOrcamento, tags=["orçamento"])
+async def materiais_do_projeto(obra_id: str, corpo: MateriaisDoProjeto, u: UsuarioAtual = Depends(admin),
+                               arm=Depends(_arm)):
+    """Os materiais que o tradutor tirou das pranchas viram a lista de materiais da obra (prévia; `aplicar` grava)."""
+    try:
+        return await orcamento.materiais_do_projeto(arm, u, obra_id, corpo)
+    except ConflitoDeId:
+        raise Conflito("Alguém cadastrou um destes insumos agora há pouco; mande a lista de novo.") from None
+
+
+@r.post("/obras/{obra_id}/orcamento/estrutura", response_model=PreviaVersao, tags=["orçamento"],
+        responses={201: {"model": PreviaVersao}})
+async def estrutura_como_orcamento(obra_id: str, corpo: EstruturaCorpo, response: Response,
+                                   u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    """Os materiais do projeto viram uma versão do orçamento (etapa "Estrutura"): contrato se a obra ainda não tem um,
+    aditivo se já tem. Prévia com `aplicar: false`; `aplicar: true` grava (com chave de idempotência)."""
+    try:
+        previa, criada = await versoes.importar_estrutura(arm, u, obra_id, corpo)
+    except ConflitoDeId:
+        raise Conflito("Já existe uma versão com essa chave; mande a lista de novo.") from None
+    if criada:
+        response.status_code = status.HTTP_201_CREATED
+    return previa
 
 
 @r.get("/obras/{obra_id}/orcamento", response_model=OrcamentoObra, tags=["orçamento"])

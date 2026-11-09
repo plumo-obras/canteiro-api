@@ -370,3 +370,108 @@ async def test_reabrir_recusa_se_a_obra_ja_mudou(vila, arm):
     await arm.atualizar("obras", vila.tenant_id, o["id"], {"status": "concluida"})
     d = await vila.http.post(f"/registro/{r['registro_id']}/desfazer", headers=vila.h)
     assert d.status_code == 409
+
+
+# --- materiais do projeto (a lista que o tradutor tira das pranchas) ---
+
+MATERIAIS = {"origem": "projeto estrutural", "itens": [
+    {"nome": "ACO CA-50, 10,0 MM, VERGALHAO", "unidade": "KG", "quantidade": qtd(220.3), "valor_unitario": 669},
+    {"nome": "CONCRETO USINADO BOMBEAVEL C30", "unidade": "m3", "quantidade": qtd(21.65), "valor_unitario": 51263},
+    {"nome": "Bloco EPS B8/30/125", "unidade": "un", "quantidade": qtd(382)},
+]}
+
+
+async def test_materiais_do_projeto_previa_grava_e_desfaz(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/materiais"
+    p = (await vila.http.post(url, headers=vila.h, json=MATERIAIS)).json()
+    assert p["aplicado"] is False and (p["novos"], p["atualizados"]) == (3, 0)
+    concreto = next(x for x in p["linhas"] if x["nome"].startswith("CONCRETO"))
+    assert concreto["unidade"] == "m³" and concreto["total"] == round(21.65 * 51263)  # m3 do tradutor vira m³
+    assert concreto["curva"] == "A"  # o maior valor da lista
+    assert (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json() == []  # prévia não grava
+
+    r = await vila.http.post(url, headers=vila.h, json={**MATERIAIS, "aplicar": True})
+    assert r.status_code == 200 and r.json()["aplicado"] is True, r.text
+    (reg,) = r.json()["registro_ids"]
+    entrada = await registro(vila, reg)
+    assert entrada["texto"] == "Importou os materiais do projeto estrutural: 3 novos, 0 atualizados (R$ 12.572,25)"
+    itens = {x["insumo"]["nome"]: x for x in (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json()}
+    aco = itens["ACO CA-50, 10,0 MM, VERGALHAO"]
+    # o projeto vira o "precisa": a conta do que falta comprar é a de sempre (nada em estoque, nada a caminho)
+    assert aco["insumo"]["precisa_ate_o_fim"] == qtd(220.3) and aco["conta"]["falta"] == qtd(220.3)
+
+    # mandar de novo atualiza (prévia mostra o antes), não duplica
+    p2 = (await vila.http.post(url, headers=vila.h, json=MATERIAIS)).json()
+    assert (p2["novos"], p2["atualizados"]) == (0, 3)
+
+    desfeito = await vila.http.post(f"/registro/{reg}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    assert desfeito.json()["texto"] == "Desfeito: importação dos materiais do projeto estrutural"
+    assert (await vila.http.get(f"/obras/{o['id']}/insumos", headers=vila.h)).json() == []
+
+
+async def test_materiais_do_projeto_recusa_unidade_diferente_e_corpo_invalido(vila):
+    url = f"/obras/{vila.obra}/orcamento/materiais"
+    # a Casa Vila Nova já tem o cimento em sc: em kg é erro, e com erro nada é gravado
+    corpo = {"origem": "projeto estrutural", "aplicar": True,
+             "itens": [{"nome": "Cimento CP-II 50 kg", "unidade": "kg", "quantidade": qtd(10)}]}
+    p = (await vila.http.post(url, headers=vila.h, json=corpo)).json()
+    assert p["aplicado"] is False and "já está cadastrado em" in p["erros"][0]["mensagem"]
+    vazio = await vila.http.post(url, headers=vila.h, json={"origem": "projeto estrutural", "itens": []})
+    assert vazio.status_code == 422
+    zero = {"origem": "x", "itens": [{"nome": "Areia", "unidade": "m³", "quantidade": 0}]}
+    assert (await vila.http.post(url, headers=vila.h, json=zero)).status_code == 422
+
+
+# --- materiais do projeto como versão de orçamento (etapa "Estrutura") ---
+
+async def aplicar_estrutura(vila, obra_id, corpo):
+    return await vila.http.post(f"/obras/{obra_id}/orcamento/estrutura", headers=vila.h,
+                                json={**corpo, "aplicar": True, "chave_idempotencia": uuid.uuid4().hex})
+
+
+ESTRUTURA = {"etapa": "Estrutura", "itens": [
+    {"nome": "Aço CA-50 Ø 10,0 mm (SINAPI 34)", "unidade": "kg", "quantidade": qtd(220.3), "valor_unitario": 669},
+    {"nome": "Concreto usinado C30 (SINAPI 34494)", "unidade": "m³", "quantidade": qtd(21.65), "valor_unitario": 51263},
+]}
+
+
+async def test_estrutura_vira_contrato_com_etapa_e_desfaz(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/estrutura"
+    # prévia
+    p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
+    assert p["tipo"] == "contrato" and p["n_itens"] == 2 and p["n_etapas"] == 1
+    assert p["etapas"][0]["descricao"] == "Estrutura"
+    # 220,3 × 6,69 + 21,65 × 512,63 = 1.473,81 + 11.098,44
+    assert p["total"] == round(220.3 * 669) + round(21.65 * 51263)
+
+    r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    assert r.status_code == 201, r.text
+    orc = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert orc["totais"]["contratado"] == p["total"]
+    v = next(x for x in orc["versoes"] if x["tipo"] == "contrato")
+    assert v["ativa"] and v["descricao"] == "Estrutura"
+    reg = await registro(vila, v["registro_id"])
+    assert "contrato" in reg["texto"].lower()
+
+    desfeito = await vila.http.post(f"/registro/{v['registro_id']}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    # desfazer desativa a versão (fica no histórico): não sobra contrato ativo
+    orc2 = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert not any(v["ativa"] for v in orc2["versoes"]) and orc2["totais"]["atual"] == 0
+
+
+async def test_estrutura_vira_aditivo_quando_ja_ha_contrato(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/estrutura"
+    # primeiro contrato
+    await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    # de novo: já há contrato → aditivo
+    p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
+    assert p["tipo"] == "aditivo"
+    r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    assert r.status_code == 201, r.text
+    orc = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert sum(1 for v in orc["versoes"] if v["ativa"]) == 2  # contrato + aditivo
