@@ -233,6 +233,7 @@ class Pedido(Documento):
     # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.soma_nos_gastos_avulsos`).
     pago: Centavos = 0
     recebido_em: str | None = None         # "AAAA-MM-DD", dia da última entrega (None = nada chegou)
+    assinatura: str = ""                   # hash do corpo: a mesma chave com outro conteúdo é conflito
 
     @model_validator(mode="before")
     @classmethod

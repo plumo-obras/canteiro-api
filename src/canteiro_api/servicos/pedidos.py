@@ -5,6 +5,8 @@ almoxarifado das linhas de material na mesma transação e deixa o resto "a cami
 encerrar o pedido. Só a última entrega pode ser desfeita: desfazer uma do meio deixaria as seguintes contando em cima de
 uma quantidade que não existe mais.
 """
+import hashlib
+
 from canteiro_dominio.modelos import LinhaPedido, Pedido, Recebimento, StatusPedido, TipoInsumo, TipoMovimento, agora
 from canteiro_dominio.regras import (
     PODE_RECEBER,
@@ -37,6 +39,15 @@ def id_contador(tenant_id: str) -> str:
     return f"contador-pedidos-{tenant_id}"
 
 
+def id_pedido(tenant_id: str, obra_id: str, chave: str) -> str:
+    return id_derivado(tenant_id, "pedido", obra_id, chave)
+
+
+def assinatura_do_pedido(corpo: PedidoDados) -> str:
+    """O status de hoje não serve para comparar: o pedido anda depois de criado, e a repetição ainda é a mesma."""
+    return hashlib.sha256(corpo.model_dump_json(exclude={"chave_idempotencia"}).encode()).hexdigest()
+
+
 def id_recebimento(tenant_id: str, pedido_id: str, chave: str) -> str:
     return id_derivado(tenant_id, "recebimento", pedido_id, chave)
 
@@ -51,7 +62,8 @@ def _lista(nomes: list[str]) -> str:
 
 
 async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: PedidoDados,
-                                status: StatusPedido = StatusPedido.EM_COTACAO) -> Operacao:
+                                status: StatusPedido = StatusPedido.EM_COTACAO, *, id_: str | None = None,
+                                assinatura: str = "") -> Operacao:
     """`status` = aprovado quando a compra já foi decidida (proposta aprovada, ou a pessoa marcou na tela): pedir uma
     segunda aprovação do mesmo pedido seria burocracia sem informação nova. A etapa de cada linha é conferida contra o
     orçamento antes da transação (é consulta, e a transação só lê por ID)."""
@@ -70,7 +82,8 @@ async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: Pedido
     n = (contador["ultimo"] if contador else 0) + 1
     p = Pedido(tenant_id=u.tenant_id, numero=f"PED-{n:04d}", obra_id=obra_id, fornecedor=corpo.fornecedor.strip(),
                fornecedor_id=corpo.fornecedor_id, linhas=linhas, valor=sum(x.total for x in linhas),
-               previsao=corpo.previsao, observacao=corpo.observacao.strip(), status=status)
+               previsao=corpo.previsao, observacao=corpo.observacao.strip(), status=status, assinatura=assinatura,
+               **({"id": id_} if id_ else {}))
 
     def aplicar() -> dict:
         tx.salvar("contadores", {"id": id_contador(u.tenant_id), "tenant_id": u.tenant_id, "ultimo": n})

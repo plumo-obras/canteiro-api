@@ -354,6 +354,8 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
   desfazer `cancelar_pedido` só enquanto o pedido estiver no status de nascimento.
 - `PATCH /pedidos/{pedido_id}` (admin) `{previsao?, observacao?}` → `Pedido + registro_id`. Registro "PED-0168:
   previsão 2026-11-10 → 2026-11-24", desfazer `editar_pedido` (409 se editado de novo depois).
+- `POST /obras/{obra_id}/pedidos` aceita `chave_idempotencia?` (8 a 64): a mesma chave devolve o pedido já criado (200,
+  mesmo `id` e `registro_id`, no estado de agora); com outro conteúdo → 409.
 - `POST /pedidos/{pedido_id}/recebimentos` (admin) `{nf_numero?, nf_data?, nf_valor?, linhas: [{indice, quantidade}],
   chave_idempotencia}` → `{recebimento, pedido, registro_id}` (201; a mesma chave devolve a mesma entrega com 200, e
   com outras quantidades → 409). Vale de `aprovado` a `parcial`. Linha de material dá ENTRADA no almoxarifado na

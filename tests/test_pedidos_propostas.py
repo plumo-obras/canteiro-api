@@ -1,5 +1,6 @@
 """Pedidos (número por tenant, transições, conferido dá entrada) e propostas (só aprovação executa; desfazer)."""
 import asyncio
+import uuid
 
 from conftest import nova_vila
 
@@ -491,3 +492,65 @@ async def test_proposta_de_conferir_com_quantidade_recebida(vila):
     # e a proposta de compra não aceita `aprovado` (aprovar a proposta já é a aprovação)
     com_aprovado = proposta(vila, dados={**pedido_corpo(vila), "aprovado": True})
     assert (await vila.http.post("/propostas", headers=vila.h, json=com_aprovado)).status_code == 422
+
+
+# --- criar pedido com chave de idempotência (a resposta se perde e a tela reenvia) ---
+
+def _corpo_com_chave(vila, chave, quantidade=10_000):
+    return {"fornecedor": "Depósito", "aprovado": True, "chave_idempotencia": chave,
+            "linhas": [{"insumo_id": vila.insumo["cimento"], "quantidade": quantidade, "valor_unitario": 3790}]}
+
+
+async def test_repetir_a_chave_devolve_o_mesmo_pedido(vila):
+    url, chave = f"/obras/{vila.obra}/pedidos", uuid.uuid4().hex
+    antes = len((await vila.http.get(url, headers=vila.h)).json())
+    a = await vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave))
+    assert a.status_code == 201, a.text
+    b = await vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave))
+    assert b.status_code == 200, b.text
+    assert (a.json()["id"], a.json()["numero"], a.json()["registro_id"]) == (
+        b.json()["id"], b.json()["numero"], b.json()["registro_id"])
+    assert len((await vila.http.get(url, headers=vila.h)).json()) == antes + 1
+    # o pedido andou (desfazer cancela) e a repetição ainda é a mesma
+    assert (await vila.http.post(f"/registro/{a.json()['registro_id']}/desfazer", headers=vila.h)).status_code == 200
+    c = await vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave))
+    assert (c.status_code, c.json()["status"]) == (200, "cancelado")
+
+
+async def test_mesma_chave_com_outro_conteudo_e_409(vila):
+    url, chave = f"/obras/{vila.obra}/pedidos", uuid.uuid4().hex
+    assert (await vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave))).status_code == 201
+    r = await vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave, quantidade=20_000))
+    assert r.status_code == 409 and "chave" in r.json()["detail"]
+
+
+async def test_dois_envios_ao_mesmo_tempo_criam_um_pedido(vila):
+    url, chave = f"/obras/{vila.obra}/pedidos", uuid.uuid4().hex
+    antes = len((await vila.http.get(url, headers=vila.h)).json())
+    rs = await asyncio.gather(*(vila.http.post(url, headers=vila.h, json=_corpo_com_chave(vila, chave))
+                                for _ in range(2)))
+    assert sorted(r.status_code for r in rs) == [200, 201], [r.text for r in rs]
+    assert len({r.json()["id"] for r in rs}) == 1
+    assert len((await vila.http.get(url, headers=vila.h)).json()) == antes + 1
+
+
+async def test_sem_chave_continua_criando_e_chave_invalida_e_422(vila):
+    url = f"/obras/{vila.obra}/pedidos"
+    corpo = _corpo_com_chave(vila, "x")
+    assert (await vila.http.post(url, headers=vila.h, json=corpo)).status_code == 422
+    del corpo["chave_idempotencia"]
+    a = await vila.http.post(url, headers=vila.h, json=corpo)
+    b = await vila.http.post(url, headers=vila.h, json=corpo)
+    assert (a.status_code, b.status_code) == (201, 201) and a.json()["id"] != b.json()["id"]
+
+
+async def test_a_mesma_chave_em_outro_tenant_e_outro_pedido(vila, http, arm, config):
+    chave = uuid.uuid4().hex
+    a = await vila.http.post(f"/obras/{vila.obra}/pedidos", headers=vila.h, json=_corpo_com_chave(vila, chave))
+    intruso = await nova_vila(http, arm, config)
+    b = await intruso.http.post(f"/obras/{intruso.obra}/pedidos", headers=intruso.h,
+                                json=_corpo_com_chave(intruso, chave))
+    assert (a.status_code, b.status_code) == (201, 201) and a.json()["id"] != b.json()["id"]
+    outra_obra = await intruso.http.post(f"/obras/{vila.obra}/pedidos", headers=intruso.h,
+                                         json=_corpo_com_chave(intruso, chave))
+    assert outra_obra.status_code == 404

@@ -165,6 +165,8 @@ class PedidoDados(Entrada):
 
 class PedidoCorpo(PedidoDados):
     aprovado: bool = Field(False, description="true: nasce aprovado (compra já decidida); false: em cotação")
+    chave_idempotencia: str | None = Field(None, min_length=8, max_length=64,
+                                           description="a mesma chave devolve o pedido já criado, sem duplicar")
 
 
 class PedidoEdicao(Entrada):
