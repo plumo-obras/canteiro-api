@@ -147,8 +147,11 @@ def chave_do_nome(nome: str) -> str:
 
 
 def preco_medio(total: int, quantidade: int) -> int:
-    """Unitário em centavos que dá `total` em `quantidade` milésimos, arredondado ao centavo."""
-    return (total * 1000 + quantidade // 2) // quantidade if quantidade > 0 else 0
+    """Unitário em centavos que dá `total` em `quantidade` milésimos, arredondado ao centavo. Nunca negativo: uma
+    supressão a preço maior que o do contrato pode deixar o total negativo com quantidade positiva, e aí não existe
+    preço médio. Fica 0, que é o "sem preço" de sempre: a pessoa informa no pedido, e a planilha, que está certa, não
+    trava a aprovação."""
+    return max(0, (total * 1000 + quantidade // 2) // quantidade) if quantidade > 0 else 0
 
 
 def itens_para_compras(itens: Iterable[dict]) -> list[ItemParaCompras]:

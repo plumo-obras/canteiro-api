@@ -75,3 +75,9 @@ def test_servico_medido_nao_falta_e_nao_vira_saldo():
     assert (c.falta, c.saldo, c.medido) == (5_000, 0, 3_000)
     assert "− medido 3 m²" in texto_da_conta(c, "m²")
     assert "medido" not in texto_da_conta(conta_de_falta(precisa=10_000, saldo=0), "m²")
+
+
+def test_supressao_a_preco_maior_nao_da_preco_negativo():
+    [x] = itens_para_compras([item("Aço", 10_000, 100_000), item("Aço", -5_000, -150_000)])
+    assert (x.quantidade, x.total, x.valor_unitario) == (5_000, -50_000, 0)
+    assert preco_medio(-50_000, 5_000) == 0
