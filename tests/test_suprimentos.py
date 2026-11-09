@@ -1,5 +1,7 @@
 """Suprimentos: fornecedores, pedido com várias linhas e etapa, entregas parciais com NF, serviço sem estoque."""
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from test_obras_orcamento import nova_obra
 from test_orcamento_versoes import CONTRATO, mapa, versao
@@ -262,3 +264,20 @@ async def test_linhas_do_pedido_trazem_o_que_falta_entregar(vila):
     lista = {p["id"]: p for p in (await vila.http.get(f"/obras/{obra}/pedidos", headers=vila.h)).json()}
     assert lista[aberto["id"]]["linhas"][0]["falta_entregar"] == qtd(7)
     assert lista[encerrado["id"]]["linhas"][0]["falta_entregar"] == 0      # o resto não vem: nada a cobrar
+
+
+async def test_recebido_em_acompanha_a_entrega_e_o_desfazer(vila):
+    corpo = {"fornecedor": "Depósito", "aprovado": True,
+             "linhas": [{"insumo_id": vila.insumo["cimento"], "quantidade": 10_000, "valor_unitario": 3790}]}
+    p = await vila.http.post(f"/obras/{vila.obra}/pedidos", headers=vila.h, json=corpo)
+    assert p.status_code == 201, p.text
+    assert p.json()["recebido_em"] is None
+    pid = p.json()["id"]
+    entrega = {"linhas": [{"indice": 0, "quantidade": 10_000}], "chave_idempotencia": uuid.uuid4().hex}
+    r = await vila.http.post(f"/pedidos/{pid}/recebimentos", headers=vila.h, json=entrega)
+    assert r.status_code == 201, r.text
+    hoje_sp = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
+    assert (r.json()["pedido"]["recebido_em"], r.json()["pedido"]["status"]) == (hoje_sp, "conferido")
+    d = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+    assert (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()[0]["recebido_em"] is None

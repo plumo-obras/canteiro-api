@@ -5,7 +5,7 @@ almoxarifado das linhas de material na mesma transação e deixa o resto "a cami
 encerrar o pedido. Só a última entrega pode ser desfeita: desfazer uma do meio deixaria as seguintes contando em cima de
 uma quantidade que não existe mais.
 """
-from canteiro_dominio.modelos import LinhaPedido, Pedido, Recebimento, StatusPedido, TipoInsumo, TipoMovimento
+from canteiro_dominio.modelos import LinhaPedido, Pedido, Recebimento, StatusPedido, TipoInsumo, TipoMovimento, agora
 from canteiro_dominio.regras import (
     PODE_RECEBER,
     RegraViolada,
@@ -28,7 +28,7 @@ from ..nucleo import (
     receita_inversa,
     verbo_desfazer,
 )
-from .estoque import id_derivado, linhas_de, preparar_estorno, preparar_movimento
+from .estoque import dia_local, id_derivado, linhas_de, preparar_estorno, preparar_movimento
 
 
 def id_contador(tenant_id: str) -> str:
@@ -144,7 +144,7 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
 
     def aplicar() -> dict:
         rec.movimentos = [m.aplicar()["id"] for m in movimentos]
-        campos = {"linhas": linhas, "status": para.value, "recebimentos": numero}
+        campos = {"linhas": linhas, "status": para.value, "recebimentos": numero, "recebido_em": dia_local(agora())}
         tx.atualizar("pedidos", u.tenant_id, pedido_id, campos)
         tx.criar("recebimentos", doc(rec))
         evento(tx, u.tenant_id, "pedido.recebimento", p["obra_id"],
@@ -168,7 +168,8 @@ async def preparar_receber(tx, u: UsuarioAtual, pedido_id: str, entregas: list[t
 
     return Operacao(obra_id=p["obra_id"], aplicar=aplicar, texto=texto,
                     desfazer=lambda d: {"op": "desfazer_recebimento", "recebimento_id": rec.id,
-                                        "status_antes": de.value, "status_depois": para.value})
+                                        "status_antes": de.value, "status_depois": para.value,
+                                        "recebido_em_antes": p.get("recebido_em")})
 
 
 async def preparar_desfazer_recebimento(tx, u: UsuarioAtual, receita: dict) -> Operacao:
@@ -189,7 +190,8 @@ async def preparar_desfazer_recebimento(tx, u: UsuarioAtual, receita: dict) -> O
     def aplicar() -> dict:
         for e in estornos:
             e.aplicar()
-        campos = {"linhas": linhas, "status": voltou, "recebimentos": rec["numero"] - 1}
+        campos = {"linhas": linhas, "status": voltou, "recebimentos": rec["numero"] - 1,
+                  "recebido_em": receita.get("recebido_em_antes")}
         tx.atualizar("pedidos", u.tenant_id, p["id"], campos)
         tx.atualizar("recebimentos", u.tenant_id, rec["id"], {"desfeito": True})
         evento(tx, u.tenant_id, "pedido.status", p["obra_id"],
