@@ -886,6 +886,47 @@ class ResumoDaObra(BaseModel):
     almoxarifado: ResumoAlmoxarifado
     pendencias: ResumoPendencias
 
+# --- hoje na obra: a casa da obra, sem IA ---
+
+class AcaoHoje(BaseModel):
+    tela: Literal["projeto", "orcamento", "suprimentos", "cronograma", "gastos", "aprovacoes", "historico"]
+    rotulo: str
+    filtro: dict[str, str] | None = Field(None, description="`etapa` em falta_comprar; `status` nos gastos")
+
+
+class PontoHoje(BaseModel):
+    tipo: str
+    prioridade: Literal["pede_voce", "atencao", "a_caminho", "ok"]
+    titulo: str
+    detalhe: str = Field(description="a conta e a fonte, em frase pronta")
+    acao: AcaoHoje
+
+
+class EventoHoje(BaseModel):
+    data: str = Field(description="AAAA-MM-DD")
+    tipo: Literal["entrega", "inicio_etapa"]
+    titulo: str
+    detalhe: str
+    acao: AcaoHoje
+
+
+class ResumoHoje(BaseModel):
+    situacao: Literal["no_prazo", "atrasada", "sem_medicao"]
+    frase: str
+    esperando: int = Field(description="propostas pendentes + pontos pede_voce, mesmo os cortados pelo limite")
+    semana_atual: int | None = Field(None, description="null sem cronograma ou antes do início; passa do total se "
+                                                       "a obra atrasar")
+    semanas_total: int | None = None
+
+
+class HojeNaObra(BaseModel):
+    hoje: str = Field(description="AAAA-MM-DD, fuso de São Paulo")
+    resumo: ResumoHoje
+    pontos: list[PontoHoje] = Field(description="no máximo 6, já na ordem de prioridade")
+    mais: int = Field(0, description="pontos que ficaram de fora do limite")
+    semana: list[EventoHoje] = Field(description="de hoje até hoje + 7, por data")
+
+
 # --- sessões de conversa ---
 
 _ID = r"^[A-Za-z0-9_-]{8,64}$"

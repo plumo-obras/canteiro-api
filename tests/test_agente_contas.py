@@ -240,9 +240,9 @@ def _cronograma_emei():
 def test_resumo_lista_o_mes_seguinte_inteiro_e_nao_reinicia_etapa_ja_medida():
     from datetime import date
 
-    from canteiro_api.servicos.resumo import _resumo_cronograma
+    from canteiro_api.servicos.resumo import resumo_cronograma
 
-    r = _resumo_cronograma(_cronograma_emei(), date(2026, 11, 5))
+    r = resumo_cronograma(_cronograma_emei(), date(2026, 11, 5))
     # dezembro inteiro, maior valor primeiro: o movimento de terra (2ª frente) entra, e cada uma diz se começa
     assert r.proximo_mes == "2026-12" and r.previsto_no_proximo_mes == 16270792
     assert [(e.etapa, e.valor_no_mes, e.comeca) for e in r.etapas_do_proximo_mes] == [
@@ -253,10 +253,10 @@ def test_resumo_lista_o_mes_seguinte_inteiro_e_nao_reinicia_etapa_ja_medida():
     assert [e.etapa for e in r.proximas_etapas] == ["4", "21"]
     assert [e.etapa for e in r.etapas_do_mes] == ["1", "23", "2"]          # novembro, maior valor primeiro
     # depois de dezembro, a próxima a começar é a que não tem medição nenhuma
-    jan = _resumo_cronograma(_cronograma_emei(), date(2026, 12, 10))
+    jan = resumo_cronograma(_cronograma_emei(), date(2026, 12, 10))
     assert (jan.proximo_mes_com_inicio, [e.etapa for e in jan.proximas_etapas]) == ("2027-02", ["9"])
     # último mês do cronograma: não há mês seguinte
-    fim = _resumo_cronograma(_cronograma_emei(), date(2027, 8, 1))
+    fim = resumo_cronograma(_cronograma_emei(), date(2027, 8, 1))
     assert (fim.proximo_mes, fim.etapas_do_proximo_mes) == (None, [])
 
 
