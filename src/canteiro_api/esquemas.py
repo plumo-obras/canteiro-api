@@ -734,6 +734,8 @@ class ResumoObra(BaseModel):
     nf_para_conferir: int = Field(description="pedidos recebidos esperando conferência")
     ultima_atividade: datetime | None = Field(None, description="última entrada do registro da obra")
     prazo: Prazo | None = Field(None, description="o mesmo do GET /obras/{id}/cronograma; null sem cronograma")
+    tem_orcamento: bool = Field(False, description="contrato vigente, ou algum insumo com previsão (o que permite "
+                                                   "aprovar a obra)")
 
 
 
