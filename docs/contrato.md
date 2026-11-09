@@ -199,6 +199,15 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
     sai do peso no valor; lotes de 100 com `desfazer` (`"Desfeito: importação dos materiais do {origem}"`). O que falta
     comprar é a `Conta` de sempre (precisa − saldo − a caminho).
 
+### Materiais do projeto como orçamento (etapa "Estrutura")
+
+- `POST /obras/{obra_id}/orcamento/estrutura` (JSON `{etapa?, itens: [{nome, unidade, quantidade, valor_unitario}],
+  aplicar, chave_idempotencia?}`, admin) → `PreviaVersao`. Os materiais do projeto viram uma **versão do orçamento**
+  (uma etapa, "Estrutura" por padrão), em vez da lista de materiais: vira **contrato** se a obra ainda não tem um,
+  **aditivo** se já tem. Reaproveita a importação de versão (prévia, gravação em versão, Desfazer). `quantidade` em
+  milésimos, `valor_unitario` em centavos; 201 quando grava. É alternativa ao `…/orcamento/materiais` (lista de
+  materiais em Compras): aqui o projeto entra como orçamento por etapa.
+
 ### Orçamento da obra (EAP, em versões)
 
 O orçamento é etapa → item, como a planilha da construtora: cada linha vira um item, com o número, o código e a fonte

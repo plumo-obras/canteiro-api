@@ -524,6 +524,15 @@ class MateriaisDoProjeto(BaseModel):
     aplicar: bool = False
 
 
+class EstruturaCorpo(Entrada):
+    """Os materiais do projeto lançados como uma versão do orçamento (uma etapa \"Estrutura\"), em vez da lista de
+    materiais. Reaproveita a importação de versão: vira contrato se a obra ainda não tem um, ou aditivo se já tem."""
+    etapa: str = Field("Estrutura", min_length=1, max_length=60, description="nome da etapa no orçamento")
+    itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
+    aplicar: bool = False
+    chave_idempotencia: str | None = Field(None, max_length=64)
+
+
 class ItemPrevia(BaseModel):
     ordem: int
     tipo: Literal["etapa", "item"]

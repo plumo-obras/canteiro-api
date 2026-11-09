@@ -347,6 +347,42 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     return previa.model_copy(update={"aplicado": True, "versao_id": id_, "registro_id": entrada["id"]}), True
 
 
+def _num_br(centesimos: int, divisor: int, casas: int) -> str:
+    """Inteiro (milésimos/centavos) -> número brasileiro sem separador de milhar ("220,3", "6,69")."""
+    s = f"{centesimos / divisor:.{casas}f}"
+    return s.rstrip("0").rstrip(".").replace(".", ",") if "." in s else s
+
+
+def _csv_estrutura(etapa: str, itens: list) -> bytes:
+    """A planilha (CSV ;) de uma etapa com os materiais como itens — o mesmo formato que a importação de versão lê."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["Item", "Código", "Fonte", "Descrição", "Unidade", "Quantidade", "Unitário", "Total"])
+    w.writerow(["1", "", "", etapa.strip(), "", "", "", ""])
+    for n, it in enumerate(itens, start=1):
+        total = round(it.quantidade * it.valor_unitario / 1000)
+        w.writerow(["1." + str(n), "", "", it.nome.strip(), it.unidade.strip(),
+                    _num_br(it.quantidade, 1000, 3), _num_br(it.valor_unitario, 100, 2), _num_br(total, 100, 2)])
+    return buf.getvalue().encode("utf-8")
+
+
+async def importar_estrutura(arm, u: UsuarioAtual, obra_id: str, corpo) -> tuple[PreviaVersao, bool]:
+    """Lança os materiais do projeto como uma versão do orçamento (etapa \"Estrutura\"). Contrato se a obra ainda não
+    tem um; aditivo se já tem. Reaproveita a importação de versão (prévia, gravação, desfazer)."""
+    versoes = await versoes_da_obra(arm, u.tenant_id, obra_id)
+    tem_contrato = any(v["ativa"] and v["tipo"] == TipoVersao.CONTRATO for v in versoes)
+    tipo = TipoVersao.ADITIVO if tem_contrato else TipoVersao.CONTRATO
+    conteudo = _csv_estrutura(corpo.etapa, corpo.itens)
+    m = Mapeamento(planilha="CSV", linha_cabecalho=1, item=0, codigo=1, fonte=2, nome=3, unidade=4, quantidade=5,
+                   valor_unitario=6, valor_total=7)
+    return await importar(arm, u, obra_id, conteudo, f"{corpo.etapa} (projeto).csv", m, tipo,
+                          descricao=corpo.etapa.strip(), data=None, aplicar=corpo.aplicar,
+                          chave=corpo.chave_idempotencia)
+
+
 async def _previa_gravada(arm, u: UsuarioAtual, v: dict) -> PreviaVersao:
     """A repetição da chave devolve o que foi gravado, sem ler o arquivo de novo."""
     itens = await arm.consultar(Consulta("itens_orcamento", u.tenant_id, [Filtro("versao_id", "==", v["id"])]))

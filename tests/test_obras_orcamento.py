@@ -422,3 +422,56 @@ async def test_materiais_do_projeto_recusa_unidade_diferente_e_corpo_invalido(vi
     assert vazio.status_code == 422
     zero = {"origem": "x", "itens": [{"nome": "Areia", "unidade": "m³", "quantidade": 0}]}
     assert (await vila.http.post(url, headers=vila.h, json=zero)).status_code == 422
+
+
+# --- materiais do projeto como versão de orçamento (etapa "Estrutura") ---
+
+async def aplicar_estrutura(vila, obra_id, corpo):
+    return await vila.http.post(f"/obras/{obra_id}/orcamento/estrutura", headers=vila.h,
+                                json={**corpo, "aplicar": True, "chave_idempotencia": uuid.uuid4().hex})
+
+
+ESTRUTURA = {"etapa": "Estrutura", "itens": [
+    {"nome": "Aço CA-50 Ø 10,0 mm (SINAPI 34)", "unidade": "kg", "quantidade": qtd(220.3), "valor_unitario": 669},
+    {"nome": "Concreto usinado C30 (SINAPI 34494)", "unidade": "m³", "quantidade": qtd(21.65), "valor_unitario": 51263},
+]}
+
+
+async def test_estrutura_vira_contrato_com_etapa_e_desfaz(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/estrutura"
+    # prévia
+    p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
+    assert p["tipo"] == "contrato" and p["n_itens"] == 2 and p["n_etapas"] == 1
+    assert p["etapas"][0]["descricao"] == "Estrutura"
+    # 220,3 × 6,69 + 21,65 × 512,63 = 1.473,81 + 11.098,44
+    assert p["total"] == round(220.3 * 669) + round(21.65 * 51263)
+
+    r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    assert r.status_code == 201, r.text
+    orc = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert orc["totais"]["contratado"] == p["total"]
+    v = next(x for x in orc["versoes"] if x["tipo"] == "contrato")
+    assert v["ativa"] and v["descricao"] == "Estrutura"
+    reg = await registro(vila, v["registro_id"])
+    assert "contrato" in reg["texto"].lower()
+
+    desfeito = await vila.http.post(f"/registro/{v['registro_id']}/desfazer", headers=vila.h)
+    assert desfeito.status_code == 200, desfeito.text
+    # desfazer desativa a versão (fica no histórico): não sobra contrato ativo
+    orc2 = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert not any(v["ativa"] for v in orc2["versoes"]) and orc2["totais"]["atual"] == 0
+
+
+async def test_estrutura_vira_aditivo_quando_ja_ha_contrato(vila):
+    o = await nova_obra(vila)
+    url = f"/obras/{o['id']}/orcamento/estrutura"
+    # primeiro contrato
+    await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    # de novo: já há contrato → aditivo
+    p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
+    assert p["tipo"] == "aditivo"
+    r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    assert r.status_code == 201, r.text
+    orc = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert sum(1 for v in orc["versoes"] if v["ativa"]) == 2  # contrato + aditivo
