@@ -165,8 +165,9 @@ def _entregas_atrasadas(d: Dados) -> PontoHoje | None:
 def _faltas_por_etapa(d: Dados) -> dict[str, list[dict]]:
     faltas: dict[str, list[dict]] = {}
     for x in d.insumos:
-        # serviço não se compra, se contrata e mede: a mesma régua do "falta comprar" do resumo da obra
-        if x["conta"]["comprar"] > 0 and x["insumo"].get("etapa") and x["insumo"].get("tipo", "material") == "material":
+        # de qualquer tipo, como a tela de Compras: item de planilha é serviço, e só material deixaria a obra de
+        # planilha sem o aviso. O serviço já medido sai pelo `Conta.medido`.
+        if x["conta"]["comprar"] > 0 and x["insumo"].get("etapa"):
             faltas.setdefault(x["insumo"]["etapa"], []).append(x)
     return faltas
 

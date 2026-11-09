@@ -43,12 +43,6 @@ async def _insumos(vila, obra):
     return {x["insumo"]["nome"]: x["insumo"] for x in r.json()}
 
 
-async def _como_material(vila, arm, obra):
-    """A planilha vira serviço, e "falta comprar" é só material."""
-    for i in (await _insumos(vila, obra)).values():
-        await arm.atualizar("insumos", vila.tenant_id, i["id"], {"tipo": "material"})
-
-
 async def _pedido(vila, obra, insumo, previsao, etapa, fornecedor="Ferragem Sul", unitario=100):
     r = await vila.http.post(f"/obras/{obra}/pedidos", headers=vila.h, json={
         "fornecedor": fornecedor, "aprovado": True, "previsao": previsao,
@@ -137,24 +131,48 @@ async def test_entrega_fora_da_semana_nao_aparece(vila):
     assert _ponto(h, "entregas_semana") is None and h["semana"] == []
 
 
-async def test_servico_nao_entra_em_falta_comprar(vila):
-    obra = await _obra_aprovada(vila)
-    assert all(i["tipo"] == "servico" for i in (await _insumos(vila, obra)).values())
-    assert _ponto(await _hoje(vila, obra), "falta_comprar") is None
+async def _compras_da_etapa(vila, obra, etapa):
+    r = await vila.http.get(f"/obras/{obra}/insumos", headers=vila.h)
+    return sorted(x["insumo"]["nome"] for x in r.json()
+                  if x["insumo"].get("etapa") == etapa and x["conta"]["comprar"] > 0)
 
 
-async def test_falta_comprar_sem_cronograma_e_a_primeira_etapa(vila, arm):
+async def test_hoje_mostra_os_mesmos_itens_da_lista_de_compras(vila, arm):
     obra = await _obra_aprovada(vila)
-    await _como_material(vila, arm, obra)
+    ins = await _insumos(vila, obra)
+    placa, sanitario = ins["Placa de obra em chapa galvanizada"], ins["Sanitário em canteiro"]
+    # material e serviço na mesma etapa: os dois faltam nas duas telas
+    assert placa["tipo"] == "servico"
+    await arm.atualizar("insumos", vila.tenant_id, sanitario["id"], {"tipo": "material"})
+    nomes = await _compras_da_etapa(vila, obra, "1")
+    assert nomes == [placa["nome"], sanitario["nome"]]
+    p = _ponto(await _hoje(vila, obra), "falta_comprar")
+    assert p["detalhe"].startswith("2 itens ") and all(n in p["detalhe"] for n in nomes)
+
+    # o serviço todo medido sai das duas
+    linha = {"insumo_id": placa["id"], "quantidade": placa["precisa_ate_o_fim"], "valor_unitario": 1, "etapa": "1"}
+    r = await vila.http.post(f"/obras/{obra}/pedidos", headers=vila.h, json={
+        "fornecedor": "Empreiteira", "aprovado": True, "linhas": [linha]})
+    assert r.status_code == 201, r.text
+    e = await vila.http.post(f"/pedidos/{r.json()['id']}/recebimentos", headers=vila.h, json={
+        "linhas": [{"indice": 0, "quantidade": placa["precisa_ate_o_fim"]}], "chave_idempotencia": uuid.uuid4().hex})
+    assert e.status_code == 201, e.text
+    assert await _compras_da_etapa(vila, obra, "1") == [sanitario["nome"]]
+    p = _ponto(await _hoje(vila, obra), "falta_comprar")
+    assert p["detalhe"].startswith("1 item ") and sanitario["nome"] in p["detalhe"]
+    assert placa["nome"] not in p["detalhe"]
+
+
+async def test_falta_comprar_sem_cronograma_e_a_primeira_etapa(vila):
+    obra = await _obra_aprovada(vila)
     p = _ponto(await _hoje(vila, obra), "falta_comprar")
     assert p["titulo"] == "Falta comprar para SERVIÇOS PRELIMINARES."
     assert p["detalhe"].startswith("2 itens · R$ 3.805,89 pelo orçamento:")
     assert (p["acao"]["tela"], p["acao"]["filtro"]) == ("suprimentos", {"etapa": "1"})
 
 
-async def test_falta_comprar_com_cronograma_olha_o_que_comeca_em_4_semanas(vila, arm):
+async def test_falta_comprar_com_cronograma_olha_o_que_comeca_em_4_semanas(vila):
     obra = await _obra_aprovada(vila, PLANO)
-    await _como_material(vila, arm, obra)
     # Etapa 1 no mês corrente, sem medição; a 2 começa em 01/12, 22 dias depois de hoje
     h = await _hoje(vila, obra)
     assert _ponto(h, "falta_comprar")["titulo"] == "Falta comprar para 2 etapas."
@@ -165,20 +183,18 @@ async def test_falta_comprar_com_cronograma_olha_o_que_comeca_em_4_semanas(vila,
     assert p["titulo"] == "Falta comprar para SERVIÇOS PRELIMINARES." and "Começa em 01/11" in p["detalhe"]
 
 
-async def test_etapa_em_andamento_com_falta_vem_primeiro(vila, arm):
+async def test_etapa_em_andamento_com_falta_vem_primeiro(vila):
     plano = {"inicio": "2026-11", "meses": 3, "etapas": [{"etapa": "2", "percentuais": [0, 10000, 0]},
                                                          {"etapa": "1", "percentuais": [10000, 0, 0]}]}
     obra = await _obra_aprovada(vila, plano)
-    await _como_material(vila, arm, obra)
     r = await _medir(vila, obra, "2026-11", {"1": 2000})
     assert r.status_code == 201, r.text
     p = _ponto(await _hoje(vila, obra), "falta_comprar")
     assert p["acao"]["filtro"] == {"etapa": "1"}
 
 
-async def test_comprado_nao_conta_como_falta(vila, arm):
+async def test_comprado_nao_conta_como_falta(vila):
     obra = await _obra_aprovada(vila)
-    await _como_material(vila, arm, obra)
     ins = await _insumos(vila, obra)
     for nome in ("Placa de obra em chapa galvanizada", "Sanitário em canteiro"):
         i = ins[nome]
@@ -303,7 +319,6 @@ async def test_desfazendo_aprovacao(vila, arm):
 
 async def test_limite_de_seis_na_ordem_de_prioridade(vila, arm):
     obra = await _obra_aprovada(vila, PLANO)
-    await _como_material(vila, arm, obra)
     await _medir(vila, obra, "2026-11", {"1": 1000})
     ins = list((await _insumos(vila, obra)).values())
     await _pedido(vila, obra, ins[0], "2026-11-05", ins[0]["etapa"], unitario=1_000_000)
