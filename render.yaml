@@ -28,8 +28,8 @@ services:
         sync: false
       - key: SEED_ADMIN_EMAIL
         sync: false
-      - key: ARQUIVOS             # fotos dos comprovantes no próprio Mongo: o disco do plano gratuito some a cada deploy
-        value: banco              # supabase = bucket privado (seção 9 do docs/deploy.md), com as três abaixo
+      - key: ARQUIVOS             # bucket privado do Supabase Storage (seção 9 do docs/deploy.md), desde 09/11/2026: os
+        value: supabase           # comprovantes saíram do M0. Sem volta para banco sem copiar de volta (migrar_arquivos)
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_CHAVE_SERVICO
