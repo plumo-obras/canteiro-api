@@ -81,6 +81,9 @@ async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
                            "na_lista_padrao": 0, "sem_etapa_do_orcamento": 0}
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
     assert fin["realizado"] == t["realizado"] and fin["gastos"] == t["gastos"]
+    # placar: gasto + falta gastar fecham no orçado (o saldo não serve: desconta também o comprometido)
+    assert fin["realizado"] + fin["falta_gastar"] == t["atual"]
+    assert fin["realizado_pct"] == t["realizado"] * 10000 // t["atual"]
     assert [x["etapa"] for x in fin["etapas_estouradas"]] == ["2"]
     r = await _resumo(vila, obra)
     assert (r["total"], r["tem_orcamento"], r["etapas"][0]["nome"], r["etapas"][0]["origem"]) == (
