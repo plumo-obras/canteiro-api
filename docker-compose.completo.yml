@@ -1,7 +1,7 @@
 # O produto inteiro em contêineres, com os repositórios clonados lado a lado:
-#   canteiro-api/  canteiro-agente/  canteiro-web/  canteiro-cad/
+#   canteiro-api/  canteiro-agente/  canteiro-web/  canteiro-cad/  canteiro-products/
 # Subir (de dentro de canteiro-api):  docker compose -f docker-compose.yml -f docker-compose.completo.yml up -d --build
-# Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY, TRADUTOR_CHAVE) vêm do
+# Segredos (JWT_SEGREDO, CHAVE_CIFRA, TOKEN_SERVICO_AGENTE, PROXY_SEGREDO, ANTHROPIC_API_KEY, TRADUTOR_CHAVE, PRODUTOS_CHAVE) vêm do
 # .env, nunca daqui.
 # Sem ANTHROPIC_API_KEY o agente sobe no modelo de roteiro (MODELO_ROTEIRO=1, 0 tokens).
 services:
@@ -24,8 +24,21 @@ services:
     environment:
       TRADUTOR_API_KEYS: ${TRADUTOR_CHAVE:-}
       TRADUTOR_WORKERS: ${TRADUTOR_WORKERS:-2}
+      # o insumo do SINAPI de cada material do projeto vem do serviço de produtos (o tradutor não baixa a base)
+      TRADUTOR_PRODUTOS_URL: http://produtos:8000
+      TRADUTOR_PRODUTOS_CHAVE: ${PRODUTOS_CHAVE:-}
     ports: ["8200:8000"]
     volumes: ["tradutor-dados:/dados"]
+
+  # Produtos e preços da construção: as bases oficiais de custos (SINAPI...), importadas do órgão. Busca o mês novo ao
+  # subir e uma vez por dia; a Caixa limita downloads (429), e aí o serviço segue de pé e importa no dia seguinte (ou
+  # à mão: docker compose exec produtos importar-base sinapi --arquivo SINAPI.zip). O banco fica no volume.
+  produtos:
+    build: ../canteiro-products
+    environment:
+      PRODUTOS_API_KEYS: ${PRODUTOS_CHAVE:-}
+    ports: ["8300:8000"]
+    volumes: ["produtos-dados:/dados"]
 
   web:
     build: ../canteiro-web
@@ -34,11 +47,16 @@ services:
       API_URL: http://api:8000
       AGENTE_URL: http://agente:8100
       TRADUTOR_URL: http://tradutor:8000
+      # a busca na tabela oficial (SINAPI/SICRO) no Compras vem do serviço de produtos
+      PRODUTOS_URL: http://produtos:8000
+      PRODUTOS_CHAVE: ${PRODUTOS_CHAVE:-}
     ports: ["3000:3000"]
     depends_on:
       api: { condition: service_healthy }
       agente: { condition: service_healthy }
       tradutor: { condition: service_healthy }
+      produtos: { condition: service_healthy }
 
 volumes:
   tradutor-dados:
+  produtos-dados:
