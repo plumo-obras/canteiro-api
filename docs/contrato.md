@@ -431,8 +431,10 @@ atual de cada etapa (contrato + aditivos vigentes).
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
   - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
-    saldo, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de `GET …/orcamento`; `realizado` e
-    `comprometido` já com os gastos avulsos, e `gastos` = o mesmo `totais.gastos`).
+    saldo, falta_gastar, realizado_pct, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de `GET …/orcamento`;
+    `realizado` e `comprometido` já com os gastos avulsos, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra:
+    `falta_gastar` = orçado atual − realizado (nunca negativo; realizado + falta fecham no orçado) e `realizado_pct` =
+    realizado ÷ orçado em centésimos de ponto (`null` sem orçado).
   - `entregas`: `{hoje, atrasadas, proximos_7_dias, sem_previsao, nf_para_conferir}`; cada entrega =
     `{pedido_id, numero, fornecedor, status, previsao, itens: [{nome, unidade, falta_entregar}]}`, só pedidos de
     aprovado a parcial, pela `previsao` "AAAA-MM-DD" (outro formato conta em `sem_previsao`).

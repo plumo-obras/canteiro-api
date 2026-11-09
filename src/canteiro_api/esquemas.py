@@ -803,6 +803,11 @@ class ResumoFinanceiro(BaseModel):
     comprometido: int = 0
     realizado: int = 0
     saldo: int = 0
+    # o placar da obra: gasto até hoje (realizado) + falta gastar fecham no orçado; o saldo desconta também o que
+    # está comprometido em pedido que nem chegou, e não serve para isso
+    falta_gastar: int = Field(0, description="orçado atual − realizado, nunca negativo")
+    realizado_pct: int | None = Field(None, description="realizado ÷ orçado atual, em centésimos de ponto percentual "
+                                                        "(4,8% = 480); None sem orçado")
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
 
