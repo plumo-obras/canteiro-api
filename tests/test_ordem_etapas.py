@@ -248,3 +248,32 @@ async def test_situacao_da_versao_resolve_substituida_e_desfeita(vila):
     d = await vila.http.post(f"/registro/{s.json()['registro_id']}/desfazer", headers=vila.h)
     assert d.status_code == 200, d.text
     assert await situacoes() == {pv: "vigente", sv: "desfeita", rv: "desfeita"}
+
+
+async def test_situacao_com_varias_reordenacoes_e_dois_desfazer(vila):
+    """A sequência da reconferência R4: pranchas, somar, reordena e desfaz, reordena 4 vezes, reordena e desfaz."""
+    o = await nova_obra(vila)
+    p = await _pranchas(vila, o["id"])
+    s = await versao(vila, o["id"], PLANILHA, mapa(linha_cabecalho=1), aplicar=True, somar="true")
+    assert s.status_code == 201, s.text
+    ordens = [["2", "1", "3"], ["1", "3", "2"], ["3", "2", "1"], ["2", "1", "3"], ["1", "3", "2"]]
+    feitas = []
+
+    async def reordena(ordem):
+        r = await _ordem(vila, o["id"], ordem)
+        assert r.status_code == 201, r.text
+        feitas.append(r.json())
+        return r.json()
+
+    async def desfaz(r):
+        d = await vila.http.post(f"/registro/{r['registro_id']}/desfazer", headers=vila.h)
+        assert d.status_code == 200, d.text
+
+    await desfaz(await reordena(["3", "1", "2"]))
+    for ordem in ordens[:4]:
+        await reordena(ordem)
+    await desfaz(await reordena(ordens[4]))
+    sit = {v["id"]: v["situacao"] for v in (await orcamento(vila, o["id"]))["versoes"]}
+    assert sit[p["versao_id"]] == sit[s.json()["versao_id"]] == "substituida"
+    assert [sit[r["versao_id"]] for r in feitas] == [
+        "desfeita", "substituida", "substituida", "substituida", "vigente", "desfeita"]
