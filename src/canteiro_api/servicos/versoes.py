@@ -342,37 +342,59 @@ def _renumerar(itens: list[ItemPrevia], existentes: list[dict], usadas: set[str]
     for x in existentes:
         if x.get("numero"):
             conta(x["etapa"], x["numero"])
-    trocar: list[ItemPrevia] = []
+    prefixo: list[ItemPrevia] = []                     # a etapa inteira veio para cá com outro número
+    seguir: list[ItemPrevia] = []                      # entra numa etapa que não é a dela: continua a numeração
     for x in itens:
         origem, alvo = x.etapa_planilha, x.etapa
-        if x.numero and alvo not in usadas and destino.get(origem, ("",))[0] == alvo:
+        da_etapa = alvo not in usadas and destino.get(origem, ("",))[0] == alvo
+        if x.numero and da_etapa:
             numeradas.add(alvo)
-        mexe = (somar and alvo in usadas) or (alvo != origem and (somar or x.etapa_origem in ("planilha", "nome")))
-        if mexe and x.numero:
-            trocar.append(x)
-        elif x.numero:
-            conta(alvo, x.numero)
-    sequencia: dict[tuple[str, str, str], str] = {}
-    for x in trocar:
-        origem, alvo = x.etapa_planilha, x.etapa
-        if alvo not in numeradas:
-            x.numero = ""                 # etapa sem numeração (chave pelo nome): número da planilha só confundiria
+        if not x.numero:
+            continue
+        if da_etapa:
+            if alvo != origem:
+                prefixo.append(x)
+            else:
+                conta(alvo, x.numero)
+        elif alvo not in usadas or somar:
+            # etapa nova de outra linha da planilha (escolha) ou, no somar, qualquer etapa que já existe
+            seguir.append(x)
+        elif alvo != origem and x.etapa_origem in ("planilha", "nome"):
+            seguir.append(x)
+        else:
+            conta(alvo, x.numero)          # aditivo na etapa do contrato: o número aponta o item que ele mexe
+    # os números trocados por prefixo ocupam a etapa antes da sequência: senão o item escolhido para ela repetiria
+    for x in prefixo:
+        if _sem_numero(x, numeradas):
             continue
         p = x.numero.split(".")
+        x.numero = x.etapa if x.tipo == "etapa" and x.nivel == 1 else ".".join([x.etapa, *p[1:]])
+        conta(x.etapa, x.numero)
+    sequencia: dict[tuple[str, str, str], str] = {}
+    for x in seguir:
+        if _sem_numero(x, numeradas):
+            continue
+        origem, alvo = x.etapa_planilha, x.etapa
         if x.tipo == "etapa" and x.nivel == 1:
             x.numero = alvo
             continue
-        if alvo not in usadas and destino.get(origem, ("",))[0] == alvo:
-            novo = [alvo, *p[1:]]
-        else:
-            seg, resto = (p[1], p[2:]) if len(p) > 1 else (p[0], [])
-            chave = (alvo, origem, seg)
-            if chave not in sequencia:
-                maior[alvo] = maior.get(alvo, 0) + 1
-                sequencia[chave] = str(maior[alvo])
-            novo = [alvo, sequencia[chave], *resto]
+        p = x.numero.split(".")
+        seg, resto = (p[1], p[2:]) if len(p) > 1 else (p[0], [])
+        chave = (alvo, origem, seg)
+        if chave not in sequencia:
+            maior[alvo] = maior.get(alvo, 0) + 1
+            sequencia[chave] = str(maior[alvo])
+        novo = [alvo, sequencia[chave], *resto]
         x.numero = ".".join(novo)
         x.nivel = len(novo)
+
+
+def _sem_numero(x: ItemPrevia, numeradas: set[str]) -> bool:
+    """Etapa sem numeração (chave pelo nome): o número da planilha só confundiria, e a linha fica sem."""
+    if x.etapa in numeradas:
+        return False
+    x.numero = ""
+    return True
 
 
 _TERMOS = re.compile(r"[a-z]+|\d+")
@@ -1007,10 +1029,11 @@ def entregue_a_pagar(realizado: int, pago: int) -> int:
     return max(0, realizado - pago)
 
 
-def a_pagar_por_etapa(pedidos: list[dict], gastos: list[dict]) -> dict[str, int]:
-    """O entregue a pagar de cada etapa: por pedido, o recebido menos o que já se pagou dele, repartido pelas etapas
-    das linhas na proporção do recebido. Gasto avulso não entra (é pago no ato). Pedido pago além do recebido não
-    abate o de outro pedido aqui, só no total da obra."""
+def a_pagar_por_etapa(pedidos: list[dict], gastos: list[dict], total: int) -> dict[str, int]:
+    """O entregue a pagar da obra (`total`, a conta do desembolso) repartido pelas etapas. Por pedido, o recebido menos
+    o que já se pagou dele vai para as etapas das linhas na proporção do recebido; depois o `total` é dividido na
+    proporção desse bruto. É o que faz as etapas fecharem com o total quando um pedido foi pago adiantado: o total já
+    abate esse adiantamento, e a etapa do pedido entregue não pode mostrar a pagar o que a obra não deve."""
     pago: dict[str, int] = {}
     for g in gastos:
         if g.get("pedido_id"):
@@ -1030,7 +1053,19 @@ def a_pagar_por_etapa(pedidos: list[dict], gastos: list[dict]) -> dict[str, int]
         etapas = list(por_etapa)
         for k, v in _repartir(falta, [por_etapa[e] for e in etapas]).items():
             soma[etapas[k]] = soma.get(etapas[k], 0) + v
-    return soma
+    return _maior_resto(total, soma) if total < sum(soma.values()) else soma
+
+
+def _maior_resto(valor: int, pesos: dict[str, int]) -> dict[str, int]:
+    """`valor` pelas chaves na proporção dos pesos; o centavo que sobra do arredondamento vai para o maior resto."""
+    todo = sum(pesos.values())
+    if not todo or not valor:
+        return {k: 0 for k in pesos}
+    base = {k: valor * w // todo for k, w in pesos.items()}
+    sobra = valor - sum(base.values())
+    for k in sorted(pesos, key=lambda k: -(valor * pesos[k] % todo))[:sobra]:
+        base[k] += 1
+    return base
 
 
 def _repartir(valor: int, pesos: list[int]) -> dict[int, int]:

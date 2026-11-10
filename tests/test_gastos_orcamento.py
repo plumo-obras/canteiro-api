@@ -283,3 +283,21 @@ async def test_gasto_ate_hoje_e_pago_mais_entregue_a_pagar(vila):
     assert r["entregue_a_pagar"] == fin["entregue_a_pagar"]
     assert sum(e["entregue_a_pagar"] for e in r["etapas"]) == r["entregue_a_pagar"]
     assert next(e for e in r["etapas"] if e["etapa"] == "2")["total"] == 5000
+
+
+async def test_entregue_a_pagar_por_etapa_desconta_o_adiantamento_de_outro_pedido(vila):
+    obra = vila.obra
+    # PED-0158: chegaram 100 kg (R$ 650), nada pago; PED-0160: pago adiantado, nada entregue
+    e = await vila.http.post(f"/pedidos/{vila.pedido['PED-0158']}/recebimentos", headers=vila.h, json={
+        "linhas": [{"indice": 0, "quantidade": qtd(100)}], "chave_idempotencia": uuid.uuid4().hex})
+    assert e.status_code == 201, e.text
+    adiantado = await _gasto(vila, obra, etapa="eletrica", valor=65000, pedido_id=vila.pedido["PED-0160"])
+    r = await _resumo(vila, obra)
+    assert r["entregue_a_pagar"] == 0
+    assert sum(x["entregue_a_pagar"] for x in r["etapas"]) == 0
+    # adiantamento menor que o entregue: a etapa do pedido entregue fica com o líquido
+    await _desfazer(vila, adiantado["registro_id"])
+    await _gasto(vila, obra, etapa="eletrica", valor=20000, pedido_id=vila.pedido["PED-0160"])
+    r = await _resumo(vila, obra)
+    assert r["entregue_a_pagar"] == 45000
+    assert sum(x["entregue_a_pagar"] for x in r["etapas"]) == 45000

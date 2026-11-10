@@ -616,7 +616,9 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     # hoje" do placar parece não bater. Total pela conta do desembolso; por etapa, repartido pelas linhas do pedido.
     lista_pedidos = await versoes.pedidos_da_obra(arm, u.tenant_id, obra_id)
     realizado = sum(g["realizado"] for g in versoes.andamento_dos_pedidos(lista_pedidos).values()) + no_orcamento.total
-    a_pagar = {k or None: v for k, v in versoes.a_pagar_por_etapa(lista_pedidos, gastos).items()}
+    total_a_pagar = versoes.entregue_a_pagar(realizado, sum(g["valor"] for g in gastos))
+    a_pagar = {k or None: v for k, v in versoes.a_pagar_por_etapa(lista_pedidos, gastos, total_a_pagar).items()
+               if v}
     for e in etapas:
         e["entregue_a_pagar"] = a_pagar.pop(e["etapa"], 0)
     for chave in sorted(a_pagar, key=posicao):
@@ -627,7 +629,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
             "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
             "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "a_definir": no_orcamento.a_definir,
-            "entregue_a_pagar": versoes.entregue_a_pagar(realizado, sum(g["valor"] for g in gastos)),
+            "entregue_a_pagar": total_a_pagar,
             "etapas": etapas}
 
 

@@ -409,3 +409,20 @@ def test_parece_repetido():
     assert not par("Concreto fck 25", "Concreto fck 30")
     assert not par("Aço CA-50 10 mm", "Aço CA-50 8 mm")
     assert not par("Pintura látex PVA paredes", "Pintura látex acrílica teto")
+
+
+async def test_item_escolhido_para_etapa_que_trocou_de_numero_nao_repete_numero(vila):
+    # a etapa 1 da planilha vira a 2 (a 1 é Estrutura) e a 2 vira a 3; a Escavação é escolhida para a nova 2
+    planilha = xlsx(CABECALHO, ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                    ["1.1", None, None, "Locação da obra", "m²", 530, 5, None],
+                    ["1.2", None, None, "Tapume", "m", 100, 40, None],
+                    ["2", None, None, "FUNDAÇÃO", None, None, None, None],
+                    ["2.1", None, None, "Escavação", "m³", 50, 60, None])
+    m = mapa(linha_cabecalho=1)
+    for extra in ({"somar": "true"}, {"tipo": "aditivo"}):
+        o = await nova_obra(vila)
+        await versao(vila, o["id"], PRANCHAS, m, aplicar=True)
+        p = (await versao(vila, o["id"], planilha, m, etapas_itens=json.dumps({"4": "2"}), **extra)).json()
+        itens = _por_desc(p)
+        assert [(itens[d]["etapa"], itens[d]["numero"]) for d in ("Locação da obra", "Tapume", "Escavação")] == [
+            ("2", "2.1"), ("2", "2.2"), ("2", "2.3")], extra
