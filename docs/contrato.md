@@ -636,8 +636,9 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   topicos: [{topico_id, nome, total}]}]}`. `entregue_a_pagar` = pedidos entregues e ainda não pagos: o mesmo número de
   `financeiro.entregue_a_pagar` em `GET …/resumo` e de `totais.entregue_sem_pagamento` do desembolso. Por etapa: para
   cada pedido, o recebido menos o que já se pagou dele, repartido pelas etapas das linhas na proporção do recebido
-  (linha sem etapa → `etapa: null`); etapa que só tem entregue a pagar aparece com `total` 0 e `topicos` vazio. A soma
-  das etapas fecha no total, salvo pedido pago além do recebido (aí o total desconta e a etapa não). `total` =
+  (linha sem etapa → `etapa: null`); o total da obra (que já desconta o pagamento adiantado de outro pedido) é então
+  dividido na proporção desse bruto, com o centavo que sobra no maior resto: **a soma das etapas fecha sempre no
+  total**. Etapa que só tem entregue a pagar aparece com `total` 0 e `topicos` vazio. `total` =
   gastos avulsos (é o que soma no realizado do orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
   `fora_do_orcamento` e `sem_etapa_do_orcamento` = as partes do `total` nas extras e em chave fora da árvore (com
   orçamento; sem orçamento é 0). `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
