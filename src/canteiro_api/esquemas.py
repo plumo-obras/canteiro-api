@@ -682,6 +682,7 @@ class OrdemEtapasCorpo(Entrada):
     ordem: list[str] = Field(min_length=1, max_length=200, description="as chaves das etapas do orçamento vigente, "
                                                                         "todas, na ordem nova")
     chave_idempotencia: str = Field(min_length=8, max_length=64)
+    versao_id: str | None = Field(None, max_length=64, description="o contrato vigente que a tela viu; outro → 409")
 
 
 class OrdemEtapasSaida(BaseModel):

@@ -286,7 +286,7 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     SERVIÇOS PRELIMINARES, e as etapas são renumeradas nessa ordem." Se já há lançamento numa etapa que mudaria de
     número (ver "Ordem das etapas"), não reordena nem avisa.
 - **Ordem das etapas** (antes de aprovar): `POST /obras/{obra_id}/orcamento/etapas/ordem` (JSON `{ordem: [chave da
-  etapa], chave_idempotencia}` (8–64), admin) → `{versao_id, registro_id, etapas: [{etapa, descricao}]}` (201; a mesma
+  etapa], chave_idempotencia (8–64), versao_id?}`, admin) → `{versao_id, registro_id, etapas: [{etapa, descricao}]}` (201; a mesma
   chave com a mesma ordem → 200 com o mesmo corpo; com outra ordem → 409). `ordem` = **todas** as chaves das etapas do
   contrato vigente, cada uma uma vez, na ordem nova (`etapas[].etapa` de `GET …/orcamento`). Grava um **contrato
   novo** no lugar do vigente (a mesma mecânica do somar): as mesmas linhas, com as edições de preço, as etapas
@@ -295,11 +295,19 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   do orçamento de X", desfazer `desligar_versao` (com `reordenou: true`): o anterior volta ("Desfeito: as etapas do
   orçamento de X voltaram à ordem de antes"). Erros: sem orçamento → 422; lista que não é permutação das etapas
   (falta, sobra ou repete) → 422 "Mande todas as etapas do orçamento, cada uma uma vez: 1, 2, 3."; a mesma ordem de
-  hoje → 422 "Nada mudou…"; obra aprovada → 409; aditivo vigente → 409; orçamento mudou entre a leitura e a gravação →
+  hoje → 422 "Nada mudou…"; `versao_id` (o contrato vigente que a tela viu; a web manda sempre) que não é mais o
+  vigente → 409 "O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem." (depois de uma
+  reordenação as chaves são sempre 1..N, e só o `versao_id` denuncia a tela velha); obra aprovada → 409; aditivo vigente → 409; orçamento mudou entre a leitura e a gravação →
   409; **lançamento numa etapa que mudaria de número** (gasto não estornado, linha de pedido não cancelado, tópico,
   movimento, insumo, cronograma) → 409 "Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa 3 FUNDAÇÕES:
   renumerar levaria o lançamento para outra etapa." (renumerar trocaria calado a etapa dele); viewer → 403; obra de
   outro cliente → 404.
+  - **Desfazer de uma mudança de ordem** (a reordenação, ou o somar que reordenou): a receita guarda
+    `renumeradas` = `{chave: etapa que ela é no contrato novo}` das chaves que o contrato de antes também tem com outro
+    sentido. Se há lançamento (o mesmo critério acima) numa delas, o Desfazer → 409 "Já há lançamento (…) na etapa 1
+    FUNDAÇÕES depois da mudança de ordem: desfazer levaria o lançamento para outra etapa. Mude a etapa dele antes de
+    desfazer." Chave que só o contrato novo tem não trava: desfeito, o lançamento nela aparece "sem etapa do
+    orçamento", à vista.
 - **Etapa pelo nome** (no somar e no aditivo): a etapa da planilha casa com a do orçamento vigente (contrato e
   aditivos) pelo **nome** (sem acento, sem caixa, espaços e pontuação normalizados), nunca pelo número: "1 SERVIÇOS
   PRELIMINARES" não entra na "1 Estrutura". Casou → os itens vão para ela (`etapa_origem: "nome"` quando a chave muda).

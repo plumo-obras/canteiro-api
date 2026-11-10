@@ -520,10 +520,12 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if tipo == TipoVersao.ADITIVO and not vigente:
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
     linhas = _somadas(existentes, vigente, itens) if somar else itens
+    renumeradas: dict[str, str] = {}
     if somar and (ordem := _pranchas_depois_das_preliminares(vigente, linhas)):
         if _chaves_que_mudam(linhas, ordem) & await etapas_em_uso(arm, u.tenant_id, obra_id):
             ordem = None       # renumerar levaria o gasto (ou pedido) lançado numa etapa para outra
         else:
+            renumeradas = _renumeradas_no_desfazer(linhas, ordem, {e["etapa"] for e in vigente["lista_etapas"]})
             nomes = _nomes_das_etapas(linhas)
             pranchas = vigente["lista_etapas"][0]["etapa"]
             antes_dela = ordem[ordem.index(pranchas) - 1]
@@ -603,6 +605,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
                       desfazer=lambda d: {
                           "op": "desligar_versao", "versao_id": id_, "reativar": anterior["id"] if anterior else None,
                           **({"somou": True} if somar else {}),
+                          **({"renumeradas": renumeradas} if renumeradas else {}),
                           **({"compras": receita_insumos(obra_id, f"compras do {_ordinal(numero)} aditivo",
                                                          arquivar=novos, restaurar=restaurar)}
                              if novos or restaurar else {})})
@@ -640,6 +643,22 @@ def _renumeradas(ordem: list[str]) -> dict[str, str]:
 
 def _chaves_que_mudam(linhas, ordem: list[str]) -> set[str]:
     return {k for k, n in _renumeradas(ordem).items() if n != k} & set(_ordem_das_etapas(linhas))
+
+
+def _renumeradas_no_desfazer(linhas, ordem: list[str], chaves_antes: set[str]) -> dict[str, str]:
+    """{chave: etapa que ela passa a ser} das chaves que o contrato de antes também tem, com outro sentido. É o que o
+    Desfazer não pode devolver calado: o gasto lançado na "1" depois da mudança iria para a "1" de antes. Chave que
+    só o contrato novo tem não entra: desfeito, o lançamento nela aparece "sem etapa do orçamento", à vista."""
+    nomes = _nomes_das_etapas(linhas)
+    return {n: nomes.get(k, "") for k, n in _renumeradas(ordem).items() if n != k and n in chaves_antes}
+
+
+async def recusar_se_renumeradas_em_uso(leitor, tenant_id: str, obra_id: str, renumeradas: dict[str, str]) -> None:
+    """Antes do Desfazer de uma mudança de ordem (fora da transação, porque consulta)."""
+    if presas := sorted(set(renumeradas) & await etapas_em_uso(leitor, tenant_id, obra_id)):
+        raise Conflito("Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa "
+                       f"{', '.join(f'{k} {renumeradas[k]}'.strip() for k in presas)} depois da mudança de ordem: "
+                       "desfazer levaria o lançamento para outra etapa. Mude a etapa dele antes de desfazer.")
 
 
 def _reordenar(linhas: list[ItemPrevia], ordem: list[str]) -> list[ItemPrevia]:
@@ -808,7 +827,8 @@ async def importar_estrutura(arm, u: UsuarioAtual, obra_id: str, corpo) -> tuple
                           chave=corpo.chave_idempotencia, somar=somar, ignorar=corpo.ignorar_itens)
 
 
-async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str], chave: str) -> tuple[dict, bool]:
+async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str], chave: str,
+                           versao_id: str | None = None) -> tuple[dict, bool]:
     """Grava a ordem das etapas do orçamento (antes de aprovar) como um contrato novo no lugar do vigente, com as
     etapas renumeradas 1..N e os itens junto. É a mesma mecânica do somar: o Desfazer religa o anterior. Devolve
     ({versao_id, registro_id, etapas}, criado agora?)."""
@@ -825,6 +845,9 @@ async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str],
     vigente = _contrato_vigente(await versoes_da_obra(arm, u.tenant_id, obra_id))
     if not vigente:
         raise ErroNegocio("Ainda não há orçamento nesta obra para ordenar as etapas.")
+    if versao_id and versao_id != vigente["id"]:
+        # depois de uma reordenação as chaves são sempre 1..N: a lista montada na tela velha passaria na conferência
+        raise Conflito("O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem.")
     if vigente.get("aditivos", 0) > 0:
         raise Conflito("Há aditivo valendo sobre este orçamento; desfaça o aditivo antes de mudar a ordem.")
     existentes = await itens_das_versoes(arm, u.tenant_id, obra_id, [vigente])
@@ -840,6 +863,7 @@ async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str],
         raise Conflito("Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa "
                        f"{', '.join(f'{k} {nomes.get(k, "")}'.strip() for k in presas)}: renumerar levaria o "
                        "lançamento para outra etapa.")
+    renumeradas = _renumeradas_no_desfazer(linhas, ordem, set(atual))
     linhas = _reordenar(linhas, ordem)
     so_itens = [x for x in linhas if x.tipo == "item"]
     versao = VersaoOrcamento(
@@ -872,7 +896,7 @@ async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str],
         op = Operacao(obra_id=obra_id, aplicar=aplicar_,
                       texto=lambda d: f"Reordenou as etapas do orçamento de {o['nome']}",
                       desfazer=lambda d: {"op": "desligar_versao", "versao_id": id_, "reativar": anterior["id"],
-                                          "reordenou": True})
+                                          "reordenou": True, "renumeradas": renumeradas})
         executar_e_registrar(tx, u, op, registro_id=id_derivado(u.tenant_id, "registro", id_))
 
     await arm.em_transacao(ativar)

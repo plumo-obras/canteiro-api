@@ -175,3 +175,54 @@ async def test_gasto_fora_de_pedido_sai_marcado_fora_do_orcado(vila):
     assert [(e["etapa"], e["total"], e["fora_do_orcado"]) for e in r["etapas"] if e["total"]] == [("2", 64000, 64000)]
     # só marca: o realizado do orçamento continua contando o gasto na etapa
     assert next(e for e in (await orcamento(vila, obra))["etapas"] if e["etapa"] == "2")["gastos_avulsos"] == 64000
+
+
+async def _somado(vila):
+    """Obra com pranchas + planilha somada: 1 SERVIÇOS PRELIMINARES, 2 Estrutura, 3 FUNDAÇÕES."""
+    o = await nova_obra(vila)
+    await _pranchas(vila, o["id"])
+    s = await versao(vila, o["id"], PLANILHA, mapa(linha_cabecalho=1), aplicar=True, somar="true")
+    assert s.status_code == 201, s.text
+    return o, s.json()
+
+
+async def test_desfazer_a_ordem_nao_leva_calado_o_gasto_lancado_depois(vila):
+    o, _ = await _somado(vila)
+    r = await _ordem(vila, o["id"], ["3", "1", "2"])
+    assert r.status_code == 201, r.text
+    # depois da mudança, a "1" é FUNDAÇÕES; antes dela, era SERVIÇOS PRELIMINARES
+    g = await _gasto(vila, o["id"], etapa="1", valor=12000)
+    d = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 409 and "1 FUNDAÇÕES" in d.json()["detail"], d.text
+    assert [e["descricao"] for e in (await orcamento(vila, o["id"]))["etapas"]][0] == "FUNDAÇÕES"
+    # com o gasto estornado, o Desfazer passa
+    assert (await vila.http.post(f"/registro/{g['registro_id']}/desfazer", headers=vila.h)).status_code == 200
+    d = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+
+
+async def test_desfazer_o_somar_que_reordenou_nao_leva_calado_o_gasto_lancado_depois(vila):
+    o, s = await _somado(vila)
+    # a "1" era a Estrutura das pranchas; depois de somar, é SERVIÇOS PRELIMINARES
+    await _gasto(vila, o["id"], etapa="1", valor=12000)
+    d = await vila.http.post(f"/registro/{s['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 409 and "1 SERVIÇOS PRELIMINARES" in d.json()["detail"], d.text
+    # gasto numa etapa que só o somado tem não trava: desfeito, ele aparece "sem etapa do orçamento"
+    o, s = await _somado(vila)
+    await _gasto(vila, o["id"], etapa="3", valor=12000)
+    d = await vila.http.post(f"/registro/{s['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+
+
+async def test_ordem_montada_sobre_tela_velha_e_recusada(vila):
+    o, _ = await _somado(vila)
+    vista = next(v["id"] for v in (await orcamento(vila, o["id"]))["versoes"] if v["ativa"])
+    r = await vila.http.post(f"/obras/{o['id']}/orcamento/etapas/ordem", headers=vila.h,
+                             json={"ordem": ["3", "1", "2"], "chave_idempotencia": uuid.uuid4().hex,
+                                   "versao_id": vista})
+    assert r.status_code == 201, r.text
+    # a mesma tela (já velha) manda outra ordem: as chaves continuam 1..3, só o versao_id denuncia
+    velha = await vila.http.post(f"/obras/{o['id']}/orcamento/etapas/ordem", headers=vila.h,
+                                 json={"ordem": ["2", "1", "3"], "chave_idempotencia": uuid.uuid4().hex,
+                                       "versao_id": vista})
+    assert velha.status_code == 409 and "recarregue" in velha.json()["detail"], velha.text

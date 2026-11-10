@@ -146,7 +146,8 @@ async def ordenar_etapas(obra_id: str, corpo: OrdemEtapasCorpo, response: Respon
                          u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     """Muda a ordem das etapas antes de aprovar: um contrato novo no lugar do vigente, com as etapas renumeradas."""
     try:
-        saida, criada = await versoes.reordenar_etapas(arm, u, obra_id, corpo.ordem, corpo.chave_idempotencia)
+        saida, criada = await versoes.reordenar_etapas(arm, u, obra_id, corpo.ordem, corpo.chave_idempotencia,
+                                                      corpo.versao_id)
     except ConflitoDeId:
         raise Conflito("Esta mudança já foi gravada agora há pouco; recarregue o orçamento.") from None
     if criada:
