@@ -311,6 +311,7 @@ class TipoProposta(StrEnum):
     AVANCAR_PEDIDO = "avancar_pedido"
     AJUSTE_ESTOQUE = "ajuste_estoque"
     REGISTRAR_ENTREGA = "registrar_entrega"   # entrada de uma entrega num pedido (o "Registrar entrega" da tela)
+    CRONOGRAMA = "cronograma"                 # a IA propõe o cronograma (etapas × meses); aprovar grava-o
 
 
 class Proposta(Documento):

@@ -32,6 +32,7 @@ from ..esquemas import (
     DADOS_POR_TIPO,
     AjusteEstoqueDados,
     AvancarPedidoDados,
+    CronogramaCorpo,
     PedidoDados,
     PropostaCorpo,
     RegistrarEntregaDados,
@@ -77,7 +78,7 @@ def _dados(tipo: TipoProposta, dados: dict):
 
 # O que aprovar faz, para o botão da tela dizer a consequência ("Aprovar entrada", "Aprovar encerramento").
 EFEITO_POR_TIPO = {TipoProposta.CRIAR_PEDIDO: "compra", TipoProposta.AJUSTE_ESTOQUE: "ajuste",
-                   TipoProposta.REGISTRAR_ENTREGA: "entrada"}
+                   TipoProposta.REGISTRAR_ENTREGA: "entrada", TipoProposta.CRONOGRAMA: "cronograma"}
 
 
 def efeito_do_avanco(de: StatusPedido, para: StatusPedido) -> str:
@@ -171,6 +172,9 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> tuple[di
                                      confirmar_excesso=dados.confirmar_excesso)
             # a conta da entrega sai do domínio, não de quem propõe: "recebido 18 + esta entrega 7 = 25 de 25"
             conta = f"{p['numero']} · {texto_da_entrega(previa)}"
+        case CronogramaCorpo():
+            # valida contra o orçamento aqui (com arm, fora de transação): a execução depois só grava
+            await cronograma.validar_para_proposta(arm, u.tenant_id, corpo.obra_id, dados)
     chave = corpo.chave_idempotencia
     p = Proposta(tenant_id=u.tenant_id, obra_id=corpo.obra_id, tipo=corpo.tipo, titulo=corpo.titulo,
                  conta=conta, justificativa=corpo.justificativa, fonte=corpo.fonte, efeito=efeito,
@@ -249,6 +253,9 @@ async def _preparar_proposta(tx, u: UsuarioAtual, prop: dict) -> Operacao:
             texto = op.texto
             op.texto = lambda d: f"{texto(d)}: {dados.motivo}"
             return op
+        case TipoProposta.CRONOGRAMA:
+            # aprovar grava o cronograma proposto; já validado na criação, aqui só se grava (dentro da transação)
+            return await cronograma.preparar_salvar(tx, u, prop["obra_id"], dados)
 
 
 async def _proposta_pendente(tx, u: UsuarioAtual, proposta_id: str) -> dict:

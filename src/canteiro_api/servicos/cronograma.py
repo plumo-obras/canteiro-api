@@ -80,57 +80,74 @@ def validar_cronograma(corpo: CronogramaCorpo, orcadas: dict) -> list[dict]:
     return etapas
 
 
+async def preparar_salvar(tx, u: UsuarioAtual, obra_id: str, corpo: CronogramaCorpo,
+                          etapas: list[dict] | None = None) -> Operacao:
+    """Monta a Operacao que grava o cronograma. A validação (que consulta o orçamento) roda antes da transação — no
+    PUT ou na criação da proposta —, porque a transação não permite consulta; aqui só se grava. Serve ao PUT do editor
+    e à aprovação da proposta de cronograma da IA."""
+    if etapas is None:
+        etapas = [{"etapa": e.etapa, "percentuais": e.percentuais} for e in corpo.etapas if sum(e.percentuais)]
+    id_ = id_cronograma(u.tenant_id, obra_id)
+    atual = await tx.obter("cronogramas", u.tenant_id, id_)
+    obra = await obra_do_tenant(tx, u.tenant_id, obra_id) if corpo.atualizar_prazo_da_obra else None
+    if atual and atual.get("ultima_medicao"):
+        fim = _mes_idx(corpo.inicio) + corpo.meses - 1 + MESES_DEPOIS_DO_FIM
+        if _mes_idx(corpo.inicio) > _mes_idx(atual["ultima_medicao"]) or fim < _mes_idx(atual["ultima_medicao"]):
+            raise ErroNegocio(f"Já há medição em {atual['ultima_medicao']}: o cronograma tem de cobrir esse mês.")
+    vigente = {"inicio": corpo.inicio, "meses": corpo.meses, "etapas": etapas}
+    # cronograma de antes da linha de base (sem `base`): a base passa a ser o anterior, não este, senão a
+    # primeira reprogramação já apagaria o atraso
+    if atual and not atual.get("base"):
+        atual = {**atual, "base": {k: atual[k] for k in ("inicio", "meses", "etapas")}}
+    nova_base = not atual or corpo.nova_linha_base
+    campos = {**vigente, "versao": (atual["versao"] + 1) if atual else 1,
+              "base": vigente if nova_base else atual["base"],
+              "revisoes": 0 if nova_base else (atual.get("revisoes") or 0) + 1}
+    antes = ({"inicio": atual["inicio"], "meses": atual["meses"], "etapas": atual["etapas"],
+              "base": atual["base"], "revisoes": atual.get("revisoes") or 0} if atual else None)
+    prazo_antes = obra.get("prazo_meses", 0) if obra else None
+
+    def aplicar():
+        if obra is not None:
+            tx.atualizar("obras", u.tenant_id, obra_id, {"prazo_meses": corpo.meses})
+        if atual:
+            tx.atualizar("cronogramas", u.tenant_id, id_, campos)
+            d = {**atual, **campos}
+        else:
+            d = doc(Cronograma(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, **campos))
+            tx.criar("cronogramas", d)
+        evento(tx, u.tenant_id, "cronograma.salvo", obra_id, {"versao": campos["versao"]})
+        return d
+
+    def texto(d):
+        verbo = "Refez" if atual else "Montou"
+        prazo = f"{corpo.meses} meses a partir de {corpo.inicio}"
+        if atual and atual["meses"] != corpo.meses:
+            prazo += f" (era {atual['meses']})"
+        if obra is not None and prazo_antes != corpo.meses:
+            prazo += f" · prazo da obra {prazo_antes or '—'} → {corpo.meses} meses"
+        base = " · nova linha de base" if atual and nova_base else ""
+        return f"{verbo} o cronograma: {len(etapas)} etapas, {prazo}{base}"
+
+    return Operacao(obra_id=obra_id, aplicar=aplicar, texto=texto,
+                    desfazer=lambda d: {"op": "restaurar_cronograma", "cronograma_id": id_, "antes": antes,
+                                        "versao": campos["versao"], "obra_id": obra_id,
+                                        "prazo_antes": prazo_antes, "prazo_depois": corpo.meses if obra else None})
+
+
+async def validar_para_proposta(arm, tenant_id: str, obra_id: str, corpo: CronogramaCorpo) -> None:
+    """Valida o cronograma proposto contra o orçamento (uma consulta), antes de criar a proposta. A execução depois
+    só grava, dentro da transação, sem consultar."""
+    validar_cronograma(corpo, await _etapas_orcadas(arm, tenant_id, obra_id))
+
+
 async def salvar(arm, u: UsuarioAtual, obra_id: str, corpo: CronogramaCorpo) -> dict:
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     etapas = validar_cronograma(corpo, await _etapas_orcadas(arm, u.tenant_id, obra_id))
-    id_ = id_cronograma(u.tenant_id, obra_id)
 
     async def corpo_tx(tx):
-        atual = await tx.obter("cronogramas", u.tenant_id, id_)
-        obra = await obra_do_tenant(tx, u.tenant_id, obra_id) if corpo.atualizar_prazo_da_obra else None
-        if atual and atual.get("ultima_medicao"):
-            fim = _mes_idx(corpo.inicio) + corpo.meses - 1 + MESES_DEPOIS_DO_FIM
-            if _mes_idx(corpo.inicio) > _mes_idx(atual["ultima_medicao"]) or fim < _mes_idx(atual["ultima_medicao"]):
-                raise ErroNegocio(f"Já há medição em {atual['ultima_medicao']}: o cronograma tem de cobrir esse mês.")
-        vigente = {"inicio": corpo.inicio, "meses": corpo.meses, "etapas": etapas}
-        # cronograma de antes da linha de base (sem `base`): a base passa a ser o anterior, não este, senão a
-        # primeira reprogramação já apagaria o atraso
-        if atual and not atual.get("base"):
-            atual = {**atual, "base": {k: atual[k] for k in ("inicio", "meses", "etapas")}}
-        nova_base = not atual or corpo.nova_linha_base
-        campos = {**vigente, "versao": (atual["versao"] + 1) if atual else 1,
-                  "base": vigente if nova_base else atual["base"],
-                  "revisoes": 0 if nova_base else (atual.get("revisoes") or 0) + 1}
-        antes = ({"inicio": atual["inicio"], "meses": atual["meses"], "etapas": atual["etapas"],
-                  "base": atual["base"], "revisoes": atual.get("revisoes") or 0} if atual else None)
-        prazo_antes = obra.get("prazo_meses", 0) if obra else None
-
-        def aplicar():
-            if obra is not None:
-                tx.atualizar("obras", u.tenant_id, obra_id, {"prazo_meses": corpo.meses})
-            if atual:
-                tx.atualizar("cronogramas", u.tenant_id, id_, campos)
-                return {**atual, **campos}
-            d = doc(Cronograma(id=id_, tenant_id=u.tenant_id, obra_id=obra_id, **campos))
-            tx.criar("cronogramas", d)
-            return d
-
-        def texto(d):
-            verbo = "Refez" if atual else "Montou"
-            prazo = f"{corpo.meses} meses a partir de {corpo.inicio}"
-            if atual and atual["meses"] != corpo.meses:
-                prazo += f" (era {atual['meses']})"
-            if obra is not None and prazo_antes != corpo.meses:
-                prazo += f" · prazo da obra {prazo_antes or '—'} → {corpo.meses} meses"
-            base = " · nova linha de base" if atual and nova_base else ""
-            return f"{verbo} o cronograma: {len(etapas)} etapas, {prazo}{base}"
-
-        op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=texto,
-                      desfazer=lambda d: {"op": "restaurar_cronograma", "cronograma_id": id_, "antes": antes,
-                                          "versao": campos["versao"], "obra_id": obra_id,
-                                          "prazo_antes": prazo_antes, "prazo_depois": corpo.meses if obra else None})
+        op = await preparar_salvar(tx, u, obra_id, corpo, etapas)
         _, reg = executar_e_registrar(tx, u, op)
-        evento(tx, u.tenant_id, "cronograma.salvo", obra_id, {"versao": campos["versao"]})
         return reg["id"]
 
     registro_id = await arm.em_transacao(corpo_tx)

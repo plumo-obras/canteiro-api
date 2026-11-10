@@ -282,3 +282,30 @@ def test_valores_mes_fecham_no_centavo_do_orcado():
     assert sum(v) == 10001
     assert v == [3333, 3334, 3333, 1]
     assert valores_mes(4543363, [8500, 1500]) == [3861859, 681504]
+
+
+async def test_proposta_de_cronograma_a_ia_propoe_e_aprovar_grava(vila):
+    """A IA propõe o cronograma (POST /propostas tipo cronograma); aprovar grava-o, e o desfazer volta ao vazio."""
+    obra = await _obra(vila, com_cronograma=False)
+    corpo = {"obra_id": obra, "tipo": "cronograma", "titulo": "Cronograma da obra", "fonte": "agente", "dados": PLANO}
+    p = (await vila.http.post("/propostas", headers=vila.h, json=corpo)).json()
+    assert p["tipo"] == "cronograma" and p["status"] == "pendente"
+    assert (await _cron(vila, obra))["meses"] == 0  # antes de aprovar, sem cronograma
+
+    a = await vila.http.post(f"/propostas/{p['id']}/aprovar", headers=vila.h)
+    assert a.status_code == 200, a.text
+    c = await _cron(vila, obra)
+    assert (c["inicio"], c["meses"]) == ("2026-01", 3)
+    assert [(e["etapa"], e["percentuais"]) for e in c["etapas"]] == [("1", [10000, 0, 0]), ("2", [0, 5000, 5000])]
+
+    reg = a.json()["registro"]["id"]
+    assert (await vila.http.post(f"/registro/{reg}/desfazer", headers=vila.h)).status_code == 200
+    assert (await _cron(vila, obra))["meses"] == 0  # desfazer a aprovação apaga o cronograma
+
+
+async def test_proposta_de_cronograma_recusa_etapa_fora_do_orcamento(vila):
+    obra = await _obra(vila, com_cronograma=False)
+    corpo = {"obra_id": obra, "tipo": "cronograma", "titulo": "X", "fonte": "agente",
+             "dados": {"inicio": "2026-01", "meses": 1, "etapas": [{"etapa": "99", "percentuais": [10000]}]}}
+    r = await vila.http.post("/propostas", headers=vila.h, json=corpo)
+    assert r.status_code == 422, r.text
