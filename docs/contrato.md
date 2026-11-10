@@ -225,6 +225,17 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   total, ativa, substitui, criado_em}`. `numero`: 0 no contrato, 1, 2… nos aditivos (o maior ativo + 1). `data`
   `"AAAA-MM-DD"` ou `null`. `itens`/`etapas` = quantos de cada; `total` em centavos (soma dos itens). `ativa: false` =
   desfeita ou substituída. `substitui` = a versão de contrato que esta tirou de vigência (ou `null`).
+  Em `GET …/orcamento` cada versão traz também: `origem` = `"somar"` (contrato gravado pelo somar, da planilha ou de
+  `…/estrutura`) | `"reordenar"` (pela ordem das etapas) | `null` (as outras, e as gravadas antes deste campo);
+  `rotulo` = o nome para a pessoa, sem nome de arquivo do sistema ("Materiais das pranchas" no lugar de
+  "Estrutura (projeto).csv"; "Orçamento com a planilha somada" / "Orçamento com os materiais das pranchas somados";
+  "Etapas reordenadas"; nas outras, `descricao` ou `arquivo`); `desfazer_texto` = o que o Desfazer dela faz, pronto
+  para mostrar ("Volta o orçamento para antes de somar a planilha (R$ 50.977,41, 9 itens)." no somar, com o total e
+  os itens do contrato que volta; "Volta as etapas do orçamento para a ordem de antes." no reordenar) ou `null` (a
+  tela usa o texto dela). `situacao` = `"vigente"` (`ativa`) | `"substituida"` (saiu porque outra versão tomou o
+  lugar: reimportação, somar, reordenar) | `"desfeita"` (saiu pelo Desfazer dela mesma). `ativa: false` sozinho não
+  separa as duas; a API resolve pelo registro de cada versão, então a cadeia pranchas → somar → reordenar dá
+  substituida, substituida, vigente, e desfazer a reordenação dá substituida, vigente, desfeita. O `arquivo` gravado não muda: o sufixo " (projeto).csv" é como a API reconhece as pranchas.
 - `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
   descricao, unidade, quantidade, valor_unitario, total, linha}`. `ordem` = posição na versão (0, 1, 2…); `numero` =
   o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);
@@ -269,6 +280,37 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   saíram (o anterior volta a valer)"). 409 se o vigente mudou (edição, outra importação) entre a prévia e a gravação.
   Somado com mais de 2000 linhas → 422. A mesma chave devolve a versão gravada: aí `itens`/`total` são os do contrato
   somado inteiro. Depois de aprovado nada muda: contrato novo continua 409 e o caminho é o aditivo.
+  - **Pranchas depois dos preliminares** (só no somar): se o vigente é só das pranchas (uma etapa, gravada por
+    `…/orcamento/estrutura`) e a planilha traz uma etapa cujo nome tem "preliminar" ou "canteiro", a etapa das
+    pranchas vai para **logo depois** dela e as etapas do contrato somado são renumeradas 1..N nessa ordem (os itens
+    trocam só o prefixo: "2.1" → "1.1"). Sem etapa assim, a das pranchas fica onde está (adivinhar a ordem da obra
+    por outros nomes erraria mais do que acertaria). A **prévia continua com os números de antes** (são eles que
+    valem em `etapas_itens`) e traz um aviso com `linha: 0`: "Ao somar, Estrutura (das pranchas) vai para depois de
+    SERVIÇOS PRELIMINARES, e as etapas são renumeradas nessa ordem." Se já há lançamento numa etapa que mudaria de
+    número (ver "Ordem das etapas"), não reordena nem avisa.
+- **Ordem das etapas** (antes de aprovar): `POST /obras/{obra_id}/orcamento/etapas/ordem` (JSON `{ordem: [chave da
+  etapa], chave_idempotencia (8–64), versao_id?}`, admin) → `{versao_id, registro_id, etapas: [{etapa, descricao}]}` (201; a mesma
+  chave com a mesma ordem → 200 com o mesmo corpo; com outra ordem → 409). `ordem` = **todas** as chaves das etapas do
+  contrato vigente, cada uma uma vez, na ordem nova (`etapas[].etapa` de `GET …/orcamento`). Grava um **contrato
+  novo** no lugar do vigente (a mesma mecânica do somar): as mesmas linhas, com as edições de preço, as etapas
+  renumeradas 1..N na ordem pedida e os itens junto ("1.2" da etapa que virou a 3 fica "3.2"); etapa sem numeração
+  (chave pelo nome) só muda de lugar. `etapas` da resposta = as etapas já renumeradas. Registro "Reordenou as etapas
+  do orçamento de X", desfazer `desligar_versao` (com `reordenou: true`): o anterior volta ("Desfeito: as etapas do
+  orçamento de X voltaram à ordem de antes"). Erros: sem orçamento → 422; lista que não é permutação das etapas
+  (falta, sobra ou repete) → 422 "Mande todas as etapas do orçamento, cada uma uma vez: 1, 2, 3."; a mesma ordem de
+  hoje → 422 "Nada mudou…"; `versao_id` (o contrato vigente que a tela viu; a web manda sempre) que não é mais o
+  vigente → 409 "O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem." (depois de uma
+  reordenação as chaves são sempre 1..N, e só o `versao_id` denuncia a tela velha); obra aprovada → 409; aditivo vigente → 409; orçamento mudou entre a leitura e a gravação →
+  409; **lançamento numa etapa que mudaria de número** (gasto não estornado, linha de pedido não cancelado, tópico,
+  movimento, insumo, cronograma) → 409 "Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa 3 FUNDAÇÕES:
+  renumerar levaria o lançamento para outra etapa." (renumerar trocaria calado a etapa dele); viewer → 403; obra de
+  outro cliente → 404.
+  - **Desfazer de uma mudança de ordem** (a reordenação, ou o somar que reordenou): a receita guarda
+    `renumeradas` = `{chave: etapa que ela é no contrato novo}` das chaves que o contrato de antes também tem com outro
+    sentido. Se há lançamento (o mesmo critério acima) numa delas, o Desfazer → 409 "Já há lançamento (…) na etapa 1
+    FUNDAÇÕES depois da mudança de ordem: desfazer levaria o lançamento para outra etapa. Mude a etapa dele antes de
+    desfazer." Chave que só o contrato novo tem não trava: desfeito, o lançamento nela aparece "sem etapa do
+    orçamento", à vista.
 - **Etapa pelo nome** (no somar e no aditivo): a etapa da planilha casa com a do orçamento vigente (contrato e
   aditivos) pelo **nome** (sem acento, sem caixa, espaços e pontuação normalizados), nunca pelo número: "1 SERVIÇOS
   PRELIMINARES" não entra na "1 Estrutura". Casou → os itens vão para ela (`etapa_origem: "nome"` quando a chave muda).
@@ -627,13 +669,20 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
 
 - `Gasto` = `{id, obra_id, comprovante_id, valor, data_pagamento, favorecido, fornecedor_id, descricao, etapa,
   topico_id, pedido_id, quem, usuario_id, estornado, criado_em}`.
+- **Gasto fora do orçado** (derivado, não se edita): `fora_do_orcado: true` no gasto **avulso** (sem `pedido_id`,
+  não estornado) de obra **com orçamento**; pagamento de pedido e obra sem orçamento → `false`. Vem em
+  `GET …/gastos`, na resposta do confirmar (`gasto`) e do `PATCH /gastos/{id}`. **Só marca**: o gasto continua
+  somando no realizado da etapa dele, como antes. Critério escolhido por ser o confiável: casar a descrição do
+  comprovante ("vidros 4mm", "diária do pedreiro") com o serviço do orçamento erra para os dois lados; é o pedido que
+  liga o dinheiro a um item. A tela diz "lançado fora de pedido". (Não confundir com o `fora_do_orcamento` já
+  existente, que é só a parte nas **etapas extras**.)
 - `GET /obras/{obra_id}/gastos?etapa=…&limite=100&antes_de=…` → confirmados e não estornados (mais novos primeiro),
-  cada um com `etapa_nome` (o nome de hoje; chave antiga da lista padrão mantém o nome dela, ex. "Fundação") e
+  cada um com `fora_do_orcado`, `etapa_nome` (o nome de hoje; chave antiga da lista padrão mantém o nome dela, ex. "Fundação") e
   `etapa_origem` (`orcamento` | `padrao` | `extra` | `sem_etapa_do_orcamento`): a tela marca "sem etapa do orçamento"
   e oferece mudar a etapa.
 - `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, tem_orcamento, fora_do_orcamento,
-  sem_etapa_do_orcamento, a_definir, entregue_a_pagar, etapas: [{etapa, nome, origem, total, entregue_a_pagar,
-  topicos: [{topico_id, nome, total}]}]}`. `entregue_a_pagar` = pedidos entregues e ainda não pagos: o mesmo número de
+  fora_do_orcado, sem_etapa_do_orcamento, a_definir, entregue_a_pagar, etapas: [{etapa, nome, origem, total,
+  fora_do_orcado, entregue_a_pagar, topicos: [{topico_id, nome, total}]}]}`. `entregue_a_pagar` = pedidos entregues e ainda não pagos: o mesmo número de
   `financeiro.entregue_a_pagar` em `GET …/resumo` e de `totais.entregue_sem_pagamento` do desembolso. Por etapa: para
   cada pedido, o recebido menos o que já se pagou dele, repartido pelas etapas das linhas na proporção do recebido
   (linha sem etapa → `etapa: null`); o total da obra (que já desconta o pagamento adiantado de outro pedido) é então
@@ -641,7 +690,8 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   total**. Etapa que só tem entregue a pagar aparece com `total` 0 e `topicos` vazio. `total` =
   gastos avulsos (é o que soma no realizado do orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
   `fora_do_orcamento` e `sem_etapa_do_orcamento` = as partes do `total` nas extras e em chave fora da árvore (com
-  orçamento; sem orçamento é 0). `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
+  orçamento; sem orçamento é 0). `fora_do_orcado` (total e por etapa) = a parte do `total` lançada **fora de pedido**
+  numa obra com orçamento (ver "Gasto fora do orçado"); sem orçamento é 0. `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
   arquivados; as `sem_etapa_do_orcamento` vêm por último.
 - `PATCH /gastos/{gasto_id}` `{etapa, topico_id?}` (admin) → `Gasto + {etapa_nome, etapa_origem, registro_id}`. Muda a
   etapa (e o tópico; sem `topico_id` = sem tópico) de um gasto confirmado: é como o "sem etapa do orçamento" vai para

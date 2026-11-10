@@ -34,6 +34,8 @@ from ..esquemas import (
     ObraEdicao,
     ObraSaida,
     OrcamentoObra,
+    OrdemEtapasCorpo,
+    OrdemEtapasSaida,
     PedidoCorpo,
     PedidoEdicao,
     PedidoListado,
@@ -136,6 +138,21 @@ async def estrutura_como_orcamento(obra_id: str, corpo: EstruturaCorpo, response
     if criada:
         response.status_code = status.HTTP_201_CREATED
     return previa
+
+
+@r.post("/obras/{obra_id}/orcamento/etapas/ordem", response_model=OrdemEtapasSaida, tags=["orçamento"],
+        responses={201: {"description": "ordem gravada"}, 200: {"description": "repetição da chave"}})
+async def ordenar_etapas(obra_id: str, corpo: OrdemEtapasCorpo, response: Response,
+                         u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    """Muda a ordem das etapas antes de aprovar: um contrato novo no lugar do vigente, com as etapas renumeradas."""
+    try:
+        saida, criada = await versoes.reordenar_etapas(arm, u, obra_id, corpo.ordem, corpo.chave_idempotencia,
+                                                      corpo.versao_id)
+    except ConflitoDeId:
+        raise Conflito("Esta mudança já foi gravada agora há pouco; recarregue o orçamento.") from None
+    if criada:
+        response.status_code = status.HTTP_201_CREATED
+    return saida
 
 
 @r.get("/obras/{obra_id}/orcamento", response_model=OrcamentoObra, tags=["orçamento"])

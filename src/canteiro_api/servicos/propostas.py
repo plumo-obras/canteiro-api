@@ -413,6 +413,8 @@ async def desfazer(arm, u: UsuarioAtual, entrada_id: str) -> dict:
     elif receita_previa.get("op") == "desligar_versao" and (receita_previa.get("compras") or {}).get("arquivar"):
         await recusar_se_ha_pedido_aberto(arm, u.tenant_id, receita_previa["compras"]["obra_id"],
                                           [x["id"] for x in receita_previa["compras"]["arquivar"]])
+    elif receita_previa.get("op") == "desligar_versao" and receita_previa.get("renumeradas") and not previa["desfeito"]:
+        await versoes.recusar_se_renumeradas_em_uso(arm, u.tenant_id, previa["obra_id"], receita_previa["renumeradas"])
     elif (receita_previa.get("op") == "reabrir_orcamento" and receita_previa.get("aprovacao_id")
           and not previa["desfeito"]):
         await compras.desfazer_aprovacao(arm, u, entrada_id, receita_previa)

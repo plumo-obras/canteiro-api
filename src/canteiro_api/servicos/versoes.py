@@ -520,6 +520,20 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if tipo == TipoVersao.ADITIVO and not vigente:
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
     linhas = _somadas(existentes, vigente, itens) if somar else itens
+    renumeradas: dict[str, str] = {}
+    if somar and (ordem := _pranchas_depois_das_preliminares(vigente, linhas)):
+        if _chaves_que_mudam(linhas, ordem) & await etapas_em_uso(arm, u.tenant_id, obra_id):
+            ordem = None       # renumerar levaria o gasto (ou pedido) lançado numa etapa para outra
+        else:
+            renumeradas = _renumeradas_no_desfazer(linhas, ordem, {e["etapa"] for e in vigente["lista_etapas"]})
+            nomes = _nomes_das_etapas(linhas)
+            pranchas = vigente["lista_etapas"][0]["etapa"]
+            antes_dela = ordem[ordem.index(pranchas) - 1]
+            linhas = _reordenar(linhas, ordem)
+            # a prévia continua com os números de antes: são eles que valem na escolha de etapa (`etapas_itens`)
+            previa.avisos.append(Aviso(linha=0, mensagem=(
+                f"Ao somar, {nomes.get(pranchas, 'a etapa')} (das pranchas) vai para depois de "
+                f"{nomes.get(antes_dela, 'os serviços preliminares')}, e as etapas são renumeradas nessa ordem.")))
     if len(linhas) > MAX_LINHAS:
         raise ErroNegocio(f"Somado, o orçamento passaria de {MAX_LINHAS} linhas; troque o orçamento inteiro.")
     if not aplicar or erros:
@@ -542,20 +556,8 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao}
                       for e in (_totais_por_etapa(linhas) if somar else previa.etapas) if e.etapa],
         gerou_compras=bool(compras))
-    # Itens primeiro, ligados a uma versão que ainda não existe: ninguém os enxerga até a última transação criar a
-    # versão. Se o processo cair no meio, sobram itens órfãos invisíveis, e a mesma chave regrava os mesmos IDs.
     # no somar a `ordem` é a posição no contrato somado (o item novo entra no fim da etapa dele)
-    docs = [doc(ItemOrcamento(id=id_derivado(u.tenant_id, "item-orc", id_, str(ordem)), tenant_id=u.tenant_id,
-                              obra_id=obra_id, versao_id=id_, ordem=ordem,
-                              **x.model_dump(exclude={"ordem", "repetido_de"})))
-            for ordem, x in ((k if somar else x.ordem, x) for k, x in enumerate(linhas))]
-    for i in range(0, len(docs), ITENS_POR_TRANSACAO):
-        lote = docs[i:i + ITENS_POR_TRANSACAO]
-
-        async def gravar(tx, lote=lote):
-            for d in lote:
-                tx.salvar("itens_orcamento", d)
-        await arm.em_transacao(gravar)
+    await _gravar_itens(arm, u, obra_id, id_, linhas, por_posicao=somar)
 
     async def ativar(tx):
         if (await obra_do_tenant(tx, u.tenant_id, obra_id))["status"] != o["status"]:
@@ -573,16 +575,19 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         novos: list[dict] = []
         restaurar: list[dict] = []
 
+        # `origem` fica só no documento (fora do modelo do domínio): é o que a tela usa para dizer o que o Desfazer faz
+        d_versao = {**doc(versao), **({"origem": "somar"} if somar else {})}
+
         def aplicar_():
             _aplicar_compras(tx, u, obra_id, compras, lidos, novos, restaurar)
-            tx.criar("versoes_orcamento", doc(versao))
+            tx.criar("versoes_orcamento", d_versao)
             if anterior is not None:
                 tx.atualizar("versoes_orcamento", u.tenant_id, anterior["id"], {"ativa": False})
             if contrato is not None:
                 tx.atualizar("versoes_orcamento", u.tenant_id, contrato["id"], {"aditivos": contrato["aditivos"] + 1})
             evento(tx, u.tenant_id, "orcamento.versao", obra_id,
                    {"versao_id": id_, "tipo": tipo.value, "total": versao.total})
-            return doc(versao)
+            return d_versao
 
         if somar:
             n = previa.n_itens
@@ -600,6 +605,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
                       desfazer=lambda d: {
                           "op": "desligar_versao", "versao_id": id_, "reativar": anterior["id"] if anterior else None,
                           **({"somou": True} if somar else {}),
+                          **({"renumeradas": renumeradas} if renumeradas else {}),
                           **({"compras": receita_insumos(obra_id, f"compras do {_ordinal(numero)} aditivo",
                                                          arquivar=novos, restaurar=restaurar)}
                              if novos or restaurar else {})})
@@ -608,6 +614,123 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
 
     entrada = await arm.em_transacao(ativar)
     return previa.model_copy(update={"aplicado": True, "versao_id": id_, "registro_id": entrada["id"]}), True
+
+
+# Etapa que na obra vem antes de tudo: locação, tapume, barracão. As pranchas trazem a Estrutura, que vem depois dela.
+PRELIMINARES = re.compile(r"\b(preliminar(es)?|canteiro)\b")
+
+
+def _ordem_das_etapas(linhas) -> list[str]:
+    """As chaves de etapa na ordem em que aparecem (sem a linha solta, de etapa vazia)."""
+    vistas: dict[str, None] = {}
+    for x in linhas:
+        if x.etapa:
+            vistas.setdefault(x.etapa, None)
+    return list(vistas)
+
+
+def _nomes_das_etapas(linhas) -> dict[str, str]:
+    return {x.etapa: x.descricao for x in reversed(linhas) if x.tipo == "etapa" and x.nivel == 1}
+
+
+def _renumeradas(ordem: list[str]) -> dict[str, str]:
+    """{chave de antes: chave nova}. Só renumera quando todas são números: etapa sem numeração (chave pelo nome) só
+    muda de lugar."""
+    if not all(k.isdigit() for k in ordem):
+        return {k: k for k in ordem}
+    return {k: str(i) for i, k in enumerate(ordem, start=1)}
+
+
+def _chaves_que_mudam(linhas, ordem: list[str]) -> set[str]:
+    return {k for k, n in _renumeradas(ordem).items() if n != k} & set(_ordem_das_etapas(linhas))
+
+
+def _renumeradas_no_desfazer(linhas, ordem: list[str], chaves_antes: set[str]) -> dict[str, str]:
+    """{chave: etapa que ela passa a ser} das chaves que o contrato de antes também tem, com outro sentido. É o que o
+    Desfazer não pode devolver calado: o gasto lançado na "1" depois da mudança iria para a "1" de antes. Chave que
+    só o contrato novo tem não entra: desfeito, o lançamento nela aparece "sem etapa do orçamento", à vista."""
+    nomes = _nomes_das_etapas(linhas)
+    return {n: nomes.get(k, "") for k, n in _renumeradas(ordem).items() if n != k and n in chaves_antes}
+
+
+async def recusar_se_renumeradas_em_uso(leitor, tenant_id: str, obra_id: str, renumeradas: dict[str, str]) -> None:
+    """Antes do Desfazer de uma mudança de ordem (fora da transação, porque consulta)."""
+    if presas := sorted(set(renumeradas) & await etapas_em_uso(leitor, tenant_id, obra_id)):
+        raise Conflito("Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa "
+                       f"{', '.join(f'{k} {renumeradas[k]}'.strip() for k in presas)} depois da mudança de ordem: "
+                       "desfazer levaria o lançamento para outra etapa. Mude a etapa dele antes de desfazer.")
+
+
+def _reordenar(linhas: list[ItemPrevia], ordem: list[str]) -> list[ItemPrevia]:
+    """As linhas com as etapas na `ordem` dada, renumeradas 1..N (o número do item troca só o prefixo: "1.2" na etapa
+    que virou a 2 fica "2.2"). Linha sem etapa fica no fim, como estava. Preço, quantidade e edição vêm junto."""
+    nova = _renumeradas(ordem)
+    posicao = {k: i for i, k in enumerate(ordem)}
+    saida: list[ItemPrevia] = []
+    # sorted é estável: dentro da etapa, os itens ficam na ordem que tinham
+    for x in sorted(linhas, key=lambda x: posicao.get(x.etapa, len(ordem))):
+        y = x.model_copy()
+        if y.etapa in nova:
+            antes, y.etapa = y.etapa, nova[y.etapa]
+            p = y.numero.split(".")
+            if y.numero and p[0] == antes:
+                y.numero = ".".join([y.etapa, *p[1:]])
+        saida.append(y)
+    return saida
+
+
+def _pranchas_depois_das_preliminares(vigente: dict, linhas: list[ItemPrevia]) -> list[str] | None:
+    """No somar da planilha sobre o orçamento só das pranchas, a ordem em que a etapa das pranchas fica depois da
+    primeira etapa de serviços preliminares (ou canteiro) da planilha; None quando não há o que mudar. Sem etapa
+    assim, a das pranchas fica onde está: adivinhar a ordem da obra por outros nomes erraria mais do que acertaria."""
+    if not (vigente.get("arquivo") or "").endswith(SUFIXO_PROJETO) or len(vigente.get("lista_etapas") or []) != 1:
+        return None
+    pranchas = vigente["lista_etapas"][0]["etapa"]
+    ordem = _ordem_das_etapas(linhas)
+    nomes = _nomes_das_etapas(linhas)
+    prelim = next((k for k in ordem if k != pranchas and PRELIMINARES.search(_normal(nomes.get(k, "")))), None)
+    if prelim is None or pranchas not in ordem:
+        return None
+    nova = [k for k in ordem if k != pranchas]
+    nova.insert(nova.index(prelim) + 1, pranchas)
+    return nova if nova != ordem else None
+
+
+async def etapas_em_uso(leitor, tenant_id: str, obra_id: str) -> set[str]:
+    """As chaves de etapa que algum lançamento da obra guarda (gasto, pedido, tópico, movimento, insumo, cronograma).
+    Renumerar uma delas levaria o lançamento, calado, para outra etapa."""
+    from .cronograma import id_cronograma
+
+    def q(colecao: str, *filtros: Filtro):
+        return leitor.consultar(Consulta(colecao, tenant_id, [Filtro("obra_id", "==", obra_id), *filtros]))
+
+    usadas = {g.get("etapa") for g in await q("gastos", Filtro("estornado", "==", False))}
+    for p in await q("pedidos"):
+        if p["status"] != StatusPedido.CANCELADO:
+            usadas |= {x.get("etapa") for x in p.get("linhas", [])}
+    for colecao in ("topicos", "movimentos", "insumos"):
+        usadas |= {x.get("etapa") for x in await q(colecao)}
+    if c := await leitor.obter("cronogramas", tenant_id, id_cronograma(tenant_id, obra_id)):
+        usadas |= {e["etapa"] for e in c.get("etapas", [])} | set(c.get("acumulado") or {})
+    usadas.discard(None)
+    return usadas
+
+
+async def _gravar_itens(arm, u: UsuarioAtual, obra_id: str, versao_id: str, linhas: list[ItemPrevia], *,
+                        por_posicao: bool) -> None:
+    """Itens primeiro, ligados a uma versão que ainda não existe: ninguém os enxerga até a última transação criar a
+    versão. Se o processo cair no meio, sobram itens órfãos invisíveis, e a mesma chave regrava os mesmos IDs."""
+    docs = [doc(ItemOrcamento(id=id_derivado(u.tenant_id, "item-orc", versao_id, str(ordem)), tenant_id=u.tenant_id,
+                              obra_id=obra_id, versao_id=versao_id, ordem=ordem,
+                              **x.model_dump(exclude={"ordem", "repetido_de"})))
+            for ordem, x in ((k if por_posicao else x.ordem, x) for k, x in enumerate(linhas))]
+    for i in range(0, len(docs), ITENS_POR_TRANSACAO):
+        lote = docs[i:i + ITENS_POR_TRANSACAO]
+
+        async def gravar(tx, lote=lote):
+            for d in lote:
+                tx.salvar("itens_orcamento", d)
+        await arm.em_transacao(gravar)
 
 
 def _somadas(existentes: list[dict], vigente: dict, itens: list[ItemPrevia]) -> list[ItemPrevia]:
@@ -704,6 +827,87 @@ async def importar_estrutura(arm, u: UsuarioAtual, obra_id: str, corpo) -> tuple
                           chave=corpo.chave_idempotencia, somar=somar, ignorar=corpo.ignorar_itens)
 
 
+async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str], chave: str,
+                           versao_id: str | None = None) -> tuple[dict, bool]:
+    """Grava a ordem das etapas do orçamento (antes de aprovar) como um contrato novo no lugar do vigente, com as
+    etapas renumeradas 1..N e os itens junto. É a mesma mecânica do somar: o Desfazer religa o anterior. Devolve
+    ({versao_id, registro_id, etapas}, criado agora?)."""
+    o = await obra_do_tenant(arm, u.tenant_id, obra_id)
+    assinatura = hashlib.sha256(f"reordenar|{ordem}".encode()).hexdigest()
+    id_ = id_versao(u.tenant_id, obra_id, chave)
+    if ja := await arm.obter("versoes_orcamento", u.tenant_id, id_):
+        if ja["assinatura"] != assinatura:
+            raise Conflito("Esta chave de idempotência já foi usada para outra mudança do orçamento.")
+        return _reordenacao(u.tenant_id, ja), False
+    recusar_se_desfazendo(o)
+    if o["status"] != "em_orcamento":
+        raise Conflito("O orçamento já foi aprovado: a ordem das etapas não muda mais.")
+    vigente = _contrato_vigente(await versoes_da_obra(arm, u.tenant_id, obra_id))
+    if not vigente:
+        raise ErroNegocio("Ainda não há orçamento nesta obra para ordenar as etapas.")
+    if versao_id and versao_id != vigente["id"]:
+        # depois de uma reordenação as chaves são sempre 1..N: a lista montada na tela velha passaria na conferência
+        raise Conflito("O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem.")
+    if vigente.get("aditivos", 0) > 0:
+        raise Conflito("Há aditivo valendo sobre este orçamento; desfaça o aditivo antes de mudar a ordem.")
+    existentes = await itens_das_versoes(arm, u.tenant_id, obra_id, [vigente])
+    linhas = [ItemPrevia.model_validate(x) for x in existentes]
+    atual = _ordem_das_etapas(linhas)
+    if len(ordem) != len(set(ordem)) or set(ordem) != set(atual):
+        raise ErroNegocio("Mande todas as etapas do orçamento, cada uma uma vez: "
+                          f"{', '.join(atual)}.")
+    if ordem == atual:
+        raise ErroNegocio("Nada mudou: as etapas já estão nesta ordem.")
+    if presas := sorted(_chaves_que_mudam(linhas, ordem) & await etapas_em_uso(arm, u.tenant_id, obra_id)):
+        nomes = _nomes_das_etapas(linhas)
+        raise Conflito("Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa "
+                       f"{', '.join(f'{k} {nomes.get(k, "")}'.strip() for k in presas)}: renumerar levaria o "
+                       "lançamento para outra etapa.")
+    renumeradas = _renumeradas_no_desfazer(linhas, ordem, set(atual))
+    linhas = _reordenar(linhas, ordem)
+    so_itens = [x for x in linhas if x.tipo == "item"]
+    versao = VersaoOrcamento(
+        id=id_, tenant_id=u.tenant_id, obra_id=obra_id, tipo=TipoVersao.CONTRATO, descricao=vigente["descricao"],
+        data=vigente.get("data"), arquivo=vigente.get("arquivo", ""), itens=len(so_itens),
+        etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in linhas), total=sum(x.total for x in so_itens),
+        substitui=vigente["id"], assinatura=assinatura,
+        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao} for e in _totais_por_etapa(linhas) if e.etapa])
+    d_versao = {**doc(versao), "origem": "reordenar"}
+    await _gravar_itens(arm, u, obra_id, id_, linhas, por_posicao=True)
+
+    async def ativar(tx):
+        if (await obra_do_tenant(tx, u.tenant_id, obra_id))["status"] != "em_orcamento":
+            raise Conflito("O orçamento foi aprovado enquanto você mudava a ordem; abra de novo.")
+        if await tx.obter("versoes_orcamento", u.tenant_id, id_):
+            raise Conflito("Esta mudança já foi gravada.")
+        anterior = await tx.obter("versoes_orcamento", u.tenant_id, vigente["id"])
+        if not anterior["ativa"] or any(anterior.get(k, 0) != vigente.get(k, 0)
+                                        for k in ("total", "edicoes", "aditivos")):
+            # os itens copiados são os de antes: gravar perderia o que mudou no meio
+            raise Conflito("O orçamento mudou enquanto você mudava a ordem; abra de novo.")
+
+        def aplicar_():
+            tx.criar("versoes_orcamento", d_versao)
+            tx.atualizar("versoes_orcamento", u.tenant_id, anterior["id"], {"ativa": False})
+            evento(tx, u.tenant_id, "orcamento.versao", obra_id,
+                   {"versao_id": id_, "tipo": TipoVersao.CONTRATO.value, "total": versao.total})
+            return d_versao
+
+        op = Operacao(obra_id=obra_id, aplicar=aplicar_,
+                      texto=lambda d: f"Reordenou as etapas do orçamento de {o['nome']}",
+                      desfazer=lambda d: {"op": "desligar_versao", "versao_id": id_, "reativar": anterior["id"],
+                                          "reordenou": True, "renumeradas": renumeradas})
+        executar_e_registrar(tx, u, op, registro_id=id_derivado(u.tenant_id, "registro", id_))
+
+    await arm.em_transacao(ativar)
+    return _reordenacao(u.tenant_id, d_versao), True
+
+
+def _reordenacao(tenant_id: str, v: dict) -> dict:
+    return {"versao_id": v["id"], "registro_id": id_derivado(tenant_id, "registro", v["id"]),
+            "etapas": v["lista_etapas"]}
+
+
 async def _previa_gravada(arm, u: UsuarioAtual, v: dict) -> PreviaVersao:
     """A repetição da chave devolve o que foi gravado, sem ler o arquivo de novo."""
     itens = await arm.consultar(Consulta("itens_orcamento", u.tenant_id, [Filtro("versao_id", "==", v["id"])]))
@@ -748,6 +952,8 @@ async def preparar_desligar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
     nome = "contrato" if v["tipo"] == TipoVersao.CONTRATO else f"{_ordinal(v['numero'])} aditivo"
     if receita.get("somou"):
         texto = f"Desfeito: os itens somados ao orçamento de {o['nome']} saíram (o anterior volta a valer)"
+    elif receita.get("reordenou"):
+        texto = f"Desfeito: as etapas do orçamento de {o['nome']} voltaram à ordem de antes"
     else:
         texto = (f"Desfeito: {nome} de {o['nome']} retirado" + (" (o anterior volta a valer)" if reativar else ""))
     return Operacao(obra_id=v["obra_id"], aplicar=aplicar,
@@ -791,7 +997,9 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
     andamento["comprometido"] += fora
     andamento["realizado"] += fora
     return OrcamentoObra(
-        versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"])} for v in versoes],
+        versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"]), **_textos_da_versao(v, versoes),
+                  "situacao": await _situacao(arm, tenant_id, v)}
+                 for v in versoes],
         itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
                                saldo=contratado + aditivos - andamento["comprometido"],
@@ -804,6 +1012,43 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                                                              sem_etapa_do_orcamento=avulsos.sem_etapa_do_orcamento,
                                                              a_definir=avulsos.a_definir),
                                **andamento))
+
+
+async def _situacao(leitor, tenant_id: str, v: dict) -> str:
+    """Desligada pelo Desfazer dela mesma é "desfeita"; desligada por outra (reimportação, somar, reordenar) é
+    "substituida". `ativa` não basta: nas duas ela fica false. É o registro da versão que diz se ela foi desfeita;
+    numa cadeia (pranchas → somar → reordenar) cada elo tem o seu, então não há cadeia a seguir."""
+    if v["ativa"]:
+        return "vigente"
+    e = await leitor.obter("registro", tenant_id, id_derivado(tenant_id, "registro", v["id"]))
+    return "desfeita" if e and e.get("desfeito") else "substituida"
+
+
+def _n_itens(n: int) -> str:
+    return f"{n} {'item' if n == 1 else 'itens'}"
+
+
+def _textos_da_versao(v: dict, versoes: list[dict]) -> dict:
+    """O nome da versão e o que o Desfazer dela faz, em palavras de obra: "Estrutura (projeto).csv" é o nome que a API
+    grava para reconhecer as pranchas (`SUFIXO_PROJETO`), não um arquivo que a pessoa enviou."""
+    das_pranchas = (v.get("arquivo") or "").endswith(SUFIXO_PROJETO)
+    anterior = next((x for x in versoes if x["id"] == v.get("substitui")), None)
+    origem = v.get("origem")
+    desfazer = None
+    if origem == "reordenar":
+        rotulo = "Etapas reordenadas"
+        desfazer = "Volta as etapas do orçamento para a ordem de antes."
+    elif origem == "somar":
+        o_que = "os materiais das pranchas" if das_pranchas else "a planilha"
+        rotulo = f"Orçamento com {o_que} somad{'os' if das_pranchas else 'a'}"
+        if anterior:
+            desfazer = (f"Volta o orçamento para antes de somar {o_que} "
+                        f"({fmt_reais(anterior['total'])}, {_n_itens(anterior['itens'])}).")
+    elif das_pranchas:
+        rotulo = "Materiais das pranchas"
+    else:
+        rotulo = v.get("descricao") or v.get("arquivo") or "Orçamento"
+    return {"rotulo": rotulo, "desfazer_texto": desfazer}
 
 
 async def itens_das_versoes(leitor, tenant_id: str, obra_id: str, versoes_: list[dict]) -> list[dict]:

@@ -672,6 +672,25 @@ class TotaisOrcamento(_Andamento):
 
 class VersaoComRegistro(VersaoOrcamento):
     registro_id: str = Field(description="a EntradaRegistro da importação: é o que o Desfazer da versão usa")
+    origem: Literal["somar", "reordenar"] | None = Field(
+        None, description="contrato gravado pelo somar (planilha ou pranchas) ou pela ordem das etapas")
+    rotulo: str = Field("", description="o nome da versão para a pessoa (sem nome de arquivo do sistema)")
+    desfazer_texto: str | None = Field(None, description="o que o Desfazer desta versão faz; null = a tela diz o dela")
+    situacao: Literal["vigente", "substituida", "desfeita"] = Field(
+        "vigente", description="desligada pelo próprio Desfazer = desfeita; tirada por outra versão = substituida")
+
+
+class OrdemEtapasCorpo(Entrada):
+    ordem: list[str] = Field(min_length=1, max_length=200, description="as chaves das etapas do orçamento vigente, "
+                                                                        "todas, na ordem nova")
+    chave_idempotencia: str = Field(min_length=8, max_length=64)
+    versao_id: str | None = Field(None, max_length=64, description="o contrato vigente que a tela viu; outro → 409")
+
+
+class OrdemEtapasSaida(BaseModel):
+    versao_id: str
+    registro_id: str
+    etapas: list[EtapaRef] = Field(description="as etapas já renumeradas, na ordem nova")
 
 
 class OrcamentoObra(BaseModel):
@@ -1315,6 +1334,7 @@ class DescartarCorpo(Entrada):
 class GastoSaida(Gasto):
     etapa_nome: str | None = None
     etapa_origem: Origem | None = None
+    fora_do_orcado: bool = Field(False, description="lançado fora de pedido numa obra com orçamento (derivado)")
 
 
 class ReclassificarCorpo(Entrada):
@@ -1443,6 +1463,7 @@ class EtapaNoResumo(BaseModel):
     total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
     topicos: list[TopicoNoResumo]
     entregue_a_pagar: int = Field(0, description="pedidos desta etapa entregues e ainda não pagos (centavos)")
+    fora_do_orcado: int = Field(0, description="parte do total lançada fora de pedido (com orçamento)")
 
 
 class ResumoGastos(BaseModel):
@@ -1451,6 +1472,8 @@ class ResumoGastos(BaseModel):
     a_revisar: int = Field(description="comprovantes esperando revisão (não contam em nada)")
     tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
+    fora_do_orcado: int = Field(0, description="parte do total lançada fora de pedido, com orçamento (hoje: todo o "
+                                               "total; sem orçamento, 0)")
     sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
     a_definir: int = Field(0, description='parte do total confirmada sem etapa ("ver depois")')
     entregue_a_pagar: int = Field(0, description="pedidos entregues e ainda não pagos: o mesmo do resumo da obra e "

@@ -117,11 +117,19 @@ async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], 
     return dict(base), {x["id"]: x["nome"] for x in extras}, {t["id"]: t["nome"] for t in topicos}
 
 
+def fora_do_orcado(g: dict, tem_orcamento: bool) -> bool:
+    """Gasto lançado fora de pedido numa obra com orçamento. O critério é de propósito o simples: casar a descrição
+    do comprovante ("vidros 4mm", "diária do pedreiro") com o serviço do orçamento erra muito para os dois lados, e
+    o pedido é o que liga o dinheiro a um item. Só marca: o gasto continua somando onde já somava."""
+    return tem_orcamento and soma_nos_gastos_avulsos(g)
+
+
 def _com_etapa(g: dict, orcamento: dict[str, str], extras: dict[str, str]) -> dict:
     """O gasto com o nome e a origem da etapa dele: a lista de lançados mostra "sem etapa do orçamento" sem a tela
     precisar cruzar com a árvore."""
     return {**g, "etapa_nome": nome_da_etapa(g["etapa"], orcamento=orcamento, extras=extras),
-            "etapa_origem": origem_da_etapa(g["etapa"], orcamento)}
+            "etapa_origem": origem_da_etapa(g["etapa"], orcamento),
+            "fora_do_orcado": fora_do_orcado(g, bool(orcamento))}
 
 
 def _rotulo(etapa: str, topico_id: str | None, orcamento: dict[str, str], extras: dict[str, str],
@@ -429,7 +437,8 @@ async def listar_comprovantes(arm, u: UsuarioAtual, obra_id: str, status: Status
 async def confirmar(arm, u: UsuarioAtual, comprovante_id: str, corpo: ConfirmarCorpo) -> dict:
     c = await comprovante_do_tenant(arm, u.tenant_id, comprovante_id)
     obra_id = c["obra_id"]
-    arvore = await arvore_da_obra(arm, u.tenant_id, obra_id)
+    base = await base_da_arvore(arm, u.tenant_id, obra_id)
+    arvore = await arvore_da_obra(arm, u.tenant_id, obra_id, base)
     validado = validar_gasto(valor=corpo.valor, data_pagamento=corpo.data_pagamento, favorecido=corpo.favorecido,
                              descricao=corpo.descricao, etapa=corpo.etapa, topico_id=corpo.topico_id, arvore=arvore,
                              hoje=hoje())
@@ -482,7 +491,8 @@ async def confirmar(arm, u: UsuarioAtual, comprovante_id: str, corpo: ConfirmarC
         _, reg = executar_e_registrar(tx, u, op)
         evento(tx, u.tenant_id, "gasto.confirmado", obra_id, {"gasto_id": g["id"], "comprovante_id": comprovante_id})
         comp = {**atual, "status": StatusComprovante.CONFIRMADO.value, "gasto_id": g["id"]}
-        return {"gasto": g, "comprovante": comp, "registro_id": reg["id"]}
+        return {"gasto": {**g, "fora_do_orcado": fora_do_orcado(g, bool(base))}, "comprovante": comp,
+                "registro_id": reg["id"]}
 
     return await arm.em_transacao(corpo_tx)
 
@@ -607,9 +617,10 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
                   "nome": topicos_por_id[tid]["nome"] if tid in topicos_por_id else "Sem tópico"}
                  for tid, v in por_topico.items()]
         itens.sort(key=lambda x: (x["topico_id"] is None, x["nome"]))
+        total = sum(por_topico.values())
         etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
-                       "origem": origem_da_etapa(chave, orcamento), "total": sum(por_topico.values()),
-                       "topicos": itens})
+                       "origem": origem_da_etapa(chave, orcamento), "total": total,
+                       "fora_do_orcado": total if orcamento else 0, "topicos": itens})
     # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o realizado de lá
     no_orcamento = gastos_no_orcamento(gastos, orcamento)
     # Pedido que chegou já é gasto (realizado) antes de ser pago: sem isto, a aba mostra só os avulsos e o "gasto até
@@ -623,11 +634,13 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
         e["entregue_a_pagar"] = a_pagar.pop(e["etapa"], 0)
     for chave in sorted(a_pagar, key=posicao):
         etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
-                       "origem": origem_da_etapa(chave, orcamento), "total": 0, "topicos": [],
+                       "origem": origem_da_etapa(chave, orcamento), "total": 0, "fora_do_orcado": 0, "topicos": [],
                        "entregue_a_pagar": a_pagar[chave]})
     etapas.sort(key=lambda e: posicao(e["etapa"]))
     return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
             "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
+            # todo gasto avulso é fora de pedido (`fora_do_orcado`): com orçamento, é o total inteiro
+            "fora_do_orcado": no_orcamento.total if orcamento else 0,
             "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "a_definir": no_orcamento.a_definir,
             "entregue_a_pagar": total_a_pagar,
             "etapas": etapas}
