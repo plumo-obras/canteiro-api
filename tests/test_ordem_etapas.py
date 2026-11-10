@@ -47,6 +47,8 @@ async def test_somar_a_planilha_poe_as_pranchas_depois_das_fundacoes(vila):
     # a prévia segue com os números de antes (são os da escolha de etapa) e avisa da ordem
     assert [(e["etapa"], e["descricao"]) for e in previa["etapas"]] == [("2", "SERVIÇOS PRELIMINARES"),
                                                                        ("3", "FUNDAÇÕES")]
+    # ... e diz com que número cada etapa é gravada: o mesmo que o orçamento mostra depois
+    assert previa["numeracao"] == {"1": "3", "2": "1", "3": "2"}
     assert [a["mensagem"] for a in previa["avisos"] if a["linha"] == 0] == [
         "Ao somar, Estrutura (das pranchas) vai para depois de FUNDAÇÕES, e as etapas são renumeradas "
         "nessa ordem."]
@@ -114,7 +116,7 @@ async def test_sem_preliminares_nem_fundacoes_ou_com_lancamento_as_pranchas_fica
     t = await vila.http.post(f"/obras/{o['id']}/topicos", headers=vila.h, json={"etapa": "1", "nome": "Pilares"})
     assert t.status_code == 201, t.text
     previa = (await versao(vila, o["id"], PLANILHA, m, somar="true")).json()
-    assert not [a for a in previa["avisos"] if a["linha"] == 0]
+    assert not [a for a in previa["avisos"] if a["linha"] == 0] and previa["numeracao"] == {}
     assert (await versao(vila, o["id"], PLANILHA, m, aplicar=True, somar="true")).status_code == 201
     assert [(e["etapa"], e["descricao"]) for e in (await orcamento(vila, o["id"]))["etapas"]] == [
         ("1", "Estrutura"), ("2", "SERVIÇOS PRELIMINARES"), ("3", "FUNDAÇÕES")]

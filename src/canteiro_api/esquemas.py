@@ -614,6 +614,9 @@ class PreviaVersao(BaseModel):
     etapas: list[TotalEtapa]
     substitui: Substituida | None = None
     total_apos: int | None = Field(None, description="no somar: o orçamento depois de somar (o vigente + `total`)")
+    numeracao: dict[str, str] = Field(default_factory=dict, description=(
+        "no somar que reordena: {chave de etapa da prévia: número com que ela é gravada}, só das que mudam. A prévia "
+        "segue com as chaves de antes (são elas que valem em `etapas_itens`); a tela mostra o número daqui."))
     versao_id: str | None = None
     registro_id: str | None = None
 
