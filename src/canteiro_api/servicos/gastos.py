@@ -612,9 +612,22 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
                        "topicos": itens})
     # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o realizado de lá
     no_orcamento = gastos_no_orcamento(gastos, orcamento)
+    # Pedido que chegou já é gasto (realizado) antes de ser pago: sem isto, a aba mostra só os avulsos e o "gasto até
+    # hoje" do placar parece não bater. Total pela conta do desembolso; por etapa, repartido pelas linhas do pedido.
+    lista_pedidos = await versoes.pedidos_da_obra(arm, u.tenant_id, obra_id)
+    realizado = sum(g["realizado"] for g in versoes.andamento_dos_pedidos(lista_pedidos).values()) + no_orcamento.total
+    a_pagar = {k or None: v for k, v in versoes.a_pagar_por_etapa(lista_pedidos, gastos).items()}
+    for e in etapas:
+        e["entregue_a_pagar"] = a_pagar.pop(e["etapa"], 0)
+    for chave in sorted(a_pagar, key=posicao):
+        etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
+                       "origem": origem_da_etapa(chave, orcamento), "total": 0, "topicos": [],
+                       "entregue_a_pagar": a_pagar[chave]})
+    etapas.sort(key=lambda e: posicao(e["etapa"]))
     return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
             "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
             "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "a_definir": no_orcamento.a_definir,
+            "entregue_a_pagar": versoes.entregue_a_pagar(realizado, sum(g["valor"] for g in gastos)),
             "etapas": etapas}
 
 

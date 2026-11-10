@@ -463,12 +463,22 @@ async def test_estrutura_vira_contrato_com_etapa_e_desfaz(vila):
     assert not any(v["ativa"] for v in orc2["versoes"]) and orc2["totais"]["atual"] == 0
 
 
-async def test_estrutura_vira_aditivo_quando_ja_ha_contrato(vila):
+async def test_estrutura_soma_antes_de_aprovar_e_vira_aditivo_depois(vila):
     o = await nova_obra(vila)
     url = f"/obras/{o['id']}/orcamento/estrutura"
-    # primeiro contrato
     await aplicar_estrutura(vila, o["id"], ESTRUTURA)
-    # de novo: já há contrato → aditivo
+    # de novo, antes de aprovar: soma ao contrato (o mesmo material volta marcado como repetido)
+    p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
+    assert p["tipo"] == "contrato" and p["substitui"]
+    assert all(x["repetido_de"] for x in p["itens"] if x["tipo"] == "item")
+    r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)
+    assert r.status_code == 201, r.text
+    orc = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()
+    assert [v["tipo"] for v in orc["versoes"] if v["ativa"]] == ["contrato"]
+    assert orc["totais"]["aditivos"] == 0 and orc["totais"]["n_itens"] == 4 and orc["totais"]["n_etapas"] == 1
+    assert [x["numero"] for x in orc["itens"]] == ["1", "1.1", "1.2", "1.3", "1.4"]
+    # depois de aprovar: aditivo
+    assert (await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)).status_code == 200
     p = (await vila.http.post(url, headers=vila.h, json=ESTRUTURA)).json()
     assert p["tipo"] == "aditivo"
     r = await aplicar_estrutura(vila, o["id"], ESTRUTURA)

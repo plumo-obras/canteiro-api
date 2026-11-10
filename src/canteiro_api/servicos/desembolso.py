@@ -207,7 +207,8 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
         termino_no_ritmo=cron._mes(fins[1]) if fins[1] is not None else None, meses=meses, etapas=linhas,
         totais=TotaisDesembolso(orcado=orcado, realizado=realizado_total, pago=pago_total,
                                 falta=sum(pelo_plano.values()) + sem_mes, custo_final=custo_final,
-                                desvio=custo_final - orcado, entregue_sem_pagamento=max(0, entregue_sem_pagamento),
+                                desvio=custo_final - orcado,
+                                entregue_sem_pagamento=versoes.entregue_a_pagar(realizado_total, pago_total),
                                 sem_mes=sem_mes))
 
 

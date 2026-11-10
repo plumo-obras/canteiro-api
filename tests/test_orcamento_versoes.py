@@ -98,8 +98,9 @@ async def test_erros_e_avisos(vila):
     await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)
     p = (await versao(vila, o["id"], ADITIVO, mapa(linha_cabecalho=2), tipo="aditivo")).json()
     assert p["erros"] == []
-    # o aviso compara dentro da planilha: o aditivo tem o 92915 em m² só uma vez, então nada
-    assert p["avisos"] == []
+    # o aviso de unidade compara dentro da planilha: o aditivo tem o 92915 em m² só uma vez, então nada; o que sobra é
+    # o de repetido (o 92915 já está no contrato)
+    assert [a["linha"] for a in p["avisos"]] == [7] and "parece repetir" in p["avisos"][0]["mensagem"]
     dupla = xlsx(CABECALHO, ["1.1", "92915", "SINAPI", "Aço", "kg", 1, 10, None],
                  ["1.2", "92915", "SINAPI", "Aço", "m²", 1, 10, None])
     p = (await versao(vila, o["id"], dupla, mapa(linha_cabecalho=1))).json()
@@ -263,3 +264,148 @@ async def test_aditivo_cai_nas_etapas_do_contrato_pelo_codigo_ou_pela_escolha(vi
     ruim = await versao(vila, o["id"], ADITIVO_A1, m, tipo="aditivo", descricao="x", data="2026-11-20",
                         etapas_itens=json.dumps({str(aterro): "9"}))
     assert ruim.status_code == 422
+
+
+# --- somar ao orçamento antes de aprovar, etapa pelo nome, item repetido ---
+
+# Como as pranchas entram: uma etapa "Estrutura" numerada 1, com os materiais.
+PRANCHAS = xlsx(CABECALHO, ["1", None, None, "Estrutura", None, None, None, None],
+                ["1.1", None, None, "Concreto usinado fck 25", "m³", 20, 500, 10000],
+                ["1.2", None, None, "Aço CA-50", "kg", 1000, 10, 10000],
+                ["1.3", None, None, "Forma de madeira", "m²", 100, 50, 5000])
+# A planilha do engenheiro: a etapa 1 dela é outra (serviços preliminares), e a estrutura vem como etapa 2.
+PLANILHA = xlsx(CABECALHO, ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                ["1.1", None, None, "Locação da obra", "m²", 530, 5, 2650],
+                ["1.2", None, None, "Tapume", "m", 100, 40, 4000],
+                ["2", None, None, "ESTRUTURA", None, None, None, None],
+                ["2.1", None, None, "Concreto fck 25 sapatas", "m³", 30, 600, 18000],
+                ["2.2", None, None, "Aço CA-50 10 mm", "kg", 500, 12, 6000],
+                ["2.3", None, None, "Porta de madeira", "m²", 4, 300, 1200])
+
+
+def _por_desc(p):
+    return {x["descricao"]: x for x in p["itens"] if x["tipo"] == "item"}
+
+
+async def test_somar_ao_orcamento_antes_de_aprovar(vila):
+    o = await nova_obra(vila)
+    m = mapa(linha_cabecalho=1)
+    sem = await versao(vila, o["id"], PLANILHA, m, somar="true")
+    assert sem.status_code == 422 and "importe a planilha" in sem.json()["detail"]
+    c = (await versao(vila, o["id"], PRANCHAS, m, aplicar=True)).json()
+    forma = next(x for x in (await orcamento(vila, o["id"]))["itens"] if x["descricao"] == "Forma de madeira")
+    # a edição feita no orçamento vigente vai junto para o somado
+    e = await vila.http.patch(f"/obras/{o['id']}/orcamento/itens/{forma['id']}", headers=vila.h,
+                              json={"valor_unitario": 4000})
+    assert e.status_code == 200, e.text
+    assert (await versao(vila, o["id"], PLANILHA, m, tipo="aditivo", somar="true")).status_code == 422
+
+    p = (await versao(vila, o["id"], PLANILHA, m, somar="true")).json()
+    assert p["tipo"] == "contrato" and p["erros"] == []
+    itens = _por_desc(p)
+    # Serviços preliminares não cai na Estrutura pelo número 1: vira a etapa 2, com os números trocados
+    assert [(itens[d]["etapa"], itens[d]["numero"], itens[d]["etapa_origem"]) for d in ("Locação da obra", "Tapume")] \
+        == [("2", "2.1", "planilha"), ("2", "2.2", "planilha")]
+    # a ESTRUTURA da planilha casa com a Estrutura das pranchas pelo nome e continua a numeração dela
+    assert [(itens[d]["etapa"], itens[d]["numero"], itens[d]["etapa_origem"])
+            for d in ("Concreto fck 25 sapatas", "Aço CA-50 10 mm", "Porta de madeira")] == [
+        ("1", "1.4", "nome"), ("1", "1.5", "nome"), ("1", "1.6", "nome")]
+    assert itens["Concreto fck 25 sapatas"]["repetido_de"]["descricao"] == "Concreto usinado fck 25"
+    assert itens["Aço CA-50 10 mm"]["repetido_de"] == {
+        "item_id": next(x["id"] for x in (await orcamento(vila, o["id"]))["itens"] if x["descricao"] == "Aço CA-50"),
+        "descricao": "Aço CA-50", "quantidade": 1000000, "unidade": "kg"}
+    assert itens["Porta de madeira"]["repetido_de"] is None and itens["Tapume"]["repetido_de"] is None
+    assert sorted(a["linha"] for a in p["avisos"]) == [6, 7]
+    assert p["total"] == 3185000 and p["substitui"]["total"] == 2400000 and p["total_apos"] == 5585000
+    assert [(e["etapa"], e["descricao"]) for e in p["etapas"]] == [("2", "SERVIÇOS PRELIMINARES"), ("1", "Estrutura")]
+
+    concreto = itens["Concreto fck 25 sapatas"]["ordem"]
+    chave = uuid.uuid4().hex
+    extra = {"somar": "true", "ignorar_itens": json.dumps([concreto])}
+    r = await versao(vila, o["id"], PLANILHA, m, aplicar=True, chave=chave, **extra)
+    assert r.status_code == 201, r.text
+    # o ignorado sai, e a numeração fecha sem buraco
+    assert "Concreto fck 25 sapatas" not in _por_desc(r.json())
+    reg = await registro(vila, r.json()["registro_id"])
+    assert reg["texto"] == f"Somou 4 itens ao orçamento de {o['nome']} (+R$ 13.850,00)"
+    repete = await versao(vila, o["id"], PLANILHA, m, aplicar=True, chave=chave, **extra)
+    assert repete.status_code == 200 and repete.json()["versao_id"] == r.json()["versao_id"]
+    outro = await versao(vila, o["id"], PLANILHA, m, aplicar=True, chave=chave, somar="true")
+    assert outro.status_code == 409
+
+    orc = await orcamento(vila, o["id"])
+    assert [v["tipo"] for v in orc["versoes"] if v["ativa"]] == ["contrato"]
+    assert [(x["numero"], x["descricao"]) for x in orc["itens"]] == [
+        ("1", "Estrutura"), ("1.1", "Concreto usinado fck 25"), ("1.2", "Aço CA-50"), ("1.3", "Forma de madeira"),
+        ("1.4", "Aço CA-50 10 mm"), ("1.5", "Porta de madeira"),
+        ("2", "SERVIÇOS PRELIMINARES"), ("2.1", "Locação da obra"), ("2.2", "Tapume")]
+    assert next(x for x in orc["itens"] if x["descricao"] == "Forma de madeira")["valor_unitario"] == 4000
+    t = orc["totais"]
+    assert (t["contratado"], t["aditivos"], t["aditivos_pct"], t["n_itens"]) == (2400000 + 1385000, 0, 0, 7)
+
+    d = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+    assert d.json()["texto"] == (f"Desfeito: os itens somados ao orçamento de {o['nome']} saíram "
+                                 "(o anterior volta a valer)")
+    volta = await orcamento(vila, o["id"])
+    assert volta["totais"]["contratado"] == 2400000 and volta["totais"]["n_itens"] == 3
+    assert [v["id"] for v in volta["versoes"] if v["ativa"]] == [c["versao_id"]]
+
+    # aprovado, somar é recusado: o caminho é o aditivo
+    assert (await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)).status_code == 200
+    depois = await versao(vila, o["id"], PLANILHA, m, somar="true")
+    assert depois.status_code == 422 and "aditivo" in depois.json()["detail"]
+
+
+async def test_aditivo_casa_a_etapa_pelo_nome_e_nao_pelo_numero(vila):
+    o = await nova_obra(vila)
+    await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)
+    adit = xlsx(CABECALHO, ["1", None, None, "ESQUADRIAS", None, None, None, None],
+                ["1.1", "1", "PRÓPRIO", "Janela de alumínio", "m²", 4, 500, None],
+                ["3", None, None, "Fundações", None, None, None, None],
+                ["3.1", "2", "PRÓPRIO", "Viga baldrame", "m³", 2, 800, None])
+    p = (await versao(vila, o["id"], adit, mapa(linha_cabecalho=1), tipo="aditivo")).json()
+    itens = _por_desc(p)
+    # ESQUADRIAS não é a etapa 1 do contrato (serviços preliminares): etapa nova, no próximo número livre
+    assert [itens["Janela de alumínio"][k] for k in ("etapa", "numero", "etapa_origem", "etapa_planilha")] == [
+        "3", "3.1", "planilha", "1"]
+    # Fundações casa com a FUNDAÇÕES do contrato (etapa 2) e continua a numeração dela
+    assert [itens["Viga baldrame"][k] for k in ("etapa", "numero", "etapa_origem", "etapa_planilha")] == [
+        "2", "2.3", "nome", "3"]
+    assert [(e["etapa"], e["descricao"]) for e in p["etapas"]] == [("3", "ESQUADRIAS"), ("2", "FUNDAÇÕES")]
+    r = await versao(vila, o["id"], adit, mapa(linha_cabecalho=1), tipo="aditivo", aplicar=True)
+    assert r.status_code == 201, r.text
+    orc = await orcamento(vila, o["id"])
+    assert [(e["etapa"], e["descricao"], e["aditivos"]) for e in orc["etapas"]] == [
+        ("1", "SERVIÇOS PRELIMINARES", 0), ("2", "FUNDAÇÕES", 160000), ("3", "ESQUADRIAS", 200000)]
+
+
+async def test_percentual_de_aditivo_sobre_o_orcamento_somado(vila):
+    o = await nova_obra(vila)
+    m = mapa(linha_cabecalho=1)
+    await versao(vila, o["id"], PRANCHAS, m, aplicar=True)
+    s = await versao(vila, o["id"], PLANILHA, m, aplicar=True, somar="true")
+    assert s.status_code == 201, s.text
+    assert (await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)).status_code == 200
+    extra = xlsx(CABECALHO, ["9", None, None, "PAISAGISMO", None, None, None, None],
+                 ["9.1", None, None, "Grama", "m²", 100, 10, 1000])
+    a = await versao(vila, o["id"], extra, m, tipo="aditivo", aplicar=True, descricao="grama")
+    assert a.status_code == 201, a.text
+    t = (await orcamento(vila, o["id"]))["totais"]
+    # a base é o orçamento aprovado inteiro (pranchas + planilha = R$ 56.850), não só as pranchas (R$ 25.000)
+    assert (t["contratado"], t["aditivos"], t["aditivos_pct"]) == (5685000, 100000, 176)
+
+
+def test_parece_repetido():
+    from canteiro_api.servicos.versoes import _parecidos, _termos
+
+    def par(a, b):
+        return _parecidos(_termos(a), _termos(b))
+
+    assert par("Concreto fck 25 sapatas", "Concreto usinado fck 25")
+    assert par("Aço CA-50 10 mm", "Aço CA-50")
+    assert par("Tapume de madeira", "TAPUME DE MADEIRA")
+    assert not par("Forma de madeira", "Porta de madeira")
+    assert not par("Concreto fck 25", "Concreto fck 30")
+    assert not par("Aço CA-50 10 mm", "Aço CA-50 8 mm")
+    assert not par("Pintura látex PVA paredes", "Pintura látex acrílica teto")

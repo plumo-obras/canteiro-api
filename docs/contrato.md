@@ -206,8 +206,10 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 
 - `POST /obras/{obra_id}/orcamento/estrutura` (JSON `{etapa?, itens: [{nome, unidade, quantidade, valor_unitario}],
   aplicar, chave_idempotencia?}`, admin) → `PreviaVersao`. Os materiais do projeto viram uma **versão do orçamento**
-  (uma etapa, "Estrutura" por padrão), em vez da lista de materiais: vira **contrato** se a obra ainda não tem um,
-  **aditivo** se já tem. Reaproveita a importação de versão (prévia, gravação em versão, Desfazer). `quantidade` em
+  (uma etapa, "Estrutura" por padrão), em vez da lista de materiais: vira **contrato** se a obra ainda não tem um;
+  com contrato e a obra ainda em orçamento, **soma ao contrato** (o mesmo `somar` de `…/orcamento/versoes`: etapa pelo
+  nome, `repetido_de`, Desfazer volta o anterior); com o orçamento aprovado, **aditivo**. `ignorar_itens?` (lista de
+  `ordem`, ≤ 500) tira itens da prévia e da gravação. Reaproveita a importação de versão (prévia, gravação em versão, Desfazer). `quantidade` em
   milésimos, `valor_unitario` em centavos; 201 quando grava. É alternativa ao `…/orcamento/materiais` (lista de
   materiais em Compras): aqui o projeto entra como orçamento por etapa.
 
@@ -230,10 +232,14 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   etapa; etapa sem número tem como chave o próprio nome normalizado (sem acento, minúsculo), e é assim que a "FUNDAÇÕES"
   de um aditivo sem numeração soma na do contrato; `""` antes da 1ª etapa; `linha` = linha da planilha (1-based). Etapa tem unidade `""` e quantidade/valores 0.
 - `POST /obras/{obra_id}/orcamento/versoes` (multipart `arquivo`, `mapeamento` = JSON, `tipo` = `contrato` | `aditivo`,
-  `descricao?` (≤ 200), `data?`, `aplicar` = bool, `chave_idempotencia` (obrigatória com `aplicar`)) → `PreviaVersao` =
+  `descricao?` (≤ 200), `data?`, `aplicar` = bool, `chave_idempotencia` (obrigatória com `aplicar`), `etapas_itens?`,
+  `somar?` = bool (padrão `false`), `ignorar_itens?` = JSON lista de `ordem`) → `PreviaVersao` =
   `{aplicado, tipo, itens: [ItemPrevia], ignoradas, erros, avisos: [{linha, mensagem}], total, n_itens, n_etapas,
-  etapas: [{etapa, descricao, total}], substitui: {versao_id, total, itens} | null, versao_id, registro_id}`
-  (`ItemPrevia` = `ItemOrcamento` sem `id/obra_id/versao_id`; `versao_id`/`registro_id` só depois de aplicar).
+  etapas: [{etapa, descricao, total}], substitui: {versao_id, total, itens} | null, total_apos, versao_id, registro_id}`
+  (`ItemPrevia` = `ItemOrcamento` sem `id/obra_id/versao_id`, mais `etapa_origem`, `etapa_planilha` e `repetido_de`;
+  `versao_id`/`registro_id` só depois de aplicar).
+  - `ignorar_itens` (JSON `[3, 7]`, as `ordem` da prévia; inválido → 422): esses itens saem da prévia e da gravação
+    (ordem que não é de item é ignorada). Entra na assinatura de idempotência, como `somar` e `etapas_itens`.
   - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
   - **Etapa**: linha com descrição, sem unidade e sem quantidade, que não é subtotal/total (descrição começando por
     "subtotal", "total" ou "soma" → ignorada). **Item**: descrição + unidade + quantidade ≠ 0. Resto vazio → ignorado.
@@ -251,6 +257,34 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     versão já gravada (200); a mesma chave com outro arquivo/tipo → 409.
   - Desfazer (`desligar_versao`): a versão sai de vigência e a que ela substituiu volta. 409 se ela já não está
     vigente (outra reimportação passou por cima) ou se, ao desfazer um contrato, há aditivo vigente criado depois dele.
+- **Somar ao orçamento** (`somar=true`, antes de aprovar): completa o orçamento com outra planilha (o caso de quem
+  levou as pranchas e agora traz a planilha), **sem aditivo**. Só com `tipo=contrato`, a obra em orçamento e um contrato
+  vigente; senão 422 ("Somar vale para o orçamento, não para o aditivo." / "O orçamento já foi aprovado: para
+  acrescentar itens, lance um aditivo." / "Ainda não há orçamento para somar…"). Grava um **contrato novo** = as
+  linhas do vigente (com as edições feitas nele) + as da planilha, cada uma no fim da sua etapa e as etapas novas no
+  fim; ele `substitui` o vigente, então `GET …/orcamento` mostra um contrato só e `aditivos` = 0. Prévia: `itens`,
+  `total`, `n_itens`, `etapas` = **só o que entra**; `substitui` = o vigente; `total_apos` = `substitui.total + total`
+  (o orçamento depois de somar; `null` fora do somar). Registro "Somou N itens ao orçamento de X (+R$ T)", desfazer
+  `desligar_versao` (com `somou: true`): o somado sai e o anterior volta ("Desfeito: os itens somados ao orçamento de X
+  saíram (o anterior volta a valer)"). 409 se o vigente mudou (edição, outra importação) entre a prévia e a gravação.
+  Somado com mais de 2000 linhas → 422. A mesma chave devolve a versão gravada: aí `itens`/`total` são os do contrato
+  somado inteiro. Depois de aprovado nada muda: contrato novo continua 409 e o caminho é o aditivo.
+- **Etapa pelo nome** (no somar e no aditivo): a etapa da planilha casa com a do orçamento vigente (contrato e
+  aditivos) pelo **nome** (sem acento, sem caixa, espaços e pontuação normalizados), nunca pelo número: "1 SERVIÇOS
+  PRELIMINARES" não entra na "1 Estrutura". Casou → os itens vão para ela (`etapa_origem: "nome"` quando a chave muda).
+  Não casou → **etapa nova**, com o número da planilha se ele está livre, senão o próximo livre (maior número + 1);
+  `etapa_planilha` guarda o original. Etapa da planilha sem linha de título não tem nome para comparar e fica na chave
+  que veio. **Números:** etapa nova que mudou de número troca o prefixo ("1.2" → "3.2"); no somar, item que entra em
+  etapa que já existe continua a numeração dela (2.3, 2.4…, sem repetir); no aditivo, item que casou na mesma etapa,
+  ou foi pelo código ou pela escolha, guarda o número da planilha (ele aponta o item do contrato que acresce ou
+  suprime). No somar, o título da etapa que já existe não se repete.
+- **Item repetido** (no somar e no aditivo, só na prévia): item da planilha que parece já estar no orçamento vigente
+  ganha `repetido_de: {item_id, descricao, quantidade, unidade}` (o item vigente) e um aviso em `avisos` ("Concreto
+  fck 25 sapatas parece repetir Concreto usinado fck 25 (20 m³), que já está no orçamento."). Critério: o mesmo
+  `fonte|codigo` (código com algum dígito); ou a mesma unidade e a mesma 1ª palavra com um número em comum, sem
+  número que desdiga ("Concreto fck 25 sapatas" × "Concreto usinado fck 25" e "Aço CA-50 10 mm" × "Aço CA-50" sim;
+  "Forma de madeira" × "Porta de madeira" e "fck 25" × "fck 30" não); ou a descrição igual. Supressão (quantidade
+  negativa) não é marcada. Só avisa: a pessoa tira com `ignorar_itens`.
 - `GET /obras/{obra_id}/orcamento` (qualquer papel) → `{versoes: [VersaoOrcamento], itens: [ItemOrcamento + {curva}],
   etapas: [{etapa, descricao, contratado, aditivos, atual}], totais: {contratado, aditivos, atual, n_itens, n_etapas}}`.
   `versoes`: todas, a mais nova primeiro (inclusive as desligadas, para o histórico), cada uma com o `registro_id` da
@@ -258,10 +292,11 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   contrato primeiro e aditivos pela ordem do número, cada um pela `ordem`. `curva` (A/B/C) dos itens pelo `total` da
   linha, na régua do 80/95%, só entre itens com total > 0 (etapas: `null`). `etapas` soma por `etapa` (descrição da
   linha de etapa do contrato; a do aditivo se a etapa só existe nele). Sem nenhuma versão: listas vazias e totais 0.
-- **Aditivo nas etapas do contrato:** no `tipo=aditivo`, cada item vai para a etapa do contrato onde o mesmo
-  `fonte|codigo` aparece (`etapa_origem: "codigo"`); o resto fica na etapa da planilha (`"planilha"`). O campo
+- **Aditivo nas etapas do contrato:** no `tipo=aditivo`, primeiro a etapa pelo nome (acima); item de etapa que não
+  casou vai para a etapa do contrato onde o mesmo `fonte|codigo` aparece (`etapa_origem: "codigo"`); o resto fica na
+  etapa da planilha (`"planilha"`, eventualmente com o número trocado). O campo
   `etapas_itens` (JSON `{"ordem": "etapa"}`) aponta a etapa de itens específicos (`"escolhida"`; etapa que não existe
-  no contrato nem no aditivo → 422). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
+  no orçamento nem na planilha → 422; vale a chave da prévia ou a original da planilha). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
   sem item some da versão.
 - **Previsto × realizado** (Fase 3): cada etapa e os totais trazem também `cotando`, `comprometido` e `realizado`
   (centavos), somados das linhas dos pedidos da obra pela `etapa` de cada linha. `cotando` = pedidos em cotação ·
@@ -282,7 +317,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
 - **Contas prontas** (a tela e o agente só mostram): cada etapa traz `saldo` (= `atual − comprometido`, centavos;
   negativo quando estourou) e `estourou` (`comprometido > atual`); `totais` traz `saldo` (o mesmo, da obra) e
   `aditivos_pct` = aditivos sobre o contratado em **centésimos de %** (290 = 2,9%; arredondado ao mais próximo) ou
-  `null` sem contrato.
+  `null` sem contrato. A base (`contratado`) é o total do **contrato vigente**: o orçamento aprovado inteiro, já com o
+  que foi somado antes de aprovar (pranchas + planilha), não só a primeira importação. Sem aditivo de verdade, 0. É
+  número neutro (não há limite legal: obra privada).
 - `PATCH /obras/{obra_id}/orcamento/itens/{item_id}` (admin) `{quantidade?, valor_unitario?}` → `{item: ItemOrcamento,
   total_versao, registro_id}`. O total da linha vira quantidade × unitário, e a diferença soma no total da versão.
   Título de etapa, quantidade zero, quantidade negativa fora de aditivo, preço negativo ou nada mudou → 422; versão fora
@@ -481,7 +518,10 @@ atual de cada etapa (contrato + aditivos vigentes).
     saldo, falta_gastar, realizado_pct, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de `GET …/orcamento`;
     `realizado` e `comprometido` já com os gastos avulsos, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra:
     `falta_gastar` = orçado atual − realizado (nunca negativo; realizado + falta fecham no orçado) e `realizado_pct` =
-    realizado ÷ orçado em centésimos de ponto (`null` sem orçado).
+    realizado ÷ orçado em centésimos de ponto (`null` sem orçado). `pago` = todo gasto confirmado e não estornado
+    (avulso e pagamento de pedido) e `entregue_a_pagar` = `max(0, realizado − pago)`, a mesma conta de `totais.pago` e
+    `totais.entregue_sem_pagamento` do desembolso: **realizado ("gasto até hoje") = pago + entregue_a_pagar**, salvo
+    quando se pagou além do entregue (adiantamento), em que `entregue_a_pagar` = 0 e `pago` > `realizado`.
   - `entregas`: `{hoje, atrasadas, proximos_7_dias, sem_previsao, nf_para_conferir}`; cada entrega =
     `{pedido_id, numero, fornecedor, status, previsao, itens: [{nome, unidade, falta_entregar}]}`, só pedidos de
     aprovado a parcial, pela `previsao` "AAAA-MM-DD" (outro formato conta em `sem_previsao`).
@@ -592,7 +632,12 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   `etapa_origem` (`orcamento` | `padrao` | `extra` | `sem_etapa_do_orcamento`): a tela marca "sem etapa do orçamento"
   e oferece mudar a etapa.
 - `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, tem_orcamento, fora_do_orcamento,
-  sem_etapa_do_orcamento, etapas: [{etapa, nome, origem, total, topicos: [{topico_id, nome, total}]}]}`. `total` =
+  sem_etapa_do_orcamento, a_definir, entregue_a_pagar, etapas: [{etapa, nome, origem, total, entregue_a_pagar,
+  topicos: [{topico_id, nome, total}]}]}`. `entregue_a_pagar` = pedidos entregues e ainda não pagos: o mesmo número de
+  `financeiro.entregue_a_pagar` em `GET …/resumo` e de `totais.entregue_sem_pagamento` do desembolso. Por etapa: para
+  cada pedido, o recebido menos o que já se pagou dele, repartido pelas etapas das linhas na proporção do recebido
+  (linha sem etapa → `etapa: null`); etapa que só tem entregue a pagar aparece com `total` 0 e `topicos` vazio. A soma
+  das etapas fecha no total, salvo pedido pago além do recebido (aí o total desconta e a etapa não). `total` =
   gastos avulsos (é o que soma no realizado do orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
   `fora_do_orcamento` e `sem_etapa_do_orcamento` = as partes do `total` nas extras e em chave fora da árvore (com
   orçamento; sem orçamento é 0). `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já

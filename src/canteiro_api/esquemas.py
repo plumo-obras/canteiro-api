@@ -550,6 +550,16 @@ class EstruturaCorpo(Entrada):
     itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
     aplicar: bool = False
     chave_idempotencia: str | None = Field(None, max_length=64)
+    ignorar_itens: list[int] = Field(default_factory=list, max_length=500,
+                                     description="`ordem` dos itens da prévia que não entram (ex.: repetidos)")
+
+
+class RepetidoDe(BaseModel):
+    """O item do orçamento vigente que este da planilha parece repetir (a pessoa decide se importa)."""
+    item_id: str
+    descricao: str
+    quantidade: int
+    unidade: str
 
 
 class ItemPrevia(BaseModel):
@@ -566,10 +576,12 @@ class ItemPrevia(BaseModel):
     valor_unitario: int
     total: int
     linha: int
-    # só no aditivo: de onde veio a etapa do item. "planilha" = como veio; "codigo" = o mesmo código está nesta etapa
-    # do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).
-    etapa_origem: Literal["planilha", "codigo", "escolhida"] = "planilha"
+    # no aditivo e no somar: de onde veio a etapa do item. "planilha" = como veio (ou etapa nova, com o número
+    # trocado se ele já era de outra); "nome" = etapa de mesmo nome no orçamento; "codigo" = o mesmo código está nesta
+    # etapa do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).
+    etapa_origem: Literal["planilha", "nome", "codigo", "escolhida"] = "planilha"
     etapa_planilha: str = ""
+    repetido_de: RepetidoDe | None = None
 
 
 class Aviso(BaseModel):
@@ -601,6 +613,7 @@ class PreviaVersao(BaseModel):
     n_etapas: int
     etapas: list[TotalEtapa]
     substitui: Substituida | None = None
+    total_apos: int | None = Field(None, description="no somar: o orçamento depois de somar (o vigente + `total`)")
     versao_id: str | None = None
     registro_id: str | None = None
 
@@ -830,6 +843,9 @@ class ResumoFinanceiro(BaseModel):
     falta_gastar: int = Field(0, description="orçado atual − realizado, nunca negativo")
     realizado_pct: int | None = Field(None, description="realizado ÷ orçado atual, em centésimos de ponto percentual "
                                                         "(4,8% = 480); None sem orçado")
+    # "gasto até hoje" (realizado) = pago + entregue_a_pagar: o pedido que chegou já conta como gasto antes de ser pago
+    pago: int = Field(0, description="todos os gastos confirmados (avulsos e pagamentos de pedido), como no desembolso")
+    entregue_a_pagar: int = Field(0, description="realizado − pago, nunca negativo: entregue e ainda sem pagamento")
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
 
@@ -1426,6 +1442,7 @@ class EtapaNoResumo(BaseModel):
     origem: Origem
     total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
     topicos: list[TopicoNoResumo]
+    entregue_a_pagar: int = Field(0, description="pedidos desta etapa entregues e ainda não pagos (centavos)")
 
 
 class ResumoGastos(BaseModel):
@@ -1436,4 +1453,6 @@ class ResumoGastos(BaseModel):
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
     sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
     a_definir: int = Field(0, description='parte do total confirmada sem etapa ("ver depois")')
+    entregue_a_pagar: int = Field(0, description="pedidos entregues e ainda não pagos: o mesmo do resumo da obra e "
+                                                 "do desembolso")
     etapas: list[EtapaNoResumo]
