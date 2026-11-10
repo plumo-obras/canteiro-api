@@ -306,14 +306,16 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
 
     resumo = (await vila.http.get(f"/obras/{obra}/gastos/resumo", headers=h)).json()
     assert resumo == {"total": 35000, "pagamentos_de_pedidos": 0, "a_revisar": 0, "tem_orcamento": False,
-                      "fora_do_orcamento": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0,
+                      "fora_do_orcamento": 0, "fora_do_orcado": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0,
                       "entregue_a_pagar": 0, "etapas": [
         {"etapa": "eletrica", "nome": "Instalações elétricas", "origem": "padrao", "total": 35000,
-         "entregue_a_pagar": 0,
+         "entregue_a_pagar": 0, "fora_do_orcado": 0,
          "topicos": [{"topico_id": t["id"], "nome": "Quadro", "total": 35000}]}]}
     gastos = (await vila.http.get(f"/obras/{obra}/gastos?etapa=eletrica", headers=h)).json()
-    assert [(g["id"], g["etapa_nome"], g["etapa_origem"]) for g in gastos] == [
-        (conf["gasto"]["id"], "Instalações elétricas", "padrao")]
+    # sem orçamento não há o que ficar de fora dele
+    assert [(g["id"], g["etapa_nome"], g["etapa_origem"], g["fora_do_orcado"]) for g in gastos] == [
+        (conf["gasto"]["id"], "Instalações elétricas", "padrao", False)]
+    assert conf["gasto"]["fora_do_orcado"] is False
     entrada = next(e for e in (await vila.http.get(f"/registro?obra_id={obra}", headers=h)).json()
                    if e["id"] == conf["registro_id"])
     assert entrada["texto"] == ("Gasto de R$ 350,00 em Instalações elétricas › Quadro: mão de obra do eletricista "
