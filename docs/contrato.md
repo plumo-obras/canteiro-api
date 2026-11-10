@@ -280,13 +280,14 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   saíram (o anterior volta a valer)"). 409 se o vigente mudou (edição, outra importação) entre a prévia e a gravação.
   Somado com mais de 2000 linhas → 422. A mesma chave devolve a versão gravada: aí `itens`/`total` são os do contrato
   somado inteiro. Depois de aprovado nada muda: contrato novo continua 409 e o caminho é o aditivo.
-  - **Pranchas depois dos preliminares** (só no somar): se o vigente é só das pranchas (uma etapa, gravada por
-    `…/orcamento/estrutura`) e a planilha traz uma etapa cujo nome tem "preliminar" ou "canteiro", a etapa das
-    pranchas vai para **logo depois** dela e as etapas do contrato somado são renumeradas 1..N nessa ordem (os itens
-    trocam só o prefixo: "2.1" → "1.1"). Sem etapa assim, a das pranchas fica onde está (adivinhar a ordem da obra
+  - **Pranchas depois das fundações** (só no somar): se o vigente é só das pranchas (uma etapa, gravada por
+    `…/orcamento/estrutura`) e a planilha traz uma etapa cujo nome tem "fundação"/"fundações" ou "infraestrutura",
+    a etapa das pranchas vai para **logo depois** dela (da última, se vierem em sequência); sem ela, para logo
+    depois da primeira cujo nome tem "preliminar" ou "canteiro". As etapas do contrato somado são renumeradas
+    1..N nessa ordem (os itens trocam só o prefixo: "2.1" → "1.1"). Sem etapa assim, a das pranchas fica onde está (adivinhar a ordem da obra
     por outros nomes erraria mais do que acertaria). A **prévia continua com os números de antes** (são eles que
     valem em `etapas_itens`) e traz um aviso com `linha: 0`: "Ao somar, Estrutura (das pranchas) vai para depois de
-    SERVIÇOS PRELIMINARES, e as etapas são renumeradas nessa ordem." Se já há lançamento numa etapa que mudaria de
+    FUNDAÇÕES, e as etapas são renumeradas nessa ordem." Se já há lançamento numa etapa que mudaria de
     número (ver "Ordem das etapas"), não reordena nem avisa.
 - **Ordem das etapas** (antes de aprovar): `POST /obras/{obra_id}/orcamento/etapas/ordem` (JSON `{ordem: [chave da
   etapa], chave_idempotencia (8–64), versao_id?}`, admin) → `{versao_id, registro_id, etapas: [{etapa, descricao}]}` (201; a mesma

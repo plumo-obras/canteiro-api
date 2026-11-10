@@ -1,6 +1,6 @@
-"""Ordem das etapas antes de aprovar: a etapa das pranchas vai para depois dos serviços preliminares ao somar a
-planilha, e a pessoa reordena à mão (contrato novo no lugar do vigente, com Desfazer). E o gasto fora de pedido sai
-marcado "fora do orçado"."""
+"""Ordem das etapas antes de aprovar: a etapa das pranchas vai para depois das fundações (ou dos serviços preliminares)
+ao somar a planilha, e a pessoa reordena à mão (contrato novo no lugar do vigente, com Desfazer). E o gasto fora de
+pedido sai marcado "fora do orçado"."""
 import uuid
 
 from conftest import nova_vila
@@ -34,7 +34,7 @@ async def _ordem(vila, obra, ordem, chave=None):
                                 json={"ordem": ordem, "chave_idempotencia": chave or uuid.uuid4().hex})
 
 
-async def test_somar_a_planilha_poe_as_pranchas_depois_dos_preliminares(vila):
+async def test_somar_a_planilha_poe_as_pranchas_depois_das_fundacoes(vila):
     o = await nova_obra(vila)
     p = await _pranchas(vila, o["id"])
     orc = await orcamento(vila, o["id"])
@@ -48,7 +48,7 @@ async def test_somar_a_planilha_poe_as_pranchas_depois_dos_preliminares(vila):
     assert [(e["etapa"], e["descricao"]) for e in previa["etapas"]] == [("2", "SERVIÇOS PRELIMINARES"),
                                                                        ("3", "FUNDAÇÕES")]
     assert [a["mensagem"] for a in previa["avisos"] if a["linha"] == 0] == [
-        "Ao somar, Estrutura (das pranchas) vai para depois de SERVIÇOS PRELIMINARES, e as etapas são renumeradas "
+        "Ao somar, Estrutura (das pranchas) vai para depois de FUNDAÇÕES, e as etapas são renumeradas "
         "nessa ordem."]
 
     s = await versao(vila, o["id"], PLANILHA, m, aplicar=True, somar="true")
@@ -56,10 +56,10 @@ async def test_somar_a_planilha_poe_as_pranchas_depois_dos_preliminares(vila):
     orc = await orcamento(vila, o["id"])
     assert _numeros(orc) == [
         ("1", "SERVIÇOS PRELIMINARES"), ("1.1", "Locação da obra"), ("1.2", "Tapume"),
-        ("2", "Estrutura"), ("2.1", "Concreto usinado fck 25"), ("2.2", "Aço CA-50"),
-        ("3", "FUNDAÇÕES"), ("3.1", "Escavação manual")]
+        ("2", "FUNDAÇÕES"), ("2.1", "Escavação manual"),
+        ("3", "Estrutura"), ("3.1", "Concreto usinado fck 25"), ("3.2", "Aço CA-50")]
     assert [(e["etapa"], e["descricao"]) for e in orc["etapas"]] == [
-        ("1", "SERVIÇOS PRELIMINARES"), ("2", "Estrutura"), ("3", "FUNDAÇÕES")]
+        ("1", "SERVIÇOS PRELIMINARES"), ("2", "FUNDAÇÕES"), ("3", "Estrutura")]
     somada = next(v for v in orc["versoes"] if v["ativa"])
     assert (somada["origem"], somada["rotulo"], somada["desfazer_texto"]) == (
         "somar", "Orçamento com a planilha somada",
@@ -72,14 +72,41 @@ async def test_somar_a_planilha_poe_as_pranchas_depois_dos_preliminares(vila):
     assert _numeros(volta) == [("1", "Estrutura"), ("1.1", "Concreto usinado fck 25"), ("1.2", "Aço CA-50")]
 
 
-async def test_sem_preliminares_ou_com_lancamento_as_pranchas_ficam_onde_estao(vila):
+async def test_fundacoes_em_sequencia_ou_sem_elas(vila):
     m = mapa(linha_cabecalho=1)
-    so_fundacao = xlsx(CABECALHO, ["1", None, None, "FUNDAÇÕES", None, None, None, None],
-                       ["1.1", None, None, "Escavação manual", "m³", 48, 65, 3120])
+    # sem preliminares, as fundações bastam; vindo em sequência, a Estrutura entra depois da última
+    fundacoes = xlsx(CABECALHO, ["1", None, None, "Infra-estrutura", None, None, None, None],
+                     ["1.1", None, None, "Estaca", "m", 48, 65, 3120],
+                     ["2", None, None, "Fundações - blocos", None, None, None, None],
+                     ["2.1", None, None, "Forma", "m²", 10, 50, 500],
+                     ["3", None, None, "ALVENARIA", None, None, None, None],
+                     ["3.1", None, None, "Bloco", "m²", 10, 50, 500])
     o = await nova_obra(vila)
     await _pranchas(vila, o["id"])
-    assert (await versao(vila, o["id"], so_fundacao, m, aplicar=True, somar="true")).status_code == 201
-    assert [e["descricao"] for e in (await orcamento(vila, o["id"]))["etapas"]] == ["Estrutura", "FUNDAÇÕES"]
+    assert (await versao(vila, o["id"], fundacoes, m, aplicar=True, somar="true")).status_code == 201
+    assert [e["descricao"] for e in (await orcamento(vila, o["id"]))["etapas"]] == [
+        "Infra-estrutura", "Fundações - blocos", "Estrutura", "ALVENARIA"]
+
+    # sem fundações, logo depois dos preliminares
+    so_prelim = xlsx(CABECALHO, ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                     ["1.1", None, None, "Tapume", "m", 100, 40, 4000],
+                     ["2", None, None, "ALVENARIA", None, None, None, None],
+                     ["2.1", None, None, "Bloco", "m²", 10, 50, 500])
+    o = await nova_obra(vila)
+    await _pranchas(vila, o["id"])
+    assert (await versao(vila, o["id"], so_prelim, m, aplicar=True, somar="true")).status_code == 201
+    assert [e["descricao"] for e in (await orcamento(vila, o["id"]))["etapas"]] == [
+        "SERVIÇOS PRELIMINARES", "Estrutura", "ALVENARIA"]
+
+
+async def test_sem_preliminares_nem_fundacoes_ou_com_lancamento_as_pranchas_ficam_onde_estao(vila):
+    m = mapa(linha_cabecalho=1)
+    so_alvenaria = xlsx(CABECALHO, ["1", None, None, "ALVENARIA", None, None, None, None],
+                        ["1.1", None, None, "Bloco", "m²", 10, 50, 500])
+    o = await nova_obra(vila)
+    await _pranchas(vila, o["id"])
+    assert (await versao(vila, o["id"], so_alvenaria, m, aplicar=True, somar="true")).status_code == 201
+    assert [e["descricao"] for e in (await orcamento(vila, o["id"]))["etapas"]] == ["Estrutura", "ALVENARIA"]
 
     # um tópico já lançado na Estrutura (etapa 1): renumerar o levaria para os preliminares
     o = await nova_obra(vila)
@@ -114,16 +141,16 @@ async def test_reordenar_as_etapas_antes_de_aprovar(vila, http, arm, config):
             ).status_code == 404
 
     chave = uuid.uuid4().hex
-    r = await _ordem(vila, o["id"], ["3", "1", "2"], chave)
+    r = await _ordem(vila, o["id"], ["2", "1", "3"], chave)
     assert r.status_code == 201, r.text
     assert r.json()["etapas"] == [{"etapa": "1", "descricao": "FUNDAÇÕES"},
                                   {"etapa": "2", "descricao": "SERVIÇOS PRELIMINARES"},
                                   {"etapa": "3", "descricao": "Estrutura"}]
     assert (await registro(vila, r.json()["registro_id"]))["texto"] == \
         f"Reordenou as etapas do orçamento de {o['nome']}"
-    repete = await _ordem(vila, o["id"], ["3", "1", "2"], chave)
+    repete = await _ordem(vila, o["id"], ["2", "1", "3"], chave)
     assert repete.status_code == 200 and repete.json() == r.json()
-    assert (await _ordem(vila, o["id"], ["2", "1", "3"], chave)).status_code == 409
+    assert (await _ordem(vila, o["id"], ["3", "1", "2"], chave)).status_code == 409
 
     orc = await orcamento(vila, o["id"])
     assert _numeros(orc) == [
@@ -141,13 +168,13 @@ async def test_reordenar_as_etapas_antes_de_aprovar(vila, http, arm, config):
     assert d.status_code == 200, d.text
     assert d.json()["texto"] == f"Desfeito: as etapas do orçamento de {o['nome']} voltaram à ordem de antes"
     assert [x["descricao"] for x in (await orcamento(vila, o["id"]))["etapas"]] == [
-        "SERVIÇOS PRELIMINARES", "Estrutura", "FUNDAÇÕES"]
+        "SERVIÇOS PRELIMINARES", "FUNDAÇÕES", "Estrutura"]
 
     # lançamento numa etapa que mudaria de número: recusa, dizendo qual
     t = await vila.http.post(f"/obras/{o['id']}/topicos", headers=vila.h, json={"etapa": "3", "nome": "Sapatas"})
     assert t.status_code == 201, t.text
     presa = await _ordem(vila, o["id"], ["1", "3", "2"])
-    assert presa.status_code == 409 and "3 FUNDAÇÕES" in presa.json()["detail"], presa.text
+    assert presa.status_code == 409 and "3 Estrutura" in presa.json()["detail"], presa.text
 
     assert (await vila.http.post(f"/obras/{o['id']}/orcamento/aprovar", headers=vila.h)).status_code == 200
     assert (await _ordem(vila, o["id"], ["2", "1", "3"])).status_code == 409
@@ -178,7 +205,7 @@ async def test_gasto_fora_de_pedido_sai_marcado_fora_do_orcado(vila):
 
 
 async def _somado(vila):
-    """Obra com pranchas + planilha somada: 1 SERVIÇOS PRELIMINARES, 2 Estrutura, 3 FUNDAÇÕES."""
+    """Obra com pranchas + planilha somada: 1 SERVIÇOS PRELIMINARES, 2 FUNDAÇÕES, 3 Estrutura."""
     o = await nova_obra(vila)
     await _pranchas(vila, o["id"])
     s = await versao(vila, o["id"], PLANILHA, mapa(linha_cabecalho=1), aplicar=True, somar="true")
@@ -188,7 +215,7 @@ async def _somado(vila):
 
 async def test_desfazer_a_ordem_nao_leva_calado_o_gasto_lancado_depois(vila):
     o, _ = await _somado(vila)
-    r = await _ordem(vila, o["id"], ["3", "1", "2"])
+    r = await _ordem(vila, o["id"], ["2", "1", "3"])
     assert r.status_code == 201, r.text
     # depois da mudança, a "1" é FUNDAÇÕES; antes dela, era SERVIÇOS PRELIMINARES
     g = await _gasto(vila, o["id"], etapa="1", valor=12000)

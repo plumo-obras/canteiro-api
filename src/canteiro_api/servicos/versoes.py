@@ -616,8 +616,10 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     return previa.model_copy(update={"aplicado": True, "versao_id": id_, "registro_id": entrada["id"]}), True
 
 
-# Etapa que na obra vem antes de tudo: locação, tapume, barracão. As pranchas trazem a Estrutura, que vem depois dela.
+# Etapa que na obra vem antes de tudo: locação, tapume, barracão. As pranchas trazem a Estrutura, que vem depois dela
+# e depois das fundações ("infraestrutura" é o nome de orçamento para elas).
 PRELIMINARES = re.compile(r"\b(preliminar(es)?|canteiro)\b")
+FUNDACOES = re.compile(r"\b(fundac(ao|oes)|infra ?estrutura)\b")
 
 
 def _ordem_das_etapas(linhas) -> list[str]:
@@ -680,19 +682,26 @@ def _reordenar(linhas: list[ItemPrevia], ordem: list[str]) -> list[ItemPrevia]:
 
 
 def _pranchas_depois_das_preliminares(vigente: dict, linhas: list[ItemPrevia]) -> list[str] | None:
-    """No somar da planilha sobre o orçamento só das pranchas, a ordem em que a etapa das pranchas fica depois da
-    primeira etapa de serviços preliminares (ou canteiro) da planilha; None quando não há o que mudar. Sem etapa
-    assim, a das pranchas fica onde está: adivinhar a ordem da obra por outros nomes erraria mais do que acertaria."""
+    """No somar da planilha sobre o orçamento só das pranchas, a ordem em que a etapa das pranchas fica depois das
+    fundações da planilha (da última, quando vêm em sequência: "Fundações - estacas", "Fundações - blocos") ou, sem
+    elas, da primeira etapa de serviços preliminares (ou canteiro); None quando não há o que mudar. Sem etapa assim,
+    a das pranchas fica onde está: adivinhar a ordem da obra por outros nomes erraria mais do que acertaria."""
     if not (vigente.get("arquivo") or "").endswith(SUFIXO_PROJETO) or len(vigente.get("lista_etapas") or []) != 1:
         return None
     pranchas = vigente["lista_etapas"][0]["etapa"]
     ordem = _ordem_das_etapas(linhas)
     nomes = _nomes_das_etapas(linhas)
-    prelim = next((k for k in ordem if k != pranchas and PRELIMINARES.search(_normal(nomes.get(k, "")))), None)
-    if prelim is None or pranchas not in ordem:
+    if pranchas not in ordem:
         return None
     nova = [k for k in ordem if k != pranchas]
-    nova.insert(nova.index(prelim) + 1, pranchas)
+    eh = [(FUNDACOES.search(n) is not None, PRELIMINARES.search(n) is not None)
+          for n in (_normal(nomes.get(k, "")) for k in nova)]
+    if (i := next((i for i, (f, _) in enumerate(eh) if f), None)) is not None:
+        while i + 1 < len(nova) and eh[i + 1][0]:
+            i += 1
+    elif (i := next((i for i, (_, p) in enumerate(eh) if p), None)) is None:
+        return None
+    nova.insert(i + 1, pranchas)
     return nova if nova != ordem else None
 
 
