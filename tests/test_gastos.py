@@ -306,8 +306,10 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
 
     resumo = (await vila.http.get(f"/obras/{obra}/gastos/resumo", headers=h)).json()
     assert resumo == {"total": 35000, "pagamentos_de_pedidos": 0, "a_revisar": 0, "tem_orcamento": False,
-                      "fora_do_orcamento": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0, "etapas": [
+                      "fora_do_orcamento": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0,
+                      "entregue_a_pagar": 0, "etapas": [
         {"etapa": "eletrica", "nome": "Instalações elétricas", "origem": "padrao", "total": 35000,
+         "entregue_a_pagar": 0,
          "topicos": [{"topico_id": t["id"], "nome": "Quadro", "total": 35000}]}]}
     gastos = (await vila.http.get(f"/obras/{obra}/gastos?etapa=eletrica", headers=h)).json()
     assert [(g["id"], g["etapa_nome"], g["etapa_origem"]) for g in gastos] == [

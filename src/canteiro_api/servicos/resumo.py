@@ -152,7 +152,7 @@ def resumo_cronograma(c, hoje: date) -> ResumoCronograma:
     return r
 
 
-def resumo_financeiro(o) -> ResumoFinanceiro:
+def resumo_financeiro(o, pago: int = 0) -> ResumoFinanceiro:
     t = o.totais
     tem = any(v.ativa and v.tipo == "contrato" for v in o.versoes)
     if not tem and not t.comprometido and not t.cotando:
@@ -161,6 +161,7 @@ def resumo_financeiro(o) -> ResumoFinanceiro:
         tem_orcamento=tem, contratado=t.contratado, aditivos=t.aditivos, aditivos_pct=t.aditivos_pct,
         orcado_atual=t.atual, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado, saldo=t.saldo,
         falta_gastar=max(t.atual - t.realizado, 0),
+        pago=pago, entregue_a_pagar=versoes.entregue_a_pagar(t.realizado, pago),
         realizado_pct=t.realizado * 10000 // t.atual if t.atual > 0 else None,
         etapas_estouradas=[EtapaEstourada(etapa=e.etapa, descricao=e.descricao, saldo=e.saldo)
                            for e in o.etapas if e.estourou],
@@ -212,10 +213,12 @@ async def resumo_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> Resum
         Filtro("obra_id", "==", obra_id), Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     pendentes.sort(key=lambda x: x["criado_em"], reverse=True)
     por_id = {x["insumo"]["id"]: x["insumo"] for x in insumos}
+    # o mesmo pago do desembolso: todo gasto confirmado, avulso ou de pedido
+    pago = sum(g["valor"] for g in await versoes.gastos_da_obra(arm, tenant_id, obra_id))
     materiais = [x for x in insumos if x["insumo"].get("tipo", "material") == "material"]
     return ResumoDaObra(
         obra=obra, hoje=hoje.isoformat(), cronograma=resumo_cronograma(crono, hoje),
-        financeiro=resumo_financeiro(orc), entregas=resumo_entregas(pedidos, hoje, por_id),
+        financeiro=resumo_financeiro(orc, pago), entregas=resumo_entregas(pedidos, hoje, por_id),
         almoxarifado=ResumoAlmoxarifado(
             insumos=len(materiais),
             falta_comprar=[FaltaResumo(insumo_id=x["insumo"]["id"], nome=x["insumo"]["nome"],

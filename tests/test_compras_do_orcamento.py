@@ -12,7 +12,7 @@ from canteiro_api.servicos import compras, obras, versoes
 from canteiro_dominio.tipos import qtd, reais
 
 ETAPA = ["1", None, None, "FUNDAÇÕES", None, None, None, None]
-TAPUME = xlsx(CABECALHO, ["1", None, None, "PRELIMINARES", None, None, None, None],
+TAPUME = xlsx(CABECALHO, ["1", None, None, "Serviços preliminares", None, None, None, None],
               ["1.14", "74220/1", "SINAPI", "Tapume de chapa de madeira", "m²", 436, 45.23, 19720.28])
 SEM_PRECO = xlsx(CABECALHO, ETAPA, ["1.1", "1", "S", "Areia média", "m³", 10, 0, 0],
                  ["1.2", "2", "S", "Brita", "m³", 5, 100, 500])

@@ -38,6 +38,7 @@ from ..esquemas import (
     Mapeamento,
     OrcamentoObra,
     PreviaVersao,
+    RepetidoDe,
     Substituida,
     TotaisOrcamento,
     TotalEtapa,
@@ -242,44 +243,217 @@ def id_versao(tenant_id: str, obra_id: str, chave: str) -> str:
     return id_derivado(tenant_id, "versao", obra_id, chave)
 
 
-async def _apropriar_aditivo(arm, tenant_id: str, vigente: dict, itens: list[ItemPrevia],
-                             escolhidas: dict[int, str]) -> dict[str, str]:
-    """Põe cada item do aditivo na etapa do contrato onde ele conta. A planilha de aditivo costuma vir numa etapa só
-    ("A1 ACRÉSCIMOS"), e somar o tapume e o aço numa etapa à parte esconderia o estouro da fundação no previsto ×
-    realizado. Sugestão pelo código (o mesmo serviço do contrato está naquela etapa); a pessoa pode apontar outra.
-    Devolve {etapa: descrição} do contrato, para os totais."""
-    contrato = await arm.consultar(Consulta("itens_orcamento", tenant_id, [Filtro("versao_id", "==", vigente["id"])]))
-    descricoes = {e["etapa"]: e["descricao"] for e in vigente.get("lista_etapas", [])}
-    for x in contrato:
+def _proximo_livre(tomadas: set[str]) -> str:
+    return str(max((int(k) for k in tomadas if k.isdigit()), default=0) + 1)
+
+
+def _encaixar(itens: list[ItemPrevia], existentes: list[dict], etapas_vigentes: dict[str, str],
+              escolhidas: dict[int, str], *, somar: bool) -> dict[str, str]:
+    """Põe cada linha da planilha (aditivo ou somar) na etapa do orçamento vigente onde ela conta, e devolve
+    {etapa: descrição} das etapas vigentes, para os totais.
+
+    A etapa casa pelo NOME: "1 SERVIÇOS PRELIMINARES" da planilha não é a "1 Estrutura" das pranchas só porque
+    as duas são a etapa 1 (foi assim que Locação e Tapume caíram em Estrutura). Nome que não existe vira etapa nova,
+    com o número da planilha se ele está livre, senão o próximo livre. No aditivo, item de etapa que não casou vai
+    para a etapa do contrato onde está o mesmo código (a planilha de aditivo costuma vir numa etapa só, "A1
+    ACRÉSCIMOS", e somar o tapume e o aço à parte esconderia o estouro da fundação); a pessoa pode apontar outra
+    etapa na prévia."""
+    descricoes = dict(etapas_vigentes)
+    por_nome: dict[str, str] = {}
+    for x in existentes:
         if x["tipo"] == "etapa" and x["nivel"] == 1:
             descricoes.setdefault(x["etapa"], x["descricao"])
+            por_nome.setdefault(_normal(x["descricao"]), x["etapa"])
+    usadas = set(descricoes) | {x["etapa"] for x in existentes}
     etapa_do_codigo: dict[str, str] = {}
-    for x in sorted(contrato, key=lambda x: x["ordem"]):
-        if x["tipo"] == "item" and x.get("codigo") and any(c.isdigit() for c in x["codigo"]):
-            etapa_do_codigo.setdefault(f"{x.get('fonte', '').casefold()}|{x['codigo'].casefold()}", x["etapa"])
-    proprias = {x.etapa for x in itens if x.tipo == "etapa"}
+    if not somar:
+        for x in existentes:
+            if x["tipo"] == "item" and x.get("codigo") and any(c.isdigit() for c in x["codigo"]):
+                etapa_do_codigo.setdefault(f"{x.get('fonte', '').casefold()}|{x['codigo'].casefold()}", x["etapa"])
+
+    titulos: dict[str, str] = {}
     for x in itens:
-        if x.tipo != "item":
+        if x.tipo == "etapa" and x.nivel == 1:
+            titulos.setdefault(x.etapa, x.descricao)
+    destino: dict[str, tuple[str, bool]] = {}          # etapa da planilha -> (etapa final, casou pelo nome?)
+    tomadas = set(usadas)
+    for x in itens:
+        k = x.etapa
+        if k in destino:
             continue
+        nome = titulos.get(k)
+        if nome and (alvo := por_nome.get(_normal(nome))) is not None:
+            destino[k] = (alvo, True)
+        elif not nome or not k:
+            # sem título não há nome para comparar: a linha fica na chave que veio ("2.9" solto soma na etapa 2)
+            destino[k] = (k, False)
+        else:
+            alvo = _proximo_livre(tomadas) if k in tomadas else k
+            tomadas.add(alvo)
+            destino[k] = (alvo, False)
+
+    validas = usadas | {alvo for alvo, _ in destino.values()}
+    for x in itens:
+        alvo, pelo_nome = destino[x.etapa]
         x.etapa_planilha = x.etapa
+        if x.tipo != "item":
+            x.etapa = alvo
+            continue
         if x.ordem in escolhidas:
-            alvo = escolhidas[x.ordem]
-            if alvo not in descricoes and alvo not in proprias:
-                raise ErroNegocio(f"A etapa {alvo} não existe no contrato nem no aditivo.")
-            x.etapa, x.etapa_origem = alvo, "escolhida"
-        elif x.etapa not in descricoes and (e := etapa_do_codigo.get(f"{x.fonte.casefold()}|{x.codigo.casefold()}")):
+            e = escolhidas[x.ordem]
+            if e not in validas:
+                if e not in destino:
+                    raise ErroNegocio(f"A etapa {e} não existe no orçamento nem na planilha.")
+                e = destino[e][0]
+            x.etapa, x.etapa_origem = e, "escolhida"
+        elif pelo_nome:
+            x.etapa, x.etapa_origem = alvo, "nome" if alvo != x.etapa else "planilha"
+        elif alvo not in usadas and (e := etapa_do_codigo.get(f"{x.fonte.casefold()}|{x.codigo.casefold()}")):
             x.etapa, x.etapa_origem = e, "codigo"
-    # título de etapa do aditivo que ficou sem item (todos foram para etapas do contrato) não vira etapa vazia
+        else:
+            x.etapa = alvo
+
+    # título de etapa que ficou sem item (todos foram para outras etapas) não vira etapa vazia; no somar, o título de
+    # etapa que já existe também sai, porque o novo contrato já tem o dele
     com_item = {x.etapa for x in itens if x.tipo == "item"}
-    # a `ordem` fica a da leitura (com buracos): é a chave da escolha na prévia e do ID do item gravado
-    itens[:] = [x for x in itens if x.tipo == "item" or x.etapa in com_item or x.nivel > 1]
+    # a `ordem` fica a da leitura (com buracos): é a chave da escolha na prévia (e do ID do item, fora do somar)
+    itens[:] = [x for x in itens if x.tipo == "item" or x.nivel > 1
+                or (x.etapa in com_item and not (somar and x.etapa in usadas))]
+    _renumerar(itens, existentes, usadas, destino, somar=somar)
     return descricoes
+
+
+def _renumerar(itens: list[ItemPrevia], existentes: list[dict], usadas: set[str],
+               destino: dict[str, tuple[str, bool]], *, somar: bool) -> None:
+    """Numera as linhas que mudaram de etapa na sequência da etapa nova, sem repetir número que já está nela.
+
+    Etapa que mudou de número inteira só troca o prefixo ("1.2" -> "4.2"). No somar, linha que entra em etapa que já
+    existe continua a numeração dela (2.3, 2.4…), porque o resultado é um contrato só. No aditivo, quem fica na mesma
+    etapa ou foi pelo código/escolha guarda o número da planilha: ele aponta para o item do contrato que o aditivo
+    acresce ou suprime."""
+    numeradas = {x["etapa"] for x in existentes if x.get("numero")}
+    maior: dict[str, int] = {}
+
+    def conta(etapa: str, numero: str) -> None:
+        p = numero.split(".")
+        if len(p) > 1 and p[1].isdigit():
+            maior[etapa] = max(maior.get(etapa, 0), int(p[1]))
+
+    for x in existentes:
+        if x.get("numero"):
+            conta(x["etapa"], x["numero"])
+    prefixo: list[ItemPrevia] = []                     # a etapa inteira veio para cá com outro número
+    seguir: list[ItemPrevia] = []                      # entra numa etapa que não é a dela: continua a numeração
+    for x in itens:
+        origem, alvo = x.etapa_planilha, x.etapa
+        da_etapa = alvo not in usadas and destino.get(origem, ("",))[0] == alvo
+        if x.numero and da_etapa:
+            numeradas.add(alvo)
+        if not x.numero:
+            continue
+        if da_etapa:
+            if alvo != origem:
+                prefixo.append(x)
+            else:
+                conta(alvo, x.numero)
+        elif alvo not in usadas or somar:
+            # etapa nova de outra linha da planilha (escolha) ou, no somar, qualquer etapa que já existe
+            seguir.append(x)
+        elif alvo != origem and x.etapa_origem in ("planilha", "nome"):
+            seguir.append(x)
+        else:
+            conta(alvo, x.numero)          # aditivo na etapa do contrato: o número aponta o item que ele mexe
+    # os números trocados por prefixo ocupam a etapa antes da sequência: senão o item escolhido para ela repetiria
+    for x in prefixo:
+        if _sem_numero(x, numeradas):
+            continue
+        p = x.numero.split(".")
+        x.numero = x.etapa if x.tipo == "etapa" and x.nivel == 1 else ".".join([x.etapa, *p[1:]])
+        conta(x.etapa, x.numero)
+    sequencia: dict[tuple[str, str, str], str] = {}
+    for x in seguir:
+        if _sem_numero(x, numeradas):
+            continue
+        origem, alvo = x.etapa_planilha, x.etapa
+        if x.tipo == "etapa" and x.nivel == 1:
+            x.numero = alvo
+            continue
+        p = x.numero.split(".")
+        seg, resto = (p[1], p[2:]) if len(p) > 1 else (p[0], [])
+        chave = (alvo, origem, seg)
+        if chave not in sequencia:
+            maior[alvo] = maior.get(alvo, 0) + 1
+            sequencia[chave] = str(maior[alvo])
+        novo = [alvo, sequencia[chave], *resto]
+        x.numero = ".".join(novo)
+        x.nivel = len(novo)
+
+
+def _sem_numero(x: ItemPrevia, numeradas: set[str]) -> bool:
+    """Etapa sem numeração (chave pelo nome): o número da planilha só confundiria, e a linha fica sem."""
+    if x.etapa in numeradas:
+        return False
+    x.numero = ""
+    return True
+
+
+_TERMOS = re.compile(r"[a-z]+|\d+")
+
+
+def _termos(descricao: str) -> list[str]:
+    return _TERMOS.findall(_normal(descricao))
+
+
+def _parecidos(a: list[str], b: list[str]) -> bool:
+    """O mesmo serviço escrito de outro jeito: "Concreto fck 25 sapatas" × "Concreto usinado fck 25", "Aço CA-50 10 mm"
+    × "Aço CA-50". Pede o mesmo termo principal (a 1ª palavra) e um número em comum, sem número que desdiga ("fck 25" ×
+    "fck 30" não). Melhor deixar passar um repetido do que acusar "Forma de madeira" × "Porta de madeira": o aviso que
+    erra muito deixa de ser lido."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a[0] != b[0] or len(a[0]) < 3 or a[0].isdigit():
+        return False
+    na, nb = {t for t in a if t.isdigit()}, {t for t in b if t.isdigit()}
+    return bool(na & nb) and (na <= nb or nb <= na)
+
+
+def _marcar_repetidos(itens: list[ItemPrevia], existentes: list[dict], avisos: list[Aviso]) -> None:
+    """Item da planilha que parece já estar no orçamento vigente ganha `repetido_de` e um aviso: somar o concreto da
+    planilha com o das pranchas conta duas vezes, e daí Compras e o Mestre propõem comprar em dobro. Só avisa; quem
+    decide é a pessoa (`ignorar_itens`)."""
+    vigentes = [x for x in existentes if x["tipo"] == "item" and x["quantidade"] > 0]
+    por_codigo: dict[str, dict] = {}
+    for x in vigentes:
+        if x.get("codigo") and any(c.isdigit() for c in x["codigo"]):
+            por_codigo.setdefault(f"{x.get('fonte', '').casefold()}|{x['codigo'].casefold()}", x)
+    termos = [(x, _termos(x["descricao"]), x["unidade"].strip().casefold()) for x in vigentes]
+    for x in itens:
+        if x.tipo != "item" or x.quantidade < 0:
+            continue                       # supressão aponta de propósito para um item que já existe
+        achado = por_codigo.get(f"{x.fonte.casefold()}|{x.codigo.casefold()}") if x.codigo else None
+        if achado is None:
+            meus, un = _termos(x.descricao), x.unidade.strip().casefold()
+            achado = next((e for e, t, u in termos if u == un and _parecidos(meus, t)), None)
+        if achado is None:
+            continue
+        x.repetido_de = RepetidoDe(item_id=achado["id"], descricao=achado["descricao"],
+                                   quantidade=achado["quantidade"], unidade=achado["unidade"])
+        avisos.append(Aviso(linha=x.linha, mensagem=f"{x.descricao} parece repetir {achado['descricao']} "
+                                                    f"({fmt_qtd(achado['quantidade'])} {achado['unidade']}), que já "
+                                                    "está no orçamento."))
 
 
 async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo: str, m: Mapeamento,
                    tipo: TipoVersao, descricao: str, data: str | None, aplicar: bool,
-                   chave: str | None, escolhidas: dict[int, str] | None = None) -> tuple[PreviaVersao, bool]:
-    """Devolve (prévia ou versão gravada, criada agora?)."""
+                   chave: str | None, escolhidas: dict[int, str] | None = None, somar: bool = False,
+                   ignorar: list[int] | None = None) -> tuple[PreviaVersao, bool]:
+    """Devolve (prévia ou versão gravada, criada agora?).
+
+    `somar` (contrato, antes de aprovar): grava um contrato novo com os itens do vigente mais os da planilha, no lugar
+    do vigente. É o "completar o orçamento" de quem trouxe as pranchas e agora traz a planilha: aditivo é documento com
+    o cliente depois do contrato fechado, e chamar o complemento de aditivo inflava o % de aditivo."""
     o = await obra_do_tenant(arm, u.tenant_id, obra_id)
     faltando = [r for c, r in (("nome", "descrição"), ("unidade", "unidade"), ("quantidade", "quantidade"))
                 if getattr(m, c) is None]
@@ -288,7 +462,10 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if aplicar and not chave:
         raise ErroNegocio("Falta a chave de idempotência.")
     escolhidas = escolhidas or {}
-    assinatura = hashlib.sha256(conteudo + f"|{tipo.value}|{m.model_dump_json()}|{sorted(escolhidas.items())}"
+    ignorar_ = sorted(set(ignorar or ()))
+    # o sufixo só aparece com somar/ignorar: a assinatura de quem não usa nenhum dos dois fica a de antes
+    extra = ("|somar" if somar else "") + (f"|ignorar={ignorar_}" if ignorar_ else "")
+    assinatura = hashlib.sha256(conteudo + f"|{tipo.value}|{m.model_dump_json()}|{sorted(escolhidas.items())}{extra}"
                                 .encode()).hexdigest()
     id_ = id_versao(u.tenant_id, obra_id, chave) if chave else None
     if aplicar:
@@ -304,13 +481,32 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     vigente = _contrato_vigente(versoes)
     recusar_se_desfazendo(o)
     aprovada = o["status"] != "em_orcamento"
+    if somar:
+        if tipo != TipoVersao.CONTRATO:
+            raise ErroNegocio("Somar vale para o orçamento, não para o aditivo.")
+        if aprovada:
+            raise ErroNegocio("O orçamento já foi aprovado: para acrescentar itens, lance um aditivo.")
+        if not vigente:
+            raise ErroNegocio("Ainda não há orçamento para somar; importe a planilha como o orçamento da obra.")
     if tipo == TipoVersao.CONTRATO and aprovada and (vigente or o.get("aprovada")):
         # Compras já saiu do orçamento aprovado: um contrato novo deixaria os insumos e os pedidos descolados dele
         raise Conflito("O orçamento já foi aprovado: desfaça a aprovação ou lance um aditivo." if vigente
                        else "O orçamento já foi aprovado: desfaça a aprovação para importar o contrato.")
+    if ignorar_:
+        tirar = set(ignorar_)
+        itens = [x for x in itens if not (x.tipo == "item" and x.ordem in tirar)]
     descricoes_contrato = None
-    if tipo == TipoVersao.ADITIVO and vigente:
-        descricoes_contrato = await _apropriar_aditivo(arm, u.tenant_id, vigente, itens, escolhidas)
+    existentes: list[dict] = []
+    if (tipo == TipoVersao.ADITIVO or somar) and vigente:
+        ativas = sorted((v for v in versoes if v["ativa"]),
+                        key=lambda v: (v["tipo"] != TipoVersao.CONTRATO, v["numero"]))
+        existentes = await itens_das_versoes(arm, u.tenant_id, obra_id, ativas)
+        etapas_vigentes: dict[str, str] = {}
+        for v in ativas:
+            for e in v.get("lista_etapas", []):
+                etapas_vigentes.setdefault(e["etapa"], e["descricao"])
+        descricoes_contrato = _encaixar(itens, existentes, etapas_vigentes, escolhidas, somar=somar)
+        _marcar_repetidos(itens, existentes, avisos)
     so_itens = [x for x in itens if x.tipo == "item"]
     previa = PreviaVersao(
         aplicado=False, tipo=tipo, itens=itens, ignoradas=ignoradas, erros=erros, avisos=avisos,
@@ -319,8 +515,13 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         etapas=_totais_por_etapa(itens, descricoes_contrato),
         substitui=(Substituida(versao_id=vigente["id"], total=vigente["total"], itens=vigente["itens"])
                    if vigente and tipo == TipoVersao.CONTRATO else None))
+    if somar:
+        previa.total_apos = vigente["total"] + previa.total
     if tipo == TipoVersao.ADITIVO and not vigente:
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
+    linhas = _somadas(existentes, vigente, itens) if somar else itens
+    if len(linhas) > MAX_LINHAS:
+        raise ErroNegocio(f"Somado, o orçamento passaria de {MAX_LINHAS} linhas; troque o orçamento inteiro.")
     if not aplicar or erros:
         return previa, False
     if not so_itens:
@@ -328,20 +529,26 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     compras = (await _compras_do_aditivo(arm, u.tenant_id, obra_id, so_itens, nome_arquivo)
                if aprovada and tipo == TipoVersao.ADITIVO else [])
 
+    so_linhas = [x for x in linhas if x.tipo == "item"]
     numero = 0
     if tipo == TipoVersao.ADITIVO:
         numero = max((v["numero"] for v in versoes if v["ativa"] and v["tipo"] == TipoVersao.ADITIVO), default=0) + 1
     versao = VersaoOrcamento(
         id=id_, tenant_id=u.tenant_id, obra_id=obra_id, tipo=tipo, numero=numero, descricao=descricao.strip(),
-        data=data, arquivo=(nome_arquivo or "")[:200], itens=previa.n_itens, etapas=previa.n_etapas,
-        total=previa.total, substitui=previa.substitui.versao_id if previa.substitui else None,
+        data=data, arquivo=(nome_arquivo or "")[:200], itens=len(so_linhas),
+        etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in linhas), total=sum(x.total for x in so_linhas),
+        substitui=previa.substitui.versao_id if previa.substitui else None,
         contrato_id=vigente["id"] if tipo == TipoVersao.ADITIVO else None, assinatura=assinatura,
-        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao} for e in previa.etapas if e.etapa],
+        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao}
+                      for e in (_totais_por_etapa(linhas) if somar else previa.etapas) if e.etapa],
         gerou_compras=bool(compras))
     # Itens primeiro, ligados a uma versão que ainda não existe: ninguém os enxerga até a última transação criar a
     # versão. Se o processo cair no meio, sobram itens órfãos invisíveis, e a mesma chave regrava os mesmos IDs.
-    docs = [doc(ItemOrcamento(id=id_derivado(u.tenant_id, "item-orc", id_, str(x.ordem)), tenant_id=u.tenant_id,
-                              obra_id=obra_id, versao_id=id_, **x.model_dump())) for x in itens]
+    # no somar a `ordem` é a posição no contrato somado (o item novo entra no fim da etapa dele)
+    docs = [doc(ItemOrcamento(id=id_derivado(u.tenant_id, "item-orc", id_, str(ordem)), tenant_id=u.tenant_id,
+                              obra_id=obra_id, versao_id=id_, ordem=ordem,
+                              **x.model_dump(exclude={"ordem", "repetido_de"})))
+            for ordem, x in ((k if somar else x.ordem, x) for k, x in enumerate(linhas))]
     for i in range(0, len(docs), ITENS_POR_TRANSACAO):
         lote = docs[i:i + ITENS_POR_TRANSACAO]
 
@@ -359,6 +566,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         contrato = await tx.obter("versoes_orcamento", u.tenant_id, versao.contrato_id) if versao.contrato_id else None
         if (anterior is not None and not anterior["ativa"]) or (contrato is not None and not contrato["ativa"]):
             raise Conflito("O contrato mudou enquanto você importava; envie a planilha de novo.")
+        if somar and any(anterior.get(k, 0) != vigente.get(k, 0) for k in ("total", "edicoes", "aditivos")):
+            # os itens copiados são os de antes da edição: gravar perderia o que foi mudado no meio
+            raise Conflito("O orçamento mudou enquanto você importava; envie a planilha de novo.")
         lidos = [await tx.obter("insumos", u.tenant_id, x["id"]) for x in compras]
         novos: list[dict] = []
         restaurar: list[dict] = []
@@ -374,7 +584,11 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
                    {"versao_id": id_, "tipo": tipo.value, "total": versao.total})
             return doc(versao)
 
-        if tipo == TipoVersao.CONTRATO:
+        if somar:
+            n = previa.n_itens
+            texto = (f"Somou {n} {'item' if n == 1 else 'itens'} ao orçamento de {o['nome']} "
+                     f"(+{fmt_reais(previa.total)})")
+        elif tipo == TipoVersao.CONTRATO:
             texto = (f"Importou o contrato de {o['nome']} ({versao.itens} itens, {fmt_reais(versao.total)})"
                      + (" — substitui o anterior" if anterior else ""))
         else:
@@ -385,6 +599,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         op = Operacao(obra_id=obra_id, aplicar=aplicar_, texto=lambda d: texto,
                       desfazer=lambda d: {
                           "op": "desligar_versao", "versao_id": id_, "reativar": anterior["id"] if anterior else None,
+                          **({"somou": True} if somar else {}),
                           **({"compras": receita_insumos(obra_id, f"compras do {_ordinal(numero)} aditivo",
                                                          arquivar=novos, restaurar=restaurar)}
                              if novos or restaurar else {})})
@@ -393,6 +608,17 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
 
     entrada = await arm.em_transacao(ativar)
     return previa.model_copy(update={"aplicado": True, "versao_id": id_, "registro_id": entrada["id"]}), True
+
+
+def _somadas(existentes: list[dict], vigente: dict, itens: list[ItemPrevia]) -> list[ItemPrevia]:
+    """O contrato somado: as linhas do vigente (já com as edições) e as da planilha no fim da etapa delas; etapa nova
+    vai para o fim."""
+    grupos: dict[str, list[ItemPrevia]] = {}
+    for x in sorted((x for x in existentes if x["versao_id"] == vigente["id"]), key=lambda x: x["ordem"]):
+        grupos.setdefault(x["etapa"], []).append(ItemPrevia.model_validate(x))
+    for x in itens:
+        grupos.setdefault(x.etapa, []).append(x)
+    return [x for g in grupos.values() for x in g]
 
 
 async def _compras_do_aditivo(leitor, tenant_id: str, obra_id: str, so_itens: list[ItemPrevia],
@@ -462,16 +688,20 @@ def _csv_estrutura(etapa: str, itens: list) -> bytes:
 
 async def importar_estrutura(arm, u: UsuarioAtual, obra_id: str, corpo) -> tuple[PreviaVersao, bool]:
     """Lança os materiais do projeto como uma versão do orçamento (etapa \"Estrutura\"). Contrato se a obra ainda não
-    tem um; aditivo se já tem. Reaproveita a importação de versão (prévia, gravação, desfazer)."""
+    tem um; somado ao contrato se ele ainda não foi aprovado; aditivo depois de aprovado. Reaproveita a importação de
+    versão (prévia, gravação, desfazer)."""
+    o = await obra_do_tenant(arm, u.tenant_id, obra_id)
     versoes = await versoes_da_obra(arm, u.tenant_id, obra_id)
     tem_contrato = any(v["ativa"] and v["tipo"] == TipoVersao.CONTRATO for v in versoes)
-    tipo = TipoVersao.ADITIVO if tem_contrato else TipoVersao.CONTRATO
+    # antes de aprovar, as pranchas completam o orçamento; aditivo só depois que ele foi fechado
+    somar = tem_contrato and o["status"] == "em_orcamento"
+    tipo = TipoVersao.ADITIVO if tem_contrato and not somar else TipoVersao.CONTRATO
     conteudo = _csv_estrutura(corpo.etapa, corpo.itens)
     m = Mapeamento(planilha="CSV", linha_cabecalho=1, item=0, codigo=1, fonte=2, nome=3, unidade=4, quantidade=5,
                    valor_unitario=6, valor_total=7)
     return await importar(arm, u, obra_id, conteudo, f"{corpo.etapa}{SUFIXO_PROJETO}", m, tipo,
                           descricao=corpo.etapa.strip(), data=None, aplicar=corpo.aplicar,
-                          chave=corpo.chave_idempotencia)
+                          chave=corpo.chave_idempotencia, somar=somar, ignorar=corpo.ignorar_itens)
 
 
 async def _previa_gravada(arm, u: UsuarioAtual, v: dict) -> PreviaVersao:
@@ -516,9 +746,12 @@ async def preparar_desligar(tx, u: UsuarioAtual, receita: dict) -> Operacao:
         return {**v, "ativa": False}
 
     nome = "contrato" if v["tipo"] == TipoVersao.CONTRATO else f"{_ordinal(v['numero'])} aditivo"
+    if receita.get("somou"):
+        texto = f"Desfeito: os itens somados ao orçamento de {o['nome']} saíram (o anterior volta a valer)"
+    else:
+        texto = (f"Desfeito: {nome} de {o['nome']} retirado" + (" (o anterior volta a valer)" if reativar else ""))
     return Operacao(obra_id=v["obra_id"], aplicar=aplicar,
-                    texto=lambda d: f"Desfeito: {nome} de {o['nome']} retirado"
-                                    + (" (o anterior volta a valer)" if reativar else ""),
+                    texto=lambda d: texto,
                     desfazer=lambda d: None)
 
 
@@ -752,13 +985,25 @@ def pct(parte: int, todo: int) -> int:
 
 
 async def andamento_por_etapa(leitor, tenant_id: str, obra_id: str) -> dict[str, dict[str, int]]:
+    return andamento_dos_pedidos(await pedidos_da_obra(leitor, tenant_id, obra_id))
+
+
+async def pedidos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
+    return await leitor.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
+
+
+def _recebido(x: dict) -> int:
+    """O que a linha do pedido já recebeu, pelo preço do pedido: a mesma soma das entregas, sem ler cada uma."""
+    q, recebida = x["quantidade"], x.get("recebida", 0)
+    return (recebida * x.get("total", 0) + q // 2) // q if q else 0
+
+
+def andamento_dos_pedidos(pedidos: list[dict]) -> dict[str, dict[str, int]]:
     """Cotando, comprometido e realizado por etapa, somados das linhas dos pedidos da obra (centavos).
 
-    Realizado sai do que cada linha já recebeu, pelo preço do pedido: é a mesma soma das entregas, sem ler cada
-    uma. Comprometido é o maior entre o pedido e o entregue (entrega a mais também custa), exceto no pedido
-    encerrado com sobra, que só compromete o que chegou.
+    Realizado sai do que cada linha já recebeu. Comprometido é o maior entre o pedido e o entregue (entrega a mais
+    também custa), exceto no pedido encerrado com sobra, que só compromete o que chegou.
     """
-    pedidos = await leitor.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
     soma: dict[str, dict[str, int]] = {}
     for p in pedidos:
         st = StatusPedido(p["status"])
@@ -770,12 +1015,68 @@ async def andamento_por_etapa(leitor, tenant_id: str, obra_id: str) -> dict[str,
             if st in EM_COTACAO:
                 g["cotando"] += total
                 continue
-            q, recebida = x["quantidade"], x.get("recebida", 0)
-            recebido = (recebida * total + q // 2) // q if q else 0
+            recebido = _recebido(x)
             g["realizado"] += recebido
-            encerrado_com_sobra = st == StatusPedido.CONFERIDO and recebida < q
+            encerrado_com_sobra = st == StatusPedido.CONFERIDO and x.get("recebida", 0) < x["quantidade"]
             g["comprometido"] += recebido if encerrado_com_sobra else max(total, recebido)
     return soma
+
+
+def entregue_a_pagar(realizado: int, pago: int) -> int:
+    """Entregue (ou medido) e ainda sem pagamento: realizado − pago, a conta do desembolso. Por isso "gasto até hoje"
+    (realizado) = pago + entregue a pagar. Quem pagou além do que chegou (adiantamento) fica com 0 aqui, e a diferença
+    é crédito que o desembolso desconta dos próximos meses."""
+    return max(0, realizado - pago)
+
+
+def a_pagar_por_etapa(pedidos: list[dict], gastos: list[dict], total: int) -> dict[str, int]:
+    """O entregue a pagar da obra (`total`, a conta do desembolso) repartido pelas etapas. Por pedido, o recebido menos
+    o que já se pagou dele vai para as etapas das linhas na proporção do recebido; depois o `total` é dividido na
+    proporção desse bruto. É o que faz as etapas fecharem com o total quando um pedido foi pago adiantado: o total já
+    abate esse adiantamento, e a etapa do pedido entregue não pode mostrar a pagar o que a obra não deve."""
+    pago: dict[str, int] = {}
+    for g in gastos:
+        if g.get("pedido_id"):
+            pago[g["pedido_id"]] = pago.get(g["pedido_id"], 0) + g["valor"]
+    soma: dict[str, int] = {}
+    for p in pedidos:
+        st = StatusPedido(p["status"])
+        if st == StatusPedido.CANCELADO or st in EM_COTACAO:
+            continue
+        por_etapa: dict[str, int] = {}
+        for x in linhas_de(p):
+            if r := _recebido(x):
+                por_etapa[x.get("etapa") or ""] = por_etapa.get(x.get("etapa") or "", 0) + r
+        falta = sum(por_etapa.values()) - pago.get(p["id"], 0)
+        if falta <= 0:
+            continue
+        etapas = list(por_etapa)
+        for k, v in _repartir(falta, [por_etapa[e] for e in etapas]).items():
+            soma[etapas[k]] = soma.get(etapas[k], 0) + v
+    return _maior_resto(total, soma) if total < sum(soma.values()) else soma
+
+
+def _maior_resto(valor: int, pesos: dict[str, int]) -> dict[str, int]:
+    """`valor` pelas chaves na proporção dos pesos; o centavo que sobra do arredondamento vai para o maior resto."""
+    todo = sum(pesos.values())
+    if not todo or not valor:
+        return {k: 0 for k in pesos}
+    base = {k: valor * w // todo for k, w in pesos.items()}
+    sobra = valor - sum(base.values())
+    for k in sorted(pesos, key=lambda k: -(valor * pesos[k] % todo))[:sobra]:
+        base[k] += 1
+    return base
+
+
+def _repartir(valor: int, pesos: list[int]) -> dict[int, int]:
+    """`valor` pelos índices na proporção dos pesos, arredondando o acumulado: a soma fecha no centavo."""
+    total, saida, acum, antes = sum(pesos), {}, 0, 0
+    for k, w in enumerate(pesos):
+        acum += w
+        agora = (2 * valor * acum + total) // (2 * total)
+        saida[k] = agora - antes
+        antes = agora
+    return saida
 
 
 async def etapas_da_obra(leitor, tenant_id: str, obra_id: str) -> list[EtapaRef]:
