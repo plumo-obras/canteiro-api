@@ -226,3 +226,25 @@ async def test_ordem_montada_sobre_tela_velha_e_recusada(vila):
                                  json={"ordem": ["2", "1", "3"], "chave_idempotencia": uuid.uuid4().hex,
                                        "versao_id": vista})
     assert velha.status_code == 409 and "recarregue" in velha.json()["detail"], velha.text
+
+
+async def test_situacao_da_versao_resolve_substituida_e_desfeita(vila):
+    o = await nova_obra(vila)
+    p = await _pranchas(vila, o["id"])
+    s = await versao(vila, o["id"], PLANILHA, mapa(linha_cabecalho=1), aplicar=True, somar="true")
+    assert s.status_code == 201, s.text
+    r = await _ordem(vila, o["id"], ["3", "1", "2"])
+    assert r.status_code == 201, r.text
+
+    async def situacoes():
+        return {v["id"]: v["situacao"] for v in (await orcamento(vila, o["id"]))["versoes"]}
+
+    pv, sv, rv = p["versao_id"], s.json()["versao_id"], r.json()["versao_id"]
+    # pranchas → somar → reordenar: as duas de antes saíram por outra versão, não pelo Desfazer
+    assert await situacoes() == {pv: "substituida", sv: "substituida", rv: "vigente"}
+    d = await vila.http.post(f"/registro/{r.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+    assert await situacoes() == {pv: "substituida", sv: "vigente", rv: "desfeita"}
+    d = await vila.http.post(f"/registro/{s.json()['registro_id']}/desfazer", headers=vila.h)
+    assert d.status_code == 200, d.text
+    assert await situacoes() == {pv: "vigente", sv: "desfeita", rv: "desfeita"}

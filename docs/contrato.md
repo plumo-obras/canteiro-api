@@ -232,7 +232,10 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   "Etapas reordenadas"; nas outras, `descricao` ou `arquivo`); `desfazer_texto` = o que o Desfazer dela faz, pronto
   para mostrar ("Volta o orçamento para antes de somar a planilha (R$ 50.977,41, 9 itens)." no somar, com o total e
   os itens do contrato que volta; "Volta as etapas do orçamento para a ordem de antes." no reordenar) ou `null` (a
-  tela usa o texto dela). O `arquivo` gravado não muda: o sufixo " (projeto).csv" é como a API reconhece as pranchas.
+  tela usa o texto dela). `situacao` = `"vigente"` (`ativa`) | `"substituida"` (saiu porque outra versão tomou o
+  lugar: reimportação, somar, reordenar) | `"desfeita"` (saiu pelo Desfazer dela mesma). `ativa: false` sozinho não
+  separa as duas; a API resolve pelo registro de cada versão, então a cadeia pranchas → somar → reordenar dá
+  substituida, substituida, vigente, e desfazer a reordenação dá substituida, vigente, desfeita. O `arquivo` gravado não muda: o sufixo " (projeto).csv" é como a API reconhece as pranchas.
 - `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
   descricao, unidade, quantidade, valor_unitario, total, linha}`. `ordem` = posição na versão (0, 1, 2…); `numero` =
   o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);

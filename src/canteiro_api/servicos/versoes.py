@@ -997,7 +997,8 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
     andamento["comprometido"] += fora
     andamento["realizado"] += fora
     return OrcamentoObra(
-        versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"]), **_textos_da_versao(v, versoes)}
+        versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"]), **_textos_da_versao(v, versoes),
+                  "situacao": await _situacao(arm, tenant_id, v)}
                  for v in versoes],
         itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
@@ -1011,6 +1012,16 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                                                              sem_etapa_do_orcamento=avulsos.sem_etapa_do_orcamento,
                                                              a_definir=avulsos.a_definir),
                                **andamento))
+
+
+async def _situacao(leitor, tenant_id: str, v: dict) -> str:
+    """Desligada pelo Desfazer dela mesma é "desfeita"; desligada por outra (reimportação, somar, reordenar) é
+    "substituida". `ativa` não basta: nas duas ela fica false. É o registro da versão que diz se ela foi desfeita;
+    numa cadeia (pranchas → somar → reordenar) cada elo tem o seu, então não há cadeia a seguir."""
+    if v["ativa"]:
+        return "vigente"
+    e = await leitor.obter("registro", tenant_id, id_derivado(tenant_id, "registro", v["id"]))
+    return "desfeita" if e and e.get("desfeito") else "substituida"
 
 
 def _n_itens(n: int) -> str:

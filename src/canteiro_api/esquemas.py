@@ -676,6 +676,8 @@ class VersaoComRegistro(VersaoOrcamento):
         None, description="contrato gravado pelo somar (planilha ou pranchas) ou pela ordem das etapas")
     rotulo: str = Field("", description="o nome da versão para a pessoa (sem nome de arquivo do sistema)")
     desfazer_texto: str | None = Field(None, description="o que o Desfazer desta versão faz; null = a tela diz o dela")
+    situacao: Literal["vigente", "substituida", "desfeita"] = Field(
+        "vigente", description="desligada pelo próprio Desfazer = desfeita; tirada por outra versão = substituida")
 
 
 class OrdemEtapasCorpo(Entrada):
