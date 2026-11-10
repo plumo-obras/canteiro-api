@@ -284,9 +284,10 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     `…/orcamento/estrutura`) e a planilha traz uma etapa cujo nome tem "fundação"/"fundações" ou "infraestrutura",
     a etapa das pranchas vai para **logo depois** dela (da última, se vierem em sequência); sem ela, para logo
     depois da primeira cujo nome tem "preliminar" ou "canteiro". As etapas do contrato somado são renumeradas
-    1..N nessa ordem (os itens trocam só o prefixo: "2.1" → "1.1"). Sem etapa assim, a das pranchas fica onde está (adivinhar a ordem da obra
-    por outros nomes erraria mais do que acertaria). A **prévia continua com os números de antes** (são eles que
-    valem em `etapas_itens`) e traz um aviso com `linha: 0`: "Ao somar, Estrutura (das pranchas) vai para depois de
+    1..N nessa ordem (os itens trocam só o prefixo: "2.1" → "1.1"). Sem etapa assim, a das pranchas fica onde
+    está (adivinhar a ordem da obra por outros nomes erraria mais do que acertaria). A **prévia continua com as
+    chaves de antes** (são elas que valem em `etapas_itens`), traz em `numeracao` o número com que cada etapa que
+    muda é gravada (`{"1": "3", "2": "1", "3": "2"}`; a tela mostra esse) e um aviso com `linha: 0`: "Ao somar, Estrutura (das pranchas) vai para depois de
     FUNDAÇÕES, e as etapas são renumeradas nessa ordem." Se já há lançamento numa etapa que mudaria de
     número (ver "Ordem das etapas"), não reordena nem avisa.
 - **Ordem das etapas** (antes de aprovar): `POST /obras/{obra_id}/orcamento/etapas/ordem` (JSON `{ordem: [chave da

@@ -530,7 +530,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
             pranchas = vigente["lista_etapas"][0]["etapa"]
             antes_dela = ordem[ordem.index(pranchas) - 1]
             linhas = _reordenar(linhas, ordem)
-            # a prévia continua com os números de antes: são eles que valem na escolha de etapa (`etapas_itens`)
+            # a prévia continua com as chaves de antes (são elas que valem na escolha de etapa, `etapas_itens`); o
+            # número com que cada etapa é gravada vai à parte, para a tela mostrar o mesmo que o orçamento terá
+            previa.numeracao = {k: n for k, n in _renumeradas(ordem).items() if n != k}
             previa.avisos.append(Aviso(linha=0, mensagem=(
                 f"Ao somar, {nomes.get(pranchas, 'a etapa')} (das pranchas) vai para depois de "
                 f"{nomes.get(antes_dela, 'os serviços preliminares')}, e as etapas são renumeradas nessa ordem.")))
