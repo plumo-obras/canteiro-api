@@ -397,3 +397,49 @@ def montar_cronograma_de_etapas(etapas: list[EtapaParaPlano], inicio: date) -> C
         saida.append(EtapaNoCronograma(id=a.id, dias_uteis=dias, lag_dias=lag, mes_inicio=de, mes_fim=ate,
                                        por_familia=por_fam, percentuais=grade_meses(de, ate, total_meses)))
     return CronogramaDeObra(meses=total_meses, etapas=saida, dias_uteis=plano.dias_uteis, critico=plano.critico)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fase de obra (a EAP padrão): para organizar um orçamento "chapado" em etapas por fase, de onde o cronograma nasce
+# completo. A fase é mais grossa que a família de serviço: fôrma/armação/concreto de sapata são todos "Fundação".
+# ---------------------------------------------------------------------------------------------------------------------
+
+# As fases na ordem de obra. O nome é o que vira a etapa do orçamento.
+FASES: list[str] = [
+    "Serviços preliminares", "Fundação", "Estrutura", "Alvenaria", "Cobertura",
+    "Instalações", "Revestimento", "Esquadrias", "Pintura", "Entrega",
+]
+
+# Palavras que indicam fundação num serviço genérico de fôrma/armação ("fôrma de sapata" é Fundação, não Estrutura).
+_FUNDACAO = ("sapata", "baldrame", "radier", "fundacao", "estaca", "bloco de fundacao", "lastro", "concreto magro")
+
+_FAMILIA_FASE: dict[Servico, str] = {
+    Servico.SERVICOS_PRELIMINARES: "Serviços preliminares",
+    Servico.MOVIMENTO_TERRA: "Fundação",
+    Servico.FUNDACAO_CONCRETO: "Fundação",
+    Servico.ESTRUTURA_CONCRETO: "Estrutura",
+    Servico.ALVENARIA: "Alvenaria",
+    Servico.COBERTURA: "Cobertura",
+    Servico.INSTALACOES: "Instalações",
+    Servico.REVESTIMENTO_INTERNO: "Revestimento",
+    Servico.CONTRAPISO: "Revestimento",
+    Servico.REVESTIMENTO_CERAMICO: "Revestimento",
+    Servico.ESQUADRIAS: "Esquadrias",
+    Servico.PINTURA: "Pintura",
+    Servico.LIMPEZA: "Entrega",
+}
+
+
+def fase(descricao: str, codigo: str = "", unidade: str = "") -> str:
+    """Fase de obra de um serviço do orçamento (a EAP padrão). Fôrma e armação vão para Fundação quando a descrição
+    fala de sapata/baldrame/etc., senão para Estrutura. OUTRO (sem família conhecida) cai em 'Outros serviços'."""
+    fam = classificar(descricao, codigo, unidade)
+    if fam in (Servico.FORMA, Servico.ARMACAO):
+        t = _normalizar(descricao)
+        return "Fundação" if any(p in t for p in _FUNDACAO) else "Estrutura"
+    return _FAMILIA_FASE.get(fam, "Outros serviços")
+
+
+def ordem_da_fase(nome: str) -> int:
+    """Posição da fase na ordem de obra, para ordenar as etapas; a desconhecida ('Outros serviços') vai para o fim."""
+    return FASES.index(nome) if nome in FASES else len(FASES)
