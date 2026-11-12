@@ -457,53 +457,96 @@ DISTRIBUICAO_FASE: dict[str, float] = {
     "Instalações": 0.16, "Revestimento": 0.16, "Esquadrias": 0.10, "Pintura": 0.08, "Entrega": 0.06,
 }
 
-# Para cada fase, um serviço representativo (descrição que classifica na família certa, unidade e custo unitário típico
-# em centavos), para converter o valor estimado em quantidade — e o motor calcular a duração como em qualquer serviço.
-REPRESENTANTE_FASE: dict[str, tuple[str, str, int]] = {
-    "Serviços preliminares": ("Serviços preliminares (estimativa)", "m2", 4000),
-    "Fundação": ("Fundação em concreto (estimativa)", "m3", 55000),
-    "Estrutura": ("Estrutura em concreto (estimativa)", "m3", 60000),
-    "Alvenaria": ("Alvenaria (estimativa)", "m2", 8000),
-    "Cobertura": ("Cobertura (estimativa)", "m2", 18000),
-    "Instalações": ("Instalações elétricas e hidráulicas (estimativa)", "m2", 9000),
-    "Revestimento": ("Revestimento e reboco (estimativa)", "m2", 7000),
-    "Esquadrias": ("Esquadrias (estimativa)", "un", 120000),
-    "Pintura": ("Pintura (estimativa)", "m2", 2000),
-    "Entrega": ("Entrega e limpeza final (estimativa)", "m2", 1500),
+# Custo por m² de área construída (ordem de grandeza do CUB), em centavos: serve para estimar a área da obra a partir
+# do valor já orçado, e daí as quantidades de cada serviço.
+CUB_POR_M2 = 220_000
+
+# Os serviços TÍPICOS de cada fase, com código SINAPI, unidade, custo unitário (centavos) e o quanto rende por m² de
+# área construída (fator). Da área estimada da obra sai a quantidade de cada serviço — descrevendo o que vai ser feito,
+# cruzado com o SINAPI. É ponto de partida; quando a pessoa detalha a fase, troca pelo real. Códigos de referência.
+ServicoFase = tuple[str, str, str, int, float]  # (descrição, código SINAPI, unidade, custo_unit_centavos, fator/m²)
+SERVICOS_POR_FASE: dict[str, list[ServicoFase]] = {
+    "Serviços preliminares": [
+        ("Limpeza e preparo do terreno", "97622", "m2", 480, 1.0),
+        ("Tapume de obra", "74209/001", "m2", 5200, 0.5),
+        ("Locação da obra", "99059", "m2", 350, 1.0),
+    ],
+    "Fundação": [
+        ("Escavação manual de valas", "93358", "m3", 5500, 0.35),
+        ("Fôrma de madeira para fundação", "92775", "m2", 7500, 0.6),
+        ("Armação em aço CA-50 (fundação)", "92916", "kg", 1200, 9.0),
+        ("Concreto fck 25 MPa (fundação)", "94966", "m3", 55000, 0.12),
+        ("Impermeabilização de baldrame", "98557", "m2", 2800, 0.5),
+    ],
+    "Alvenaria": [
+        ("Alvenaria de blocos cerâmicos", "87905", "m2", 8000, 1.9),
+        ("Vergas e contravergas", "92761", "m", 4500, 0.5),
+        ("Chapisco das alvenarias", "87878", "m2", 800, 3.6),
+    ],
+    "Cobertura": [
+        ("Estrutura de madeira para telhado", "92543", "m2", 9000, 1.1),
+        ("Telhamento com telha cerâmica", "94213", "m2", 5500, 1.1),
+        ("Calhas e rufos", "94227", "m", 6000, 0.3),
+    ],
+    "Instalações": [
+        ("Instalação elétrica (pontos e fiação)", "91926", "m2", 5500, 1.0),
+        ("Instalação hidrossanitária", "89712", "m2", 4800, 1.0),
+        ("Louças e metais", "86888", "un", 25000, 0.06),
+    ],
+    "Revestimento": [
+        ("Emboço/reboco de paredes", "87879", "m2", 3800, 3.0),
+        ("Contrapiso", "87703", "m2", 4200, 1.0),
+        ("Revestimento cerâmico de piso", "87251", "m2", 6500, 1.2),
+        ("Revestimento cerâmico de parede", "87265", "m2", 7000, 0.8),
+    ],
+    "Esquadrias": [
+        ("Portas de madeira (folha + batente)", "90821", "un", 45000, 0.09),
+        ("Janelas de alumínio", "94573", "m2", 38000, 0.18),
+        ("Ferragens e fechaduras", "91303", "un", 12000, 0.09),
+    ],
+    "Pintura": [
+        ("Massa corrida e selador", "88485", "m2", 1400, 2.6),
+        ("Pintura látex (2 demãos)", "88489", "m2", 2200, 2.6),
+    ],
+    "Entrega": [
+        ("Limpeza final da obra", "9537", "m2", 1500, 1.0),
+        ("Vistoria e retoques", "97644", "m2", 800, 0.8),
+    ],
 }
 
 
 @dataclass(frozen=True)
 class FaseEstimada:
+    """Um serviço estimado de uma fase que ainda não tem orçamento (descrito e cruzado com o SINAPI)."""
+
     fase: str
     descricao: str
+    codigo: str
     unidade: str
     quantidade_milesimos: int
     valor_centavos: int
 
 
 def estimar_fases_faltantes(valor_por_fase_real: dict[str, int], apenas: list[str] | None = None) -> list[FaseEstimada]:
-    """Estima as fases padrão que ainda não têm orçamento, a partir do valor das que têm. Porte da obra = soma do valor
-    real ÷ soma da fração típica dessas fases; cada fase que falta recebe porte × sua fração, virando uma quantidade
-    pelo custo unitário típico. `apenas` limita a estas fases (senão, todas as padrão que faltam).
+    """Para cada fase padrão que ainda não tem orçamento, DESCREVE os serviços típicos (com código SINAPI, unidade,
+    quantidade e valor estimados), para o cronograma prever a obra toda — e o motor cruzar as dependências de verdade.
+    A quantidade sai da área construída estimada (valor já orçado → porte ÷ CUB → área → quantidade de cada serviço).
 
     valor_por_fase_real: {fase: valor em centavos} do que já está orçado. Vazio → não há como estimar (devolve [])."""
     reais = {f: v for f, v in valor_por_fase_real.items() if f in DISTRIBUICAO_FASE and v > 0}
     fracao_coberta = sum(DISTRIBUICAO_FASE[f] for f in reais)
     if not reais or fracao_coberta <= 0:
         return []
-    porte = sum(reais.values()) / fracao_coberta  # custo total estimado da obra, em centavos
-    alvo = [f for f in FASES if f in DISTRIBUICAO_FASE and f not in reais and (apenas is None or f in apenas)]
+    porte = sum(reais.values()) / fracao_coberta   # custo total estimado da obra (centavos)
+    area_m2 = max(1.0, porte / CUB_POR_M2)          # área construída estimada (m²)
+    alvo = [f for f in FASES if f in SERVICOS_POR_FASE and f not in reais and (apenas is None or f in apenas)]
     out: list[FaseEstimada] = []
     for f in sorted(alvo, key=ordem_da_fase):
-        rep = REPRESENTANTE_FASE.get(f)
-        if not rep:
-            continue
-        descricao, unidade, custo_unit = rep
-        valor = round(porte * DISTRIBUICAO_FASE[f])
-        if valor <= 0 or custo_unit <= 0:
-            continue
-        quantidade = max(1000, round(valor * 1000 / custo_unit))  # milésimos da unidade (mín. 1)
-        out.append(FaseEstimada(fase=f, descricao=descricao, unidade=unidade,
-                                quantidade_milesimos=quantidade, valor_centavos=valor))
+        for descricao, codigo, unidade, custo_unit, fator in SERVICOS_POR_FASE[f]:
+            quantidade = max(1000, round(area_m2 * fator * 1000))   # milésimos da unidade
+            valor = round(quantidade / 1000 * custo_unit)
+            if valor <= 0:
+                continue
+            out.append(FaseEstimada(fase=f, descricao=descricao, codigo=codigo, unidade=unidade,
+                                    quantidade_milesimos=quantidade, valor_centavos=valor))
     return out
