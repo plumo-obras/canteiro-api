@@ -1447,12 +1447,16 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
             tx.criar("itens_orcamento", doc(ItemOrcamento(
                 id=tid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,
                 ordem=i, tipo="etapa", nivel=1, etapa=k, descricao=f)))
+        # o cache de etapas da versão (Compras e apropriação leem dele, não dos 500 itens) acompanha as novas fases
+        tx.atualizar("versoes_orcamento", u.tenant_id, versao_id,
+                     {"lista_etapas": [{"etapa": chave[f], "descricao": f} for f in fases]})
         evento(tx, u.tenant_id, "orcamento.organizado_fases", obra_id, {"itens": len(itens_mud), "fases": fases})
         return {"itens": len(itens_mud), "fases": fases}
 
-    # Desfazer volta a etapa dos itens e o nome/chave dos títulos reaproveitados (os títulos criados ficam vazios).
+    # Desfazer volta a etapa dos itens, o nome/chave dos títulos reaproveitados e o cache de etapas da versão.
     receita = {"op": "restaurar_etapas", "obra_id": obra_id, "versao_id": versao_id,
-               "itens": [{"id": m["id"], "etapa": m["antes"]} for m in itens_mud], "titulos": titulos_antes}
+               "itens": [{"id": m["id"], "etapa": m["antes"]} for m in itens_mud], "titulos": titulos_antes,
+               "lista_etapas": v.get("lista_etapas")}
     n = len(itens_mud)
     return Operacao(obra_id=obra_id, aplicar=aplicar,
                     texto=lambda d: f"Organizou o orçamento em {len(fases)} fases ({n} serviço{'' if n == 1 else 's'})",
@@ -1465,16 +1469,22 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
     recusar_se_desfazendo(o)
     itens = [m for m in receita.get("itens", []) if await tx.obter("itens_orcamento", u.tenant_id, m["id"])]
     titulos = [t for t in receita.get("titulos", []) if await tx.obter("itens_orcamento", u.tenant_id, t["id"])]
+    versao_id = receita.get("versao_id")
+    v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id) if versao_id else None
+    lista_atual = v.get("lista_etapas") if v else None  # a de agora, para o Refazer
 
     def aplicar() -> dict:
         for m in itens:
             tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["etapa"]})
         for t in titulos:
             tx.atualizar("itens_orcamento", u.tenant_id, t["id"], {"etapa": t["etapa"], "descricao": t["descricao"]})
+        if v is not None and receita.get("lista_etapas") is not None:
+            tx.atualizar("versoes_orcamento", u.tenant_id, versao_id, {"lista_etapas": receita["lista_etapas"]})
         return {"itens": len(itens)}
 
-    inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": receita.get("versao_id"),
+    inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": versao_id,
                "itens": [{"id": m["id"], "etapa": m["etapa"]} for m in itens],
-               "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos]}
+               "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos],
+               "lista_etapas": lista_atual}
     return Operacao(obra_id=receita["obra_id"], aplicar=aplicar,
                     texto=lambda d: "Desfez a organização do orçamento em fases", desfazer=lambda d: inversa)
