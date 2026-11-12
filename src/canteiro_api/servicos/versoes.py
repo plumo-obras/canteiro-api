@@ -83,8 +83,16 @@ def _ordinal(n: int) -> str:
     return f"{n}º"
 
 
-def _numero_item(t: str) -> str:
-    """'3.2.1.' perde o ponto final; o resto fica como veio ("A1.2" de aditivo também dá etapa e nível pelos pontos)."""
+def _numero_item(v) -> str:
+    """'3.2.1.' perde o ponto final; o resto fica como veio ("A1.2" de aditivo também dá etapa e nível pelos pontos).
+
+    Número digitado como número no Excel chega float (1.1): vai por Decimal para dar "1.1" e não "1,1", que é como o
+    `_texto` escreve a quantidade para o brasileiro ler. Com vírgula, o nível sairia 1 (o item viraria etapa nova) e a
+    reordenação não acharia o prefixo. "1.10" digitado como número já chega 1.1 do Excel: a prévia mostra para conferir.
+    """
+    if isinstance(v, (int, float, Decimal)) and not isinstance(v, bool):
+        return format(Decimal(str(v)).normalize(), "f")
+    t = _texto(v)
     return t[:-1] if t.endswith(".") and NUMERO_ITEM.match(t) else t
 
 
@@ -116,7 +124,7 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
         if SUBTOTAL.match(_normal(descricao)):
             ignoradas.append(LinhaIgnorada(linha=n, texto=texto, motivo="subtotal ou total"))
             continue
-        numero = _numero_item(_texto(cel(row, m.item)))
+        numero = _numero_item(cel(row, m.item))
         codigo = _texto(cel(row, m.codigo))
         fonte = _texto(cel(row, m.fonte))
         unidade = _texto(cel(row, m.unidade))

@@ -426,3 +426,42 @@ async def test_item_escolhido_para_etapa_que_trocou_de_numero_nao_repete_numero(
         itens = _por_desc(p)
         assert [(itens[d]["etapa"], itens[d]["numero"]) for d in ("Locação da obra", "Tapume", "Escavação")] == [
             ("2", "2.1"), ("2", "2.2"), ("2", "2.3")], extra
+
+
+async def test_numero_do_item_digitado_como_numero_no_excel(vila):
+    # No Excel, 1.1 digitado como número chega float: tem que dar "1.1" nível 2, e não "1,1" (como o brasileiro lê a
+    # quantidade), que nível 1 tornaria etapa nova e a reordenação não acharia o prefixo.
+    planilha = xlsx(CABECALHO, [1, None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                    [1.1, "74209/1", "SINAPI", "Placa de obra", "m²", 10, 238.91, 2389.1],
+                    [1.2, "93212", "SINAPI", "Sanitário em canteiro", "m²", 2, 500, 1000],
+                    [2, None, None, "FUNDAÇÕES", None, None, None, None],
+                    [2.1, "93358", "SINAPI", "Escavação manual de valas", "m³", 10, 50, 500],
+                    [7, None, None, "ALVENARIA", None, None, None, None],
+                    [7.1, None, None, "Paredes", None, None, None, None],
+                    ["7.1.1", None, None, "Tijolo cerâmico", "m²", 100, 60, 6000])
+    o = await nova_obra(vila)
+    m = mapa(linha_cabecalho=1)
+    p = (await versao(vila, o["id"], planilha, m)).json()
+    assert p["erros"] == []
+    assert [(x["numero"], x["tipo"], x["nivel"], x["etapa"]) for x in p["itens"]] == [
+        ("1", "etapa", 1, "1"), ("1.1", "item", 2, "1"), ("1.2", "item", 2, "1"),
+        ("2", "etapa", 1, "2"), ("2.1", "item", 2, "2"),
+        ("7", "etapa", 1, "7"), ("7.1", "etapa", 2, "7"), ("7.1.1", "item", 3, "7")]
+    assert [e["etapa"] for e in p["etapas"]] == ["1", "2", "7"]
+
+    assert (await versao(vila, o["id"], planilha, m, aplicar=True)).status_code == 201
+    r = await vila.http.post(f"/obras/{o['id']}/orcamento/etapas/ordem", headers=vila.h,
+                             json={"ordem": ["2", "1", "7"], "chave_idempotencia": uuid.uuid4().hex})
+    assert r.status_code == 201, r.text
+    assert [(x["numero"], x["descricao"]) for x in (await orcamento(vila, o["id"]))["itens"]] == [
+        ("1", "FUNDAÇÕES"), ("1.1", "Escavação manual de valas"),
+        ("2", "SERVIÇOS PRELIMINARES"), ("2.1", "Placa de obra"), ("2.2", "Sanitário em canteiro"),
+        ("3", "ALVENARIA"), ("3.1", "Paredes"), ("3.1.1", "Tijolo cerâmico")]
+
+
+def test_numero_item_numerico_e_texto():
+    from canteiro_api.servicos.versoes import _numero_item
+
+    assert [_numero_item(v) for v in (1.1, 2.15, 7, 7.0, 10, 1.10, None)] == ["1.1", "2.15", "7", "7", "10", "1.1", ""]
+    # texto fica como antes: só perde o ponto final do número
+    assert [_numero_item(v) for v in ("3.2.1.", " 1.1 ", "A1.2", "1,1")] == ["3.2.1", "1.1", "A1.2", "1,1"]
