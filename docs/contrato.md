@@ -858,12 +858,16 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
   `papel` vem do banco nesta requisição. `chave_propria` = `{ativa: true, final, cadastrada_em}` ou `null` sem chave
   conectada. `creditos` é o mesmo corpo de `GET /creditos`, mas **sem o 402**: sem saldo a conta responde 200 com
   `saldo_microdolares` zerado (é a tela onde a pessoa vê isso). Pagamento de créditos ainda não existe.
-- `GET /conta/chave-anthropic` (qualquer papel) → `{ativa, final, cadastrada_em}` (`{false, null, null}` sem chave).
-  Nunca traz a chave nem o cifrado. `final` = os 4 últimos caracteres (a tela põe o "…").
-- `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "abcd"}`. Guardada cifrada
-  (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE` desconecta.
-  Conectar e desconectar entram no registro **sem `desfazer`**, por decisão: a receita teria de guardar o segredo
-  (desfazer a desconexão), e o Desfazer é de admin enquanto a chave é só do master. Voltar atrás é `PUT`/`DELETE`.
+- `GET /conta/chave-anthropic` (qualquer papel) → `{ativa, final, cadastrada_em, conectada_por}` (tudo `null`/`false`
+  sem chave). Nunca traz a chave nem o cifrado. `final` = os 4 últimos caracteres (a tela põe o "…");
+  `conectada_por` = nome de quem conectou (null se a pessoa não existe mais). A chave colada tem as bordas limpas e
+  precisa casar `^sk-ant-[A-Za-z0-9_-]+$`; o 422 de validação nunca devolve o valor recusado.
+- `PUT /conta/chave-anthropic` `{chave}` (papel `admin` ou acima) → `{chave_propria: true, final: "abcd"}`. Antes de
+  guardar, a API confere a chave na Anthropic (`GET /v1/models`, não gasta token): recusada → 422 com a mensagem,
+  Anthropic fora do ar → 503; nos dois casos a chave anterior continua. Não confere saldo da organização. Guardada
+  cifrada (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE`
+  (admin) desconecta. Conectar e desconectar entram no registro **sem `desfazer`**, por decisão: a receita teria de
+  guardar o segredo (desfazer a desconexão). Voltar atrás é `PUT`/`DELETE`.
 - `GET /interno/chave-anthropic` (só o serviço do agente: `Authorization: Bearer <token de serviço>` +
   `X-Canteiro-Usuario: Bearer <acesso do usuário>`) → `{chave}` com `Cache-Control: no-store`; 404 sem chave própria.
 

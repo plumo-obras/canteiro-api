@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from functools import cache
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -18,6 +20,7 @@ from .config import Config
 from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
 from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, sessoes
+from .servicos.chave_anthropic import conferir_chave
 
 
 def _arquivos(config: Config, arm):
@@ -48,6 +51,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.config = config
     app.state.arm = arm
     app.state.cofre = criar_cofre(config.chave_cifra)
+    app.state.conferir_chave = conferir_chave  # os testes trocam por um falso: nada sai para a Anthropic
     # no banco, os arquivos dependem do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
     adiar = config.arquivos == "banco" and arm is None
     app.state.arquivos = None if adiar else _arquivos(config, arm)
@@ -55,6 +59,12 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     @app.exception_handler(ErroNegocio)
     async def _erro_negocio(_: Request, e: ErroNegocio):
         return JSONResponse(status_code=e.codigo, content={"detail": e.mensagem})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validacao(_: Request, e: RequestValidationError):
+        # Igual ao padrão do FastAPI, menos o valor recusado: ele pode ser uma senha ou a chave da Anthropic.
+        erros = [{k: v for k, v in x.items() if k not in ("input", "url")} for x in e.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(erros)})
 
     @app.exception_handler(RegraViolada)
     async def _regra(_: Request, e: RegraViolada):

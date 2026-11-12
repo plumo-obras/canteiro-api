@@ -27,7 +27,7 @@ description: Use ao criar ou mudar um endpoint da canteiro-api (arquivo em `src/
 ## Papéis
 
 - `Papel` em `modelos.py`: `viewer` < `admin` < `master` (`NIVEL`). Leitura: `Depends(usuario_atual)`. Ação de
-  operação: `admin = exigir(Papel.ADMIN)`. Conta/chave da Anthropic: `exigir(Papel.MASTER)`. Propor é qualquer papel;
+  operação: `admin = exigir(Papel.ADMIN)`. Chave da Anthropic: `exigir(Papel.ADMIN)`. Propor é qualquer papel;
   aprovar é admin+.
 - O papel é lido do banco a cada requisição (`auth.resolver_usuario`); rebaixar vale na hora. A web só esconde botão.
 - Rotas do agente: `auth.servico_agente` / `auth.usuario_pelo_agente()` (token de serviço + `X-Canteiro-Usuario`).

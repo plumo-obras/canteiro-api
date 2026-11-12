@@ -1,4 +1,5 @@
 """Consumo de IA (token de serviço + usuário conferido), créditos, chave própria e sessões de conversa."""
+import pytest
 from conftest import nova_vila
 
 from canteiro_dominio.tipos import novo_id
@@ -65,9 +66,11 @@ async def test_sem_creditos_402(vila, config):
 
 async def test_chave_propria_cifrada_e_entregue_so_ao_agente(vila, config):
     chave = "sk-ant-teste-" + novo_id()
-    assert (await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=vila.h)).status_code == 403
-    h_master, _ = await vila.usuario("master")
-    r = await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_master)
+    h_viewer, _ = await vila.usuario("viewer")
+    assert (await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_viewer)).status_code == 403
+    assert (await vila.http.delete("/conta/chave-anthropic", headers=h_viewer)).status_code == 403
+    h_admin = vila.h                                                      # admin já conecta, troca e remove
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_admin)
     assert r.json() == {"chave_propria": True, "final": chave[-4:]}
     guardado = await vila.arm.obter("segredos", vila.tenant_id, f"anthropic-{vila.tenant_id}")
     assert chave not in str(guardado)                                     # cifrada em repouso
@@ -89,13 +92,13 @@ async def test_chave_propria_cifrada_e_entregue_so_ao_agente(vila, config):
     with pytest.raises(SegredoIlegivel):
         CofreAesGcm(config.chave_cifra).decifrar(guardado["cifrado"], tenant_id="outro")
 
-    await vila.http.delete("/conta/chave-anthropic", headers=h_master)
+    assert (await vila.http.delete("/conta/chave-anthropic", headers=h_admin)).status_code == 200
     assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).status_code == 404
 
 
 async def test_chave_propria_no_registro_sem_desfazer_e_sem_segredo(vila, config):
     """Exceção documentada em rotas/sessoes.py: o registro mostra conectar/desconectar, mas não guarda receita que
-    precisaria do segredo, nem deixa um admin desconectar pela porta dos fundos do Desfazer."""
+    precisaria do segredo: voltar atrás é desconectar ou colar a chave de novo."""
     chave = "sk-ant-teste-" + novo_id()
     h_master, _ = await vila.usuario("master")
     await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_master)
@@ -113,6 +116,67 @@ async def test_chave_propria_no_registro_sem_desfazer_e_sem_segredo(vila, config
         r = await vila.http.post(f"/registro/{x['id']}/desfazer", headers=h_master)
         assert r.status_code == 422 and "não tem como ser desfeita" in r.json()["detail"]
     assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).status_code == 404
+
+
+async def test_chave_recusada_pela_anthropic_nao_troca_a_que_funciona(vila, config):
+    boa = "sk-ant-teste-" + novo_id()
+    assert (await vila.http.put("/conta/chave-anthropic", json={"chave": boa}, headers=vila.h)).status_code == 200
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": "sk-ant-teste-" + novo_id() + "-recusada"},
+                            headers=vila.h)
+    assert r.status_code == 422 and "recusou" in r.json()["detail"]
+    assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).json() == {"chave": boa}
+    regs = (await vila.http.get("/registro", headers=vila.h)).json()
+    assert sum(x["texto"].startswith("Conectou a chave própria") for x in regs) == 1
+
+    # Anthropic fora do ar: 503, e também nada muda
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": "sk-ant-teste-" + novo_id() + "-fora"},
+                            headers=vila.h)
+    assert r.status_code == 503
+    assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).json() == {"chave": boa}
+    regs = (await vila.http.get("/registro", headers=vila.h)).json()
+    assert sum(x["texto"].startswith("Conectou a chave própria") for x in regs) == 1
+
+
+async def test_chave_colada_com_bordas_e_formato_fechado(vila, config):
+    """Espaço ou quebra de linha nas bordas (colar do Console) é limpo; no meio, ou caractere fora do formato, é 422
+    antes de qualquer chamada à Anthropic."""
+    chave = "sk-ant-teste-" + novo_id()
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": f"  {chave}\n"}, headers=vila.h)
+    assert r.status_code == 200 and r.json()["final"] == chave[-4:]
+    interna = await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))
+    assert interna.json() == {"chave": chave}
+    for ruim in (chave[:15] + " " + chave[15:], chave[:15] + "\n" + chave[15:], chave + "é"):
+        r = await vila.http.put("/conta/chave-anthropic", json={"chave": ruim}, headers=vila.h)
+        assert r.status_code == 422 and ruim not in r.text
+
+
+@pytest.mark.parametrize("status,erro", [(200, None), (429, None), (401, "ChaveRecusada"), (403, "ChaveRecusada"),
+                                         (500, "AnthropicForaDoAr")])
+async def test_conferir_chave_na_anthropic(status, erro):
+    """A conferência de verdade, contra uma Anthropic falsa: só a lista de modelos, com a chave no cabeçalho."""
+    import anthropic
+    import httpx2
+
+    from canteiro_api.servicos import chave_anthropic
+
+    pedidos = []
+
+    def responder(req: httpx2.Request) -> httpx2.Response:
+        pedidos.append(req)
+        return httpx2.Response(status, json={"data": [], "has_more": False, "first_id": None, "last_id": None}
+                              if status == 200 else {"type": "error", "error": {"type": "x", "message": "x"}},
+                              headers={"retry-after": "0"})
+
+    async with anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(responder)) as http_client:
+        if erro:
+            with pytest.raises(getattr(chave_anthropic, erro)) as e:
+                await chave_anthropic.conferir_chave("sk-ant-falsa-123456789012", http_client=http_client)
+            assert "sk-ant-falsa" not in e.value.mensagem
+        else:
+            await chave_anthropic.conferir_chave("sk-ant-falsa-123456789012", http_client=http_client)
+    assert all(p.method == "GET" and p.url.path == "/v1/models" for p in pedidos)
+    h = pedidos[0].headers                       # a chave do cliente; o cabeçalho quem escolhe é o SDK
+    assert "sk-ant-falsa-123456789012" in h.get("authorization", "") + h.get("x-api-key", "")
 
 
 # --- sessões ---
