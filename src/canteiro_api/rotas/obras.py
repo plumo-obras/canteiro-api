@@ -205,6 +205,13 @@ async def editar_item_orcamento(obra_id: str, item_id: str, corpo: ItemOrcamento
     return await versoes.editar_item(arm, u, obra_id, item_id, corpo.model_dump(exclude_none=True))
 
 
+@r.post("/obras/{obra_id}/orcamento/organizar-fases", tags=["orçamento"])
+async def organizar_fases(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
+    """Reorganiza os serviços do orçamento em etapas por fase de obra (Fundação, Estrutura... Entrega), para o
+    cronograma prever a obra completa. Com Desfazer."""
+    return await versoes.organizar_em_fases(arm, u, obra_id)
+
+
 @r.post("/obras/{obra_id}/orcamento/aprovar", response_model=AprovacaoSaida, tags=["orçamento"])
 async def aprovar_orcamento(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     """Tira a obra de `em_orcamento` e, com contrato importado, gera os insumos de Compras."""

@@ -396,6 +396,7 @@ _DESFAZER = {
     "reabrir_orcamento": obras.preparar_reabrir,
     "desligar_versao": versoes.preparar_desligar,
     "editar_item_orcamento": versoes.preparar_desfazer_item,
+    "restaurar_etapas": versoes.preparar_restaurar_etapas,
     "restaurar_insumos": preparar_restaurar_insumos,
     "editar_arvore": gastos.preparar_desfazer_arvore,
     "estornar_gasto": gastos.preparar_estorno_gasto,
