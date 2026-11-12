@@ -99,7 +99,9 @@ async def preparar_salvar(tx, u: UsuarioAtual, obra_id: str, corpo: CronogramaCo
     # primeira reprogramação já apagaria o atraso
     if atual and not atual.get("base"):
         atual = {**atual, "base": {k: atual[k] for k in ("inicio", "meses", "etapas")}}
-    nova_base = not atual or corpo.nova_linha_base
+    # uma casca de cronograma desfeito (sem etapas, meses 0) não é linha de base: aprovar por cima começa base nova,
+    # senão a `base` herdada teria 0 meses e a série da linha de base sairia vazia
+    nova_base = not atual or not atual.get("etapas") or corpo.nova_linha_base
     campos = {**vigente, "versao": (atual["versao"] + 1) if atual else 1,
               "base": vigente if nova_base else atual["base"],
               "revisoes": 0 if nova_base else (atual.get("revisoes") or 0) + 1}
@@ -369,7 +371,7 @@ async def cronograma_da_obra(arm, tenant_id: str, obra_id: str, orcamento=None) 
     serie_base = _serie({e["etapa"]: e["percentuais"] for e in base["etapas"]}, orcadas, base["meses"])
     for k, linha in enumerate(mensal):
         j = ini + k - b_ini
-        linha.pct_base_acumulado = 0 if j < 0 else serie_base[min(j, len(serie_base) - 1)]
+        linha.pct_base_acumulado = 0 if j < 0 or not serie_base else serie_base[min(j, len(serie_base) - 1)]
     termino = ini + c["meses"] - 1
     termino_base = b_ini + base["meses"] - 1
     prazo = Prazo(termino_contratual=_mes(termino), termino_base=_mes(termino_base))
