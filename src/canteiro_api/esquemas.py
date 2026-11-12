@@ -738,7 +738,14 @@ class Creditos(BaseModel):
 # --- chave própria da Anthropic ---
 
 class ChaveCorpo(Entrada):
-    chave: str = Field(min_length=20, max_length=300, pattern=r"^sk-ant-")
+    # O formato inteiro, não só o começo: espaço ou quebra de linha colados junto viram cabeçalho HTTP inválido, e a
+    # conferência na Anthropic responderia "fora do ar" para sempre. As bordas a gente limpa; o meio, recusa.
+    chave: str = Field(min_length=20, max_length=300, pattern=r"^sk-ant-[A-Za-z0-9_-]+$")
+
+    @field_validator("chave", mode="before")
+    @classmethod
+    def _sem_bordas(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
 
 class ChaveSituacao(BaseModel):
@@ -755,6 +762,7 @@ class ChaveEstado(BaseModel):
     ativa: bool
     final: str | None = Field(None, description="só os 4 últimos caracteres")
     cadastrada_em: datetime | None = None
+    conectada_por: str | None = Field(None, description="nome de quem conectou; null se a pessoa não existe mais")
 
 
 # --- conta (perfil + cliente + créditos) ---

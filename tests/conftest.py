@@ -87,11 +87,14 @@ class Vila:
 
 
 async def conferir_chave_falsa(chave: str) -> None:
-    """No lugar da conferência na Anthropic: nada sai para a rede, e só a chave terminada em -recusada é recusada."""
-    from canteiro_api.servicos.chave_anthropic import ChaveRecusada
+    """No lugar da conferência na Anthropic: nada sai para a rede. Chave terminada em -recusada é recusada; em -fora,
+    a Anthropic está fora do ar."""
+    from canteiro_api.servicos.chave_anthropic import AnthropicForaDoAr, ChaveRecusada
 
     if chave.endswith("-recusada"):
         raise ChaveRecusada("A Anthropic recusou essa chave.")
+    if chave.endswith("-fora"):
+        raise AnthropicForaDoAr("Não consegui confirmar a chave com a Anthropic agora.")
 
 
 @pytest.fixture

@@ -69,8 +69,8 @@ async def test_chave_propria_cifrada_e_entregue_so_ao_agente(vila, config):
     h_viewer, _ = await vila.usuario("viewer")
     assert (await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_viewer)).status_code == 403
     assert (await vila.http.delete("/conta/chave-anthropic", headers=h_viewer)).status_code == 403
-    h_master = vila.h                                                     # admin já conecta, troca e remove
-    r = await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_master)
+    h_admin = vila.h                                                      # admin já conecta, troca e remove
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_admin)
     assert r.json() == {"chave_propria": True, "final": chave[-4:]}
     guardado = await vila.arm.obter("segredos", vila.tenant_id, f"anthropic-{vila.tenant_id}")
     assert chave not in str(guardado)                                     # cifrada em repouso
@@ -92,7 +92,7 @@ async def test_chave_propria_cifrada_e_entregue_so_ao_agente(vila, config):
     with pytest.raises(SegredoIlegivel):
         CofreAesGcm(config.chave_cifra).decifrar(guardado["cifrado"], tenant_id="outro")
 
-    await vila.http.delete("/conta/chave-anthropic", headers=h_master)
+    assert (await vila.http.delete("/conta/chave-anthropic", headers=h_admin)).status_code == 200
     assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).status_code == 404
 
 
@@ -127,6 +127,27 @@ async def test_chave_recusada_pela_anthropic_nao_troca_a_que_funciona(vila, conf
     assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).json() == {"chave": boa}
     regs = (await vila.http.get("/registro", headers=vila.h)).json()
     assert sum(x["texto"].startswith("Conectou a chave própria") for x in regs) == 1
+
+    # Anthropic fora do ar: 503, e também nada muda
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": "sk-ant-teste-" + novo_id() + "-fora"},
+                            headers=vila.h)
+    assert r.status_code == 503
+    assert (await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))).json() == {"chave": boa}
+    regs = (await vila.http.get("/registro", headers=vila.h)).json()
+    assert sum(x["texto"].startswith("Conectou a chave própria") for x in regs) == 1
+
+
+async def test_chave_colada_com_bordas_e_formato_fechado(vila, config):
+    """Espaço ou quebra de linha nas bordas (colar do Console) é limpo; no meio, ou caractere fora do formato, é 422
+    antes de qualquer chamada à Anthropic."""
+    chave = "sk-ant-teste-" + novo_id()
+    r = await vila.http.put("/conta/chave-anthropic", json={"chave": f"  {chave}\n"}, headers=vila.h)
+    assert r.status_code == 200 and r.json()["final"] == chave[-4:]
+    interna = await vila.http.get("/interno/chave-anthropic", headers=cab_servico(vila, config))
+    assert interna.json() == {"chave": chave}
+    for ruim in (chave[:15] + " " + chave[15:], chave[:15] + "\n" + chave[15:], chave + "é"):
+        r = await vila.http.put("/conta/chave-anthropic", json={"chave": ruim}, headers=vila.h)
+        assert r.status_code == 422 and ruim not in r.text
 
 
 @pytest.mark.parametrize("status,erro", [(200, None), (429, None), (401, "ChaveRecusada"), (403, "ChaveRecusada"),

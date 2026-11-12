@@ -90,7 +90,10 @@ async def _chave_estado(arm, tenant_id: str) -> ChaveEstado:
     s = await arm.obter("segredos", tenant_id, _id_segredo(tenant_id))
     if not t or not t["chave_propria"] or not s or not s.get("cifrado"):
         return ChaveEstado(ativa=False)
-    return ChaveEstado(ativa=True, final=s.get("final"), cadastrada_em=s.get("atualizado_em"))
+    # quem conectou fica à vista de todos os papéis: um admin pode trocar a conta que paga a IA da empresa
+    quem = await arm.obter("usuarios", tenant_id, s["por"]) if s.get("por") else None
+    return ChaveEstado(ativa=True, final=s.get("final"), cadastrada_em=s.get("atualizado_em"),
+                       conectada_por=quem["nome"] if quem else None)
 
 
 @r.get("/conta", response_model=MinhaConta, tags=["conta"])

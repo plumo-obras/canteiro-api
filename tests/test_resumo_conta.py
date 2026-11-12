@@ -98,10 +98,11 @@ async def test_conta_papel_vem_do_banco(vila):
 
 async def test_situacao_da_chave_sem_o_segredo(vila, http, arm, config):
     estado = await vila.http.get("/conta/chave-anthropic", headers=vila.h)
-    assert estado.json() == {"ativa": False, "final": None, "cadastrada_em": None}
+    assert estado.json() == {"ativa": False, "final": None, "cadastrada_em": None, "conectada_por": None}
 
     chave = "sk-ant-teste-" + novo_id()
-    h_master, _ = await vila.usuario("master")
+    h_master, master = await vila.usuario("master")
+    nome_master = master["nome"] if isinstance(master, dict) else master.nome
     assert (await vila.http.put("/conta/chave-anthropic", json={"chave": chave}, headers=h_master)).status_code == 200
 
     h_viewer, _ = await vila.usuario("viewer")
@@ -109,6 +110,7 @@ async def test_situacao_da_chave_sem_o_segredo(vila, http, arm, config):
         r = await vila.http.get("/conta/chave-anthropic", headers=h)
         assert r.status_code == 200
         assert r.json()["ativa"] is True and r.json()["final"] == chave[-4:] and r.json()["cadastrada_em"]
+        assert r.json()["conectada_por"] == nome_master                     # todos veem quem conectou
         assert chave not in r.text and "cifrado" not in r.text
         conta = await vila.http.get("/conta", headers=h)
         assert conta.json()["chave_propria"]["final"] == chave[-4:] and chave not in conta.text
@@ -121,7 +123,7 @@ async def test_situacao_da_chave_sem_o_segredo(vila, http, arm, config):
 
     await vila.http.delete("/conta/chave-anthropic", headers=h_master)
     assert (await vila.http.get("/conta/chave-anthropic", headers=h_viewer)).json() == {
-        "ativa": False, "final": None, "cadastrada_em": None}
+        "ativa": False, "final": None, "cadastrada_em": None, "conectada_por": None}
     assert (await vila.http.get("/conta", headers=h_viewer)).json()["chave_propria"] is None
 
 

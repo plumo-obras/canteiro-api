@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from functools import cache
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -57,6 +59,12 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     @app.exception_handler(ErroNegocio)
     async def _erro_negocio(_: Request, e: ErroNegocio):
         return JSONResponse(status_code=e.codigo, content={"detail": e.mensagem})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validacao(_: Request, e: RequestValidationError):
+        # Igual ao padrão do FastAPI, menos o valor recusado: ele pode ser uma senha ou a chave da Anthropic.
+        erros = [{k: v for k, v in x.items() if k not in ("input", "url")} for x in e.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(erros)})
 
     @app.exception_handler(RegraViolada)
     async def _regra(_: Request, e: RegraViolada):

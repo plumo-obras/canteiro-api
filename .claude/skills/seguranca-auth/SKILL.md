@@ -48,6 +48,9 @@ direita. Nunca `--proxy-headers` no uvicorn (ver `Dockerfile`).
 - Chave própria da Anthropic: conferida na Anthropic antes de gravar (`servicos/chave_anthropic.py`), cifrada com
   AES-GCM (`cofre.py`, `CHAVE_CIFRA`), só sai por `GET /interno/chave-anthropic` para o serviço do agente. Admin ou
   master conecta e remove.
+- Nunca ligue `ANTHROPIC_LOG=debug` fora da máquina local: o log de depuração do SDK leva o cabeçalho com a chave do
+  cliente que está sendo conferida.
+- Erro de validação (422) não devolve o valor recusado (`_validacao` em `main.py`): pode ser senha ou chave.
 - Log nunca leva token, senha, hash, chave, e-mail ou corpo de documento. `pymongo.command` fica travado em INFO
   (`armazenamento/mongo.py`). Mensagem de erro para o cliente não ecoa o segredo recebido.
 
