@@ -13,10 +13,12 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import StrEnum
 
 JORNADA_H = 8  # horas úteis por dia de trabalho (1 turno)
 DIAS_UTEIS_SEMANA = 5
+CEM = 10000  # 100% em centésimos de ponto percentual (como no resto do cronograma)
 
 
 class Servico(StrEnum):
@@ -155,6 +157,10 @@ class ServicoDoPlano:
     hh_por_unidade: float | None = None
     equipe: int | None = None
     depende_de: list[str] = field(default_factory=list)
+    # Quando o nó já tem a duração pronta (ex.: uma ETAPA, que soma vários serviços): usa esta em vez de calcular por
+    # quantidade. lag_fixo idem para a cura do nó composto.
+    duracao_dias_fixa: int | None = None
+    lag_fixo: int | None = None
 
 
 @dataclass(frozen=True)
@@ -230,7 +236,10 @@ def montar_plano(servicos: list[ServicoDoPlano]) -> Plano:
         visitando.add(sid)
         s = por_id[sid]
         fam, hh, equipe, lag = _resolver(s)
-        dur = duracao_dias(s.quantidade_milesimos, hh, equipe)
+        dur = (s.duracao_dias_fixa if s.duracao_dias_fixa is not None
+               else duracao_dias(s.quantidade_milesimos, hh, equipe))
+        if s.lag_fixo is not None:
+            lag = s.lag_fixo
         inicio = 0
         for dep in s.depende_de:
             inicio = max(inicio, agendar(dep).liberado_dia)
@@ -263,3 +272,128 @@ def montar_plano(servicos: list[ServicoDoPlano]) -> Plano:
         alvo = anterior
     critico.reverse()
     return Plano(servicos=ordenados, dias_uteis=total, critico=critico)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Nível de ETAPA: o corpo armazenado do cronograma é etapa × mês (%). Então agregamos os serviços de cada etapa numa
+# duração só (em dias úteis), agendamos as etapas com as dependências do planejador, e convertemos para meses.
+# ---------------------------------------------------------------------------------------------------------------------
+
+def dias_uteis_de_itens(itens: list[ServicoDoPlano], equipe: int) -> tuple[int, int, list[tuple[Servico, int]]]:
+    """Dias úteis de uma etapa a partir dos seus itens, com uma equipe.
+
+    Soma o homem-hora por família de serviço (quantidade × HH/un), vira dias por família, e soma as famílias na ORDEM
+    de obra — dentro de uma etapa fôrma→armação→concreto são sequenciais, então somar é o realista (e conservador).
+    Devolve (dias_uteis, lag_de_cura, [(família, dias)]). lag = maior cura entre as famílias de concreto da etapa."""
+    hh_por_familia: dict[Servico, float] = {}
+    for it in itens:
+        fam, hh, _equipe, _lag = _resolver(it)
+        if hh <= 0 or it.quantidade_milesimos <= 0:
+            continue
+        hh_por_familia[fam] = hh_por_familia.get(fam, 0.0) + _quant_unidades(it.quantidade_milesimos) * hh
+    por_familia: list[tuple[Servico, int]] = []
+    for fam in sorted(hh_por_familia, key=lambda f: ORDEM.get(f, 99)):
+        dias = max(1, math.ceil(hh_por_familia[fam] / (max(1, equipe) * JORNADA_H)))
+        por_familia.append((fam, dias))
+    total = sum(d for _, d in por_familia)
+    lag = max((REFERENCIA[f].lag_pos_dias for f, _ in por_familia if f in REFERENCIA), default=0)
+    return total, lag, por_familia
+
+
+def _primeiro_dia_util(d: date) -> date:
+    while d.weekday() >= DIAS_UTEIS_SEMANA:
+        d += timedelta(days=1)
+    return d
+
+
+def _data_do_dia_util(base: date, dia_util: int) -> date:
+    """Data de calendário do n-ésimo dia útil a partir de `base` (dia útil 0 = o primeiro dia útil em/após base)."""
+    d = _primeiro_dia_util(base)
+    passos = 0
+    while passos < dia_util:
+        d += timedelta(days=1)
+        if d.weekday() < DIAS_UTEIS_SEMANA:
+            passos += 1
+    return d
+
+
+def meses_das_etapas(agendados: list[ServicoAgendado], inicio: date) -> tuple[int, dict[str, tuple[int, int]]]:
+    """Converte o agendamento (dias úteis) em índices de mês, contando do mês de `inicio`. Devolve (total_de_meses,
+    {id_da_etapa: (mês_de_início, mês_de_fim)}), ambos inclusivos e começando em 0."""
+    base = _primeiro_dia_util(inicio)
+
+    def mes_idx(d: date) -> int:
+        return (d.year - base.year) * 12 + (d.month - base.month)
+
+    faixas: dict[str, tuple[int, int]] = {}
+    for a in agendados:
+        de = mes_idx(_data_do_dia_util(base, a.inicio_dia))
+        # o último dia trabalhado é fim_dia - 1 (fim_dia é exclusivo)
+        ate = mes_idx(_data_do_dia_util(base, max(a.inicio_dia, a.fim_dia - 1)))
+        faixas[a.id] = (de, ate)
+    total = max((ate for _, ate in faixas.values()), default=0) + 1
+    return total, faixas
+
+
+def grade_meses(de: int, ate: int, total_meses: int) -> list[int]:
+    """% por mês (centésimos, soma CEM) de uma etapa que vai do mês `de` ao `ate` (inclusive), espalhado por igual —
+    o mesmo critério do resto do sistema. Fora da faixa fica 0. Maior-resto para fechar exatamente CEM."""
+    de = max(0, de)
+    ate = max(de, min(ate, total_meses - 1))
+    n = ate - de + 1
+    base, resto = divmod(CEM, n)
+    grade = [0] * total_meses
+    for i in range(n):
+        grade[de + i] = base + (1 if i >= n - resto else 0)
+    return grade
+
+
+@dataclass
+class EtapaParaPlano:
+    """Uma etapa a planejar: seus itens (serviços do orçamento), a equipe que o planejador alocou e de que etapas ela
+    depende (chaves). equipe/depende_de vêm do planejador (mestre de obras)."""
+
+    id: str
+    itens: list[ServicoDoPlano]
+    equipe: int
+    depende_de: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EtapaNoCronograma:
+    id: str
+    dias_uteis: int
+    lag_dias: int
+    mes_inicio: int  # 0 = primeiro mês da obra
+    mes_fim: int
+    por_familia: list[tuple[Servico, int]]
+    percentuais: list[int]
+
+
+@dataclass(frozen=True)
+class CronogramaDeObra:
+    meses: int
+    etapas: list[EtapaNoCronograma]
+    dias_uteis: int
+    critico: list[str]
+
+
+def montar_cronograma_de_etapas(etapas: list[EtapaParaPlano], inicio: date) -> CronogramaDeObra:
+    """Pipeline completo: duração de cada etapa pelos seus serviços (produtividade), agenda com as dependências e a
+    cura, e converte para o corpo etapa × mês (%). A conta é toda daqui; o planejador só deu equipe e dependências."""
+    nos: list[ServicoDoPlano] = []
+    dur_lag: dict[str, tuple[int, int, list[tuple[Servico, int]]]] = {}
+    for e in etapas:
+        dias, lag, por_fam = dias_uteis_de_itens(e.itens, e.equipe)
+        dur_lag[e.id] = (dias, lag, por_fam)
+        nos.append(ServicoDoPlano(id=e.id, descricao=e.id, quantidade_milesimos=0, depende_de=list(e.depende_de),
+                                  duracao_dias_fixa=dias, lag_fixo=lag))
+    plano = montar_plano(nos)
+    total_meses, faixas = meses_das_etapas(plano.servicos, inicio)
+    saida: list[EtapaNoCronograma] = []
+    for a in plano.servicos:
+        de, ate = faixas[a.id]
+        dias, lag, por_fam = dur_lag[a.id]
+        saida.append(EtapaNoCronograma(id=a.id, dias_uteis=dias, lag_dias=lag, mes_inicio=de, mes_fim=ate,
+                                       por_familia=por_fam, percentuais=grade_meses(de, ate, total_meses)))
+    return CronogramaDeObra(meses=total_meses, etapas=saida, dias_uteis=plano.dias_uteis, critico=plano.critico)

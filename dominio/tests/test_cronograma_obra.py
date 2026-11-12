@@ -120,3 +120,52 @@ class TestPlano:
                                                  equipe=20)])
         assert reforcado.servicos[0].duracao_dias <= base.servicos[0].duracao_dias
         assert reforcado.servicos[0].equipe == 20
+
+
+class TestPipelineEtapas:
+    def _etapas(self):
+        from canteiro_dominio.cronograma import EtapaParaPlano, ServicoDoPlano
+        return [
+            EtapaParaPlano(id="fundacao", equipe=4, itens=[
+                ServicoDoPlano("f1", "Fôrma de sapata", 60_000, "m2"),
+                ServicoDoPlano("f2", "Armação de sapata", 850_000, "kg"),
+                ServicoDoPlano("f3", "Concreto fck25 sapata", 28_000, "m3"),
+            ]),
+            EtapaParaPlano(id="estrutura", equipe=5, depende_de=["fundacao"], itens=[
+                ServicoDoPlano("e1", "Fôrma de pilares e lajes", 320_000, "m2"),
+                ServicoDoPlano("e2", "Armação da estrutura", 3_200_000, "kg"),
+                ServicoDoPlano("e3", "Concreto fck30", 52_000, "m3"),
+            ]),
+            EtapaParaPlano(id="alvenaria", equipe=4, depende_de=["estrutura"], itens=[
+                ServicoDoPlano("a1", "Alvenaria de bloco", 420_000, "m2"),
+            ]),
+        ]
+
+    def test_meses_saem_da_produtividade_e_da_sequencia(self):
+        from datetime import date
+
+        from canteiro_dominio.cronograma import montar_cronograma_de_etapas
+        cr = montar_cronograma_de_etapas(self._etapas(), date(2026, 11, 16))
+        fund = next(e for e in cr.etapas if e.id == "fundacao")
+        estr = next(e for e in cr.etapas if e.id == "estrutura")
+        alv = next(e for e in cr.etapas if e.id == "alvenaria")
+        # a estrutura começa depois da fundação (incl. cura); a alvenaria depois da estrutura
+        assert estr.mes_inicio >= fund.mes_fim
+        assert alv.mes_inicio >= estr.mes_fim
+        # cada etapa fecha 100% nos seus meses
+        for e in cr.etapas:
+            assert sum(e.percentuais) == 10000
+            assert len(e.percentuais) == cr.meses
+        # a fundação tem as três famílias (fôrma, armação, concreto) na conta da duração
+        familias = {f.value for f, _ in fund.por_familia}
+        assert "forma" in familias and "armacao" in familias and "fundacao_concreto" in familias
+        assert cr.meses >= 1 and cr.dias_uteis > 0
+
+    def test_mais_equipe_encurta_a_etapa(self):
+        from datetime import date
+
+        from canteiro_dominio.cronograma import EtapaParaPlano, ServicoDoPlano, montar_cronograma_de_etapas
+        itens = [ServicoDoPlano("a1", "Alvenaria de bloco", 2_000_000, "m2")]
+        magro = montar_cronograma_de_etapas([EtapaParaPlano("alv", itens, equipe=2)], date(2026, 11, 16))
+        reforcado = montar_cronograma_de_etapas([EtapaParaPlano("alv", itens, equipe=10)], date(2026, 11, 16))
+        assert reforcado.etapas[0].dias_uteis < magro.etapas[0].dias_uteis
