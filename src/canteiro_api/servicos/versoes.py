@@ -1464,8 +1464,9 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
                 ordem=i, tipo="etapa", nivel=1, etapa=k, descricao=f)))
         for iid, e, n, existe in criar_item:
             vu = round(e.valor_centavos * 1000 / e.quantidade_milesimos) if e.quantidade_milesimos else 0
-            campos = {"etapa": chave[e.fase], "descricao": e.descricao, "codigo": e.codigo, "unidade": e.unidade,
-                      "quantidade": e.quantidade_milesimos, "valor_unitario": vu, "total": e.valor_centavos}
+            campos = {"etapa": chave[e.fase], "descricao": e.descricao, "codigo": e.codigo, "fonte": "estimativa",
+                      "unidade": e.unidade, "quantidade": e.quantidade_milesimos, "valor_unitario": vu,
+                      "total": e.valor_centavos}
             if existe:
                 tx.atualizar("itens_orcamento", u.tenant_id, iid, campos)
             else:
