@@ -300,6 +300,7 @@ AJUSTAVEIS: dict[TipoProposta, set[str]] = {
     TipoProposta.AVANCAR_PEDIDO: {"quantidade_recebida", "nf"},
     TipoProposta.AJUSTE_ESTOQUE: {"quantidade", "motivo"},
     TipoProposta.REGISTRAR_ENTREGA: {"linhas", "nf_numero", "nf_data", "nf_valor", "confirmar_excesso"},
+    TipoProposta.CRONOGRAMA: set(),  # a proposta de cronograma não se ajusta campo a campo: aprova ou recusa
 }
 
 
@@ -1133,6 +1134,10 @@ class CronogramaCorpo(Entrada):
                                                              "mesma transação (e o desfazer volta os dois)")
     nova_linha_base: bool = Field(False, description="troca a linha de base por este cronograma (o atraso passa a "
                                                      "ser medido contra ele)")
+
+
+# a proposta de cronograma carrega o mesmo corpo do PUT (início, meses, etapas × %)
+DADOS_POR_TIPO[TipoProposta.CRONOGRAMA] = CronogramaCorpo
 
 
 class EtapaMedicaoCorpo(Entrada):
