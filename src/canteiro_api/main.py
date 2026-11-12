@@ -18,6 +18,7 @@ from .config import Config
 from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
 from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, sessoes
+from .servicos.chave_anthropic import conferir_chave
 
 
 def _arquivos(config: Config, arm):
@@ -48,6 +49,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
     app.state.config = config
     app.state.arm = arm
     app.state.cofre = criar_cofre(config.chave_cifra)
+    app.state.conferir_chave = conferir_chave  # os testes trocam por um falso: nada sai para a Anthropic
     # no banco, os arquivos dependem do armazenamento, que só nasce no `ciclo` (salvo quando o teste já entrega o `arm`)
     adiar = config.arquivos == "banco" and arm is None
     app.state.arquivos = None if adiar else _arquivos(config, arm)

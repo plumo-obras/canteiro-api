@@ -860,10 +860,12 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
   `saldo_microdolares` zerado (é a tela onde a pessoa vê isso). Pagamento de créditos ainda não existe.
 - `GET /conta/chave-anthropic` (qualquer papel) → `{ativa, final, cadastrada_em}` (`{false, null, null}` sem chave).
   Nunca traz a chave nem o cifrado. `final` = os 4 últimos caracteres (a tela põe o "…").
-- `PUT /conta/chave-anthropic` `{chave}` (papel `master`) → `{chave_propria: true, final: "abcd"}`. Guardada cifrada
-  (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE` desconecta.
-  Conectar e desconectar entram no registro **sem `desfazer`**, por decisão: a receita teria de guardar o segredo
-  (desfazer a desconexão), e o Desfazer é de admin enquanto a chave é só do master. Voltar atrás é `PUT`/`DELETE`.
+- `PUT /conta/chave-anthropic` `{chave}` (papel `admin` ou acima) → `{chave_propria: true, final: "abcd"}`. Antes de
+  guardar, a API confere a chave na Anthropic (`GET /v1/models`, não gasta token): recusada → 422 com a mensagem,
+  Anthropic fora do ar → 503; nos dois casos a chave anterior continua. Não confere saldo da organização. Guardada
+  cifrada (AES-GCM com `CHAVE_CIFRA` do ambiente, atrás da interface `Cofre`; depois Secret Manager). `DELETE`
+  (admin) desconecta. Conectar e desconectar entram no registro **sem `desfazer`**, por decisão: a receita teria de
+  guardar o segredo (desfazer a desconexão). Voltar atrás é `PUT`/`DELETE`.
 - `GET /interno/chave-anthropic` (só o serviço do agente: `Authorization: Bearer <token de serviço>` +
   `X-Canteiro-Usuario: Bearer <acesso do usuário>`) → `{chave}` com `Cache-Control: no-store`; 404 sem chave própria.
 

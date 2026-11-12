@@ -86,6 +86,14 @@ class Vila:
         return {"Authorization": f"Bearer {r.json()['acesso']}"}, u
 
 
+async def conferir_chave_falsa(chave: str) -> None:
+    """No lugar da conferência na Anthropic: nada sai para a rede, e só a chave terminada em -recusada é recusada."""
+    from canteiro_api.servicos.chave_anthropic import ChaveRecusada
+
+    if chave.endswith("-recusada"):
+        raise ChaveRecusada("A Anthropic recusou essa chave.")
+
+
 @pytest.fixture
 async def http(arm, config):
     import httpx
@@ -94,6 +102,7 @@ async def http(arm, config):
 
     # ARQUIVOS=banco: os comprovantes vão para o mesmo armazenamento do teste (Mongo descartável ou memória)
     app = create_app(config, arm)
+    app.state.conferir_chave = conferir_chave_falsa
     ip = f"10.{secrets.randbelow(255)}.{secrets.randbelow(255)}.{secrets.randbelow(255)}"
     transporte = httpx.ASGITransport(app=app, client=(ip, 5555))
     async with httpx.AsyncClient(transport=transporte, base_url="http://teste") as c:

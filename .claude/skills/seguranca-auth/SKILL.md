@@ -45,8 +45,9 @@ direita. Nunca `--proxy-headers` no uvicorn (ver `Dockerfile`).
 
 ## Segredos guardados e logs
 
-- Chave própria da Anthropic: cifrada com AES-GCM (`cofre.py`, `CHAVE_CIFRA`), só sai por
-  `GET /interno/chave-anthropic` para o serviço do agente.
+- Chave própria da Anthropic: conferida na Anthropic antes de gravar (`servicos/chave_anthropic.py`), cifrada com
+  AES-GCM (`cofre.py`, `CHAVE_CIFRA`), só sai por `GET /interno/chave-anthropic` para o serviço do agente. Admin ou
+  master conecta e remove.
 - Log nunca leva token, senha, hash, chave, e-mail ou corpo de documento. `pymongo.command` fica travado em INFO
   (`armazenamento/mongo.py`). Mensagem de erro para o cliente não ecoa o segredo recebido.
 

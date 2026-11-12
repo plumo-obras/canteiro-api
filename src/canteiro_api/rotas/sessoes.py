@@ -78,9 +78,8 @@ async def acrescentar_mensagens(sessao_id: str, corpo: MensagensCorpo, response:
 # EXCEÇÃO À REGRA DO DESFAZER, deliberada: conectar e desconectar entram no registro SEM receita de desfazer.
 # - Desfazer a desconexão teria de devolver o segredo, e para isso a receita guardaria a chave (cifrada ou não). O
 #   registro é lido por qualquer papel, copiado para auditoria e nunca expira: não é lugar de segredo.
-# - Desfazer a conexão seria desconectar, mas pelo registro isso passaria pelo /registro/{id}/desfazer, que é de
-#   admin, enquanto mexer na chave é só do master; e, se a chave foi trocada depois, "desfazer" não volta a anterior.
-# O caminho de volta é explícito e do master: DELETE (desconectar) ou PUT com a chave colada de novo.
+# - Desfazer a conexão seria desconectar; se a chave foi trocada depois, "desfazer" não volta a anterior.
+# O caminho de volta é explícito, de admin para cima: DELETE (desconectar) ou PUT com a chave colada de novo.
 
 def _id_segredo(tenant_id: str) -> str:
     return f"anthropic-{tenant_id}"
@@ -113,8 +112,10 @@ async def situacao_chave(u: UsuarioAtual = Depends(usuario_atual), arm=Depends(_
 
 
 @r.put("/conta/chave-anthropic", response_model=ChaveSituacao, tags=["conta"])
-async def conectar_chave(corpo: ChaveCorpo, request: Request, u: UsuarioAtual = Depends(exigir(Papel.MASTER)),
+async def conectar_chave(corpo: ChaveCorpo, request: Request, u: UsuarioAtual = Depends(exigir(Papel.ADMIN)),
                          arm=Depends(_arm)):
+    # antes de cifrar e gravar: chave recusada não troca a que já funciona
+    await request.app.state.conferir_chave(corpo.chave)
     cifrado = request.app.state.cofre.cifrar(corpo.chave, tenant_id=u.tenant_id)
     final = corpo.chave[-4:]
 
@@ -133,7 +134,7 @@ async def conectar_chave(corpo: ChaveCorpo, request: Request, u: UsuarioAtual = 
 
 
 @r.delete("/conta/chave-anthropic", response_model=ChaveSituacao, tags=["conta"])
-async def desconectar_chave(u: UsuarioAtual = Depends(exigir(Papel.MASTER)), arm=Depends(_arm)):
+async def desconectar_chave(u: UsuarioAtual = Depends(exigir(Papel.ADMIN)), arm=Depends(_arm)):
     async def tx_corpo(tx):
         if not await tx.obter("tenants", u.tenant_id, u.tenant_id):
             raise NaoEncontrado("Cliente não encontrado.")
