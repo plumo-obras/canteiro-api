@@ -443,3 +443,67 @@ def fase(descricao: str, codigo: str = "", unidade: str = "") -> str:
 def ordem_da_fase(nome: str) -> int:
     """Posição da fase na ordem de obra, para ordenar as etapas; a desconhecida ('Outros serviços') vai para o fim."""
     return FASES.index(nome) if nome in FASES else len(FASES)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Obra completa estimada: a 1ª previsão é especulação. Das fases que já têm orçamento, estima o porte da obra e as
+# fases que faltam (distribuição típica de custo por fase, à la CUB), para o cronograma nascer da fundação à entrega.
+# Conforme a pessoa detalha o orçamento de cada fase, a estimativa vira real.
+# ---------------------------------------------------------------------------------------------------------------------
+
+# Fração típica do custo total por fase (obra residencial). Soma 1,0. É ponto de partida; a pessoa ajusta ao detalhar.
+DISTRIBUICAO_FASE: dict[str, float] = {
+    "Serviços preliminares": 0.04, "Fundação": 0.07, "Estrutura": 0.18, "Alvenaria": 0.09, "Cobertura": 0.06,
+    "Instalações": 0.16, "Revestimento": 0.16, "Esquadrias": 0.10, "Pintura": 0.08, "Entrega": 0.06,
+}
+
+# Para cada fase, um serviço representativo (descrição que classifica na família certa, unidade e custo unitário típico
+# em centavos), para converter o valor estimado em quantidade — e o motor calcular a duração como em qualquer serviço.
+REPRESENTANTE_FASE: dict[str, tuple[str, str, int]] = {
+    "Serviços preliminares": ("Serviços preliminares (estimativa)", "m2", 4000),
+    "Fundação": ("Fundação em concreto (estimativa)", "m3", 55000),
+    "Estrutura": ("Estrutura em concreto (estimativa)", "m3", 60000),
+    "Alvenaria": ("Alvenaria (estimativa)", "m2", 8000),
+    "Cobertura": ("Cobertura (estimativa)", "m2", 18000),
+    "Instalações": ("Instalações elétricas e hidráulicas (estimativa)", "m2", 9000),
+    "Revestimento": ("Revestimento e reboco (estimativa)", "m2", 7000),
+    "Esquadrias": ("Esquadrias (estimativa)", "un", 120000),
+    "Pintura": ("Pintura (estimativa)", "m2", 2000),
+    "Entrega": ("Entrega e limpeza final (estimativa)", "m2", 1500),
+}
+
+
+@dataclass(frozen=True)
+class FaseEstimada:
+    fase: str
+    descricao: str
+    unidade: str
+    quantidade_milesimos: int
+    valor_centavos: int
+
+
+def estimar_fases_faltantes(valor_por_fase_real: dict[str, int], apenas: list[str] | None = None) -> list[FaseEstimada]:
+    """Estima as fases padrão que ainda não têm orçamento, a partir do valor das que têm. Porte da obra = soma do valor
+    real ÷ soma da fração típica dessas fases; cada fase que falta recebe porte × sua fração, virando uma quantidade
+    pelo custo unitário típico. `apenas` limita a estas fases (senão, todas as padrão que faltam).
+
+    valor_por_fase_real: {fase: valor em centavos} do que já está orçado. Vazio → não há como estimar (devolve [])."""
+    reais = {f: v for f, v in valor_por_fase_real.items() if f in DISTRIBUICAO_FASE and v > 0}
+    fracao_coberta = sum(DISTRIBUICAO_FASE[f] for f in reais)
+    if not reais or fracao_coberta <= 0:
+        return []
+    porte = sum(reais.values()) / fracao_coberta  # custo total estimado da obra, em centavos
+    alvo = [f for f in FASES if f in DISTRIBUICAO_FASE and f not in reais and (apenas is None or f in apenas)]
+    out: list[FaseEstimada] = []
+    for f in sorted(alvo, key=ordem_da_fase):
+        rep = REPRESENTANTE_FASE.get(f)
+        if not rep:
+            continue
+        descricao, unidade, custo_unit = rep
+        valor = round(porte * DISTRIBUICAO_FASE[f])
+        if valor <= 0 or custo_unit <= 0:
+            continue
+        quantidade = max(1000, round(valor * 1000 / custo_unit))  # milésimos da unidade (mín. 1)
+        out.append(FaseEstimada(fase=f, descricao=descricao, unidade=unidade,
+                                quantidade_milesimos=quantidade, valor_centavos=valor))
+    return out

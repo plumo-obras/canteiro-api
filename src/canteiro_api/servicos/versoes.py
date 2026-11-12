@@ -14,7 +14,7 @@ import re
 from decimal import Decimal
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.cronograma import fase, ordem_da_fase
+from canteiro_dominio.cronograma import estimar_fases_faltantes, fase, ordem_da_fase
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import Insumo, ItemOrcamento, Saldo, StatusPedido, TipoVersao, VersaoOrcamento
 from canteiro_dominio.regras import (
@@ -1424,42 +1424,71 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     titulos = [x for x in [await tx.obter("itens_orcamento", u.tenant_id, i) for i in titulo_ids]
                if x and x["obra_id"] == obra_id and x["tipo"] == "etapa"]
     nova_fase = {x["id"]: fase(x["descricao"], x.get("codigo", ""), x.get("unidade", "")) for x in itens}
-    fases = sorted({f for f in nova_fase.values()}, key=ordem_da_fase)
-    chave = {f: str(i + 1) for i, f in enumerate(fases)}  # chave numérica da etapa, na ordem de obra ("1 Fundação"...)
+    # valor real já orçado por fase, para estimar o porte da obra e as fases que ainda faltam
+    valor_por_fase: dict[str, int] = {}
+    for x in itens:
+        f = nova_fase[x["id"]]
+        valor_por_fase[f] = valor_por_fase.get(f, 0) + (x.get("total") or 0)
+    estimadas = estimar_fases_faltantes(valor_por_fase)  # fases padrão que faltam, com quantidade e valor estimados
+    todas = sorted(set(nova_fase.values()) | {e.fase for e in estimadas}, key=ordem_da_fase)
+    chave = {f: str(i + 1) for i, f in enumerate(todas)}  # chave numérica, na ordem de obra ("1 Fundação"...)
     itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": chave[nova_fase[x["id"]]]}
                  for x in itens if x["etapa"] != chave[nova_fase[x["id"]]]]
-    titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos]
-    # reaproveita os títulos existentes como as fases; cria os que faltarem (ids determinísticos, idempotente)
-    reusar = [{"id": titulos[i]["id"], "etapa": chave[f], "descricao": f} for i, f in enumerate(fases)
-              if i < len(titulos)]
-    criar = [(id_derivado(u.tenant_id, "etapa-fase", versao_id, f), chave[f], f, i)
-             for i, f in enumerate(fases) if i >= len(titulos)]
-    if not itens_mud and all(t["descricao"] == f and t["etapa"] == chave[f]
-                             for t, f in zip(titulos, fases, strict=False)) and not criar:
+    titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
+                     for t in titulos]
+    # reaproveita os títulos existentes para as fases; cria os que faltarem (ids determinísticos, idempotente)
+    reusar = [{"id": titulos[i]["id"], "etapa": chave[todas[i]], "descricao": todas[i], "ordem": i}
+              for i in range(min(len(titulos), len(todas)))]
+    criar_tit = [(id_derivado(u.tenant_id, "etapa-fase", versao_id, f), chave[f], f, i)
+                 for i, f in enumerate(todas) if i >= len(titulos)]
+    # itens estimados (um por fase que falta), id determinístico — reexecutar atualiza em vez de duplicar
+    criar_item = []
+    for e in estimadas:
+        iid = id_derivado(u.tenant_id, "item-estimado", versao_id, e.fase)
+        criar_item.append((iid, e, await tx.obter("itens_orcamento", u.tenant_id, iid) is not None))
+    novos_estimados = sum(e.valor_centavos for (iid, e, existe) in criar_item if not existe)
+    if (not itens_mud and not criar_tit and not any(not existe for (_, _, existe) in criar_item)
+            and all(t["descricao"] == f and t["etapa"] == chave[f]
+                    for t, f in zip(titulos, todas, strict=False))):
         raise ErroNegocio("O orçamento já está organizado em fases.")
 
     def aplicar() -> dict:
         for m in itens_mud:
             tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["depois"]})
         for r in reusar:
-            tx.atualizar("itens_orcamento", u.tenant_id, r["id"], {"etapa": r["etapa"], "descricao": r["descricao"]})
-        for tid, k, f, i in criar:
+            tx.atualizar("itens_orcamento", u.tenant_id, r["id"],
+                         {"etapa": r["etapa"], "descricao": r["descricao"], "ordem": r["ordem"]})
+        for tid, k, f, i in criar_tit:
             tx.criar("itens_orcamento", doc(ItemOrcamento(
                 id=tid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,
                 ordem=i, tipo="etapa", nivel=1, etapa=k, descricao=f)))
-        # o cache de etapas da versão (Compras e apropriação leem dele, não dos 500 itens) acompanha as novas fases
+        for iid, e, existe in criar_item:
+            vu = round(e.valor_centavos * 1000 / e.quantidade_milesimos) if e.quantidade_milesimos else 0
+            campos = {"etapa": chave[e.fase], "descricao": e.descricao, "unidade": e.unidade,
+                      "quantidade": e.quantidade_milesimos, "valor_unitario": vu, "total": e.valor_centavos}
+            if existe:
+                tx.atualizar("itens_orcamento", u.tenant_id, iid, campos)
+            else:
+                tx.criar("itens_orcamento", doc(ItemOrcamento(
+                    id=iid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,
+                    ordem=100 + ordem_da_fase(e.fase), tipo="item", nivel=2, **campos)))
+        # cache de etapas da versão (Compras/apropriação leem dele) e total (cresce com as fases estimadas)
         tx.atualizar("versoes_orcamento", u.tenant_id, versao_id,
-                     {"lista_etapas": [{"etapa": chave[f], "descricao": f} for f in fases]})
-        evento(tx, u.tenant_id, "orcamento.organizado_fases", obra_id, {"itens": len(itens_mud), "fases": fases})
-        return {"itens": len(itens_mud), "fases": fases}
+                     {"lista_etapas": [{"etapa": chave[f], "descricao": f} for f in todas],
+                      "total": (v.get("total") or 0) + novos_estimados})
+        evento(tx, u.tenant_id, "orcamento.organizado_fases", obra_id,
+                {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": todas})
+        return {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": todas}
 
-    # Desfazer volta a etapa dos itens, o nome/chave dos títulos reaproveitados e o cache de etapas da versão.
+    # Desfazer: volta a etapa dos itens reais, o nome dos títulos, o cache e o total; zera os itens estimados criados.
     receita = {"op": "restaurar_etapas", "obra_id": obra_id, "versao_id": versao_id,
                "itens": [{"id": m["id"], "etapa": m["antes"]} for m in itens_mud], "titulos": titulos_antes,
-               "lista_etapas": v.get("lista_etapas")}
-    n = len(itens_mud)
+               "lista_etapas": v.get("lista_etapas"), "total": v.get("total"),
+               "zerar": [iid for (iid, e, existe) in criar_item if not existe]}
+    ne = len(estimadas)
     return Operacao(obra_id=obra_id, aplicar=aplicar,
-                    texto=lambda d: f"Organizou o orçamento em {len(fases)} fases ({n} serviço{'' if n == 1 else 's'})",
+                    texto=lambda d: (f"Previu a obra completa: {len(todas)} fases"
+                                     f"{f', {ne} estimadas' if ne else ''}"),
                     desfazer=lambda d: receita)
 
 
@@ -1472,19 +1501,32 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
     versao_id = receita.get("versao_id")
     v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id) if versao_id else None
     lista_atual = v.get("lista_etapas") if v else None  # a de agora, para o Refazer
+    total_atual = v.get("total") if v else None
+    zerar = [z for z in receita.get("zerar", []) if await tx.obter("itens_orcamento", u.tenant_id, z)]
 
     def aplicar() -> dict:
         for m in itens:
             tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["etapa"]})
         for t in titulos:
-            tx.atualizar("itens_orcamento", u.tenant_id, t["id"], {"etapa": t["etapa"], "descricao": t["descricao"]})
-        if v is not None and receita.get("lista_etapas") is not None:
-            tx.atualizar("versoes_orcamento", u.tenant_id, versao_id, {"lista_etapas": receita["lista_etapas"]})
+            campos_t = {"etapa": t["etapa"], "descricao": t["descricao"]}
+            if "ordem" in t:
+                campos_t["ordem"] = t["ordem"]
+            tx.atualizar("itens_orcamento", u.tenant_id, t["id"], campos_t)
+        for z in zerar:  # os itens estimados que criamos somem (quantidade/valor zerados)
+            tx.atualizar("itens_orcamento", u.tenant_id, z, {"quantidade": 0, "valor_unitario": 0, "total": 0})
+        if v is not None:
+            campos = {}
+            if receita.get("lista_etapas") is not None:
+                campos["lista_etapas"] = receita["lista_etapas"]
+            if receita.get("total") is not None:
+                campos["total"] = receita["total"]
+            if campos:
+                tx.atualizar("versoes_orcamento", u.tenant_id, versao_id, campos)
         return {"itens": len(itens)}
 
     inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": versao_id,
                "itens": [{"id": m["id"], "etapa": m["etapa"]} for m in itens],
                "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos],
-               "lista_etapas": lista_atual}
+               "lista_etapas": lista_atual, "total": total_atual}
     return Operacao(obra_id=receita["obra_id"], aplicar=aplicar,
                     texto=lambda d: "Desfez a organização do orçamento em fases", desfazer=lambda d: inversa)
