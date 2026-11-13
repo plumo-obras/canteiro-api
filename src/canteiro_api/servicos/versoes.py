@@ -17,6 +17,7 @@ from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.cronograma import estimar_fases_faltantes, fase, ordem_da_fase
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import Insumo, ItemOrcamento, Saldo, StatusPedido, TipoVersao, VersaoOrcamento
+from canteiro_dominio.orcamento import andamento_da_linha, recebido_da_linha
 from canteiro_dominio.regras import (
     EM_COTACAO,
     ItemParaCompras,
@@ -1257,18 +1258,9 @@ async def pedidos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
     return await leitor.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
 
 
-def _recebido(x: dict) -> int:
-    """O que a linha do pedido já recebeu, pelo preço do pedido: a mesma soma das entregas, sem ler cada uma."""
-    q, recebida = x["quantidade"], x.get("recebida", 0)
-    return (recebida * x.get("total", 0) + q // 2) // q if q else 0
-
-
 def andamento_dos_pedidos(pedidos: list[dict]) -> dict[str, dict[str, int]]:
-    """Cotando, comprometido e realizado por etapa, somados das linhas dos pedidos da obra (centavos).
-
-    Realizado sai do que cada linha já recebeu. Comprometido é o maior entre o pedido e o entregue (entrega a mais
-    também custa), exceto no pedido encerrado com sobra, que só compromete o que chegou.
-    """
+    """Cotando, comprometido e realizado por etapa, somados das linhas dos pedidos da obra (centavos). A conta de cada
+    linha é do domínio (`andamento_da_linha`)."""
     soma: dict[str, dict[str, int]] = {}
     for p in pedidos:
         st = StatusPedido(p["status"])
@@ -1276,14 +1268,10 @@ def andamento_dos_pedidos(pedidos: list[dict]) -> dict[str, dict[str, int]]:
             continue
         for x in linhas_de(p):
             g = soma.setdefault(x.get("etapa") or "", {"cotando": 0, "comprometido": 0, "realizado": 0})
-            total = x.get("total", 0)
-            if st in EM_COTACAO:
-                g["cotando"] += total
-                continue
-            recebido = _recebido(x)
-            g["realizado"] += recebido
-            encerrado_com_sobra = st == StatusPedido.CONFERIDO and x.get("recebida", 0) < x["quantidade"]
-            g["comprometido"] += recebido if encerrado_com_sobra else max(total, recebido)
+            cotando, comprometido, realizado = andamento_da_linha(st, x)
+            g["cotando"] += cotando
+            g["comprometido"] += comprometido
+            g["realizado"] += realizado
     return soma
 
 
@@ -1310,7 +1298,7 @@ def a_pagar_por_etapa(pedidos: list[dict], gastos: list[dict], total: int) -> di
             continue
         por_etapa: dict[str, int] = {}
         for x in linhas_de(p):
-            if r := _recebido(x):
+            if r := recebido_da_linha(x):
                 por_etapa[x.get("etapa") or ""] = por_etapa.get(x.get("etapa") or "", 0) + r
         falta = sum(por_etapa.values()) - pago.get(p["id"], 0)
         if falta <= 0:
