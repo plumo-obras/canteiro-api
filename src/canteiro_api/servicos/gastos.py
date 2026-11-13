@@ -21,6 +21,7 @@ from canteiro_dominio.etapas import (
     nome_da_etapa,
     nomes_da_base,
     origem_da_etapa,
+    validar_classificacao,
     validar_nome,
 )
 from canteiro_dominio.gastos import (
@@ -124,6 +125,19 @@ async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], 
     extras, topicos = await _extras_e_topicos(leitor, tenant_id, obra_id)
     return (dict(base), {x["id"]: x["nome"] for x in extras},
             await _nomes_dos_topicos(leitor, tenant_id, obra_id, topicos))
+
+
+async def validar_topicos(leitor, tenant_id: str, obra_id: str, linhas) -> None:
+    """O tópico de cada linha de pedido (opcional) tem de ser da etapa dela na árvore de hoje. Fora da transação,
+    depois de `versoes.validar_etapa`: a árvore é consulta."""
+    com_topico = [x for x in linhas if x.topico_id]
+    if not com_topico:
+        return
+    arvore = await arvore_da_obra(leitor, tenant_id, obra_id)
+    for x in com_topico:
+        if not x.etapa:
+            raise ErroNegocio("Escolha a etapa do tópico da linha.")
+        validar_classificacao(arvore, x.etapa, x.topico_id)
 
 
 def fora_do_orcado(g: dict, tem_orcamento: bool) -> bool:

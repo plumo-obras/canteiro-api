@@ -479,8 +479,9 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
   repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". `limite` até 500.
 - `Pedido` = `{id, numero, obra_id, fornecedor, fornecedor_id, previsao, observacao, status, valor, recebimentos,
   recebido_em ("AAAA-MM-DD" da última entrega, null se nada chegou), criado_em,
-  linhas: [{insumo_id, nome, unidade, tipo, etapa, quantidade, valor_unitario, total, recebida,
-  falta_entregar}]}`. Nome, unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`;
+  linhas: [{insumo_id, nome, unidade, tipo, etapa, topico_id, quantidade, valor_unitario, total, recebida,
+  falta_entregar}]}`. `topico_id` = o tópico da `etapa` na árvore da obra (`null` = só a etapa; pedido gravado antes
+  do campo também sai `null`). Nome, unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`;
   `recebida` soma as entregas; `recebimentos` = quantas entregas valem. `falta_entregar` (milésimos, calculado pela
   API com `regras.falta_na_linha`) = `quantidade − recebida`, nunca negativo, e 0 em pedido `conferido` (encerrado)
   ou `cancelado`; vem no `GET …/pedidos` e nas respostas de criar, avançar e editar. Pedido gravado antes das linhas
@@ -490,16 +491,19 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
   Conta: `cotando` soma as linhas dos pedidos em cotação; `a_caminho` soma o que **falta entregar** em cada linha
   (`quantidade − recebida`, nunca negativo) dos pedidos de aprovado a parcial.
 - `POST /obras/{obra_id}/pedidos` (admin) `{fornecedor, fornecedor_id?, previsao?, observacao?, aprovado?, linhas:
-  [{insumo_id, quantidade, valor_unitario?, total?, etapa?}]}` → `Pedido + registro_id` (201; PED-NNNN por tenant).
-  1 a 50 linhas; o mesmo insumo duas vezes → 422. `total` padrão = quantidade × unitário arredondado ao centavo
-  (informe quando o total combinado não fecha). Com orçamento importado, toda linha exige `etapa` válida. `aprovado`
+  [{insumo_id, quantidade, valor_unitario?, total?, etapa?, topico_id?}]}` → `Pedido + registro_id` (201; PED-NNNN por
+  tenant). 1 a 50 linhas; o mesmo insumo duas vezes → 422. `total` padrão = quantidade × unitário arredondado ao
+  centavo (informe quando o total combinado não fecha). Com orçamento importado, toda linha exige `etapa` válida.
+  `topico_id` (opcional, ≤ 80) tem de ser um tópico **daquela etapa** em `GET …/arvore` (do orçamento ou manual) →
+  senão 422 "Esse tópico não está na etapa …"; tópico sem etapa → 422. `aprovado`
   `true` → nasce `aprovado`. O formato antigo de um insumo só (`{insumo_id, quantidade, fornecedor, valor}`) ainda é
   aceito e vira uma linha com `total = valor`. Registro: `"PED-0168 criado: 2 itens (Cimento e Brita 1) com X (R$ …)"`;
   desfazer `cancelar_pedido` só enquanto o pedido estiver no status de nascimento.
 - `PATCH /pedidos/{pedido_id}` (admin) `{previsao?, observacao?}` → `Pedido + registro_id`. Registro "PED-0168:
   previsão 2026-11-10 → 2026-11-24", desfazer `editar_pedido` (409 se editado de novo depois).
 - `POST /obras/{obra_id}/pedidos` aceita `chave_idempotencia?` (8 a 64): a mesma chave devolve o pedido já criado (200,
-  mesmo `id` e `registro_id`, no estado de agora); com outro conteúdo → 409.
+  mesmo `id` e `registro_id`, no estado de agora); com outro conteúdo → 409. A linha sem `topico_id` assina como antes
+  do campo: a repetição de uma chave enviada antes dele continua 200.
 - `POST /pedidos/{pedido_id}/recebimentos` (admin) `{nf_numero?, nf_data?, nf_valor?, linhas: [{indice, quantidade}],
   chave_idempotencia}` → `{recebimento, pedido, registro_id}` (201; a mesma chave devolve a mesma entrega com 200, e
   com outras quantidades → 409). Vale de `aprovado` a `parcial`. Linha de material dá ENTRADA no almoxarifado na
@@ -843,7 +847,8 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
     mesma proposta pode ser criada de novo. Por trás, um documento `propostas_pendentes/{id derivado de tenant, obra,
     tipo e dados}` aponta para a pendente, e aprovar/recusar o solta na mesma transação.
   `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, previsao?}` (o corpo do POST
-  de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
+  de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento;
+  `linhas[].topico_id?` é conferido contra a árvore na criação da proposta, como no POST, e tópico sem etapa → 422) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
   `POST …/avancar`; de `parcial`, sem quantidade/NF) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}` ·
   `registrar_entrega` = `{pedido_id, linhas: [{indice, quantidade}], nf_numero?, nf_data? ("AAAA-MM-DD"), nf_valor?
   (centavos), confirmar_excesso?=false}` (o corpo de `POST /pedidos/{id}/recebimentos` sem a chave).

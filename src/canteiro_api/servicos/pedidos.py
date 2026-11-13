@@ -44,8 +44,13 @@ def id_pedido(tenant_id: str, obra_id: str, chave: str) -> str:
 
 
 def assinatura_do_pedido(corpo: PedidoDados) -> str:
-    """O status de hoje não serve para comparar: o pedido anda depois de criado, e a repetição ainda é a mesma."""
-    return hashlib.sha256(corpo.model_dump_json(exclude={"chave_idempotencia"}).encode()).hexdigest()
+    """O status de hoje não serve para comparar: o pedido anda depois de criado, e a repetição ainda é a mesma.
+
+    `topico_id` vazio fica fora: a linha sem tópico assina como antes do campo, e a repetição de uma chave enviada
+    antes dele continua sendo a mesma (200, não 409)."""
+    sem_topico = {i: {"topico_id"} for i, x in enumerate(corpo.linhas) if x.topico_id is None}
+    exclude: dict = {"chave_idempotencia": True, **({"linhas": sem_topico} if sem_topico else {})}
+    return hashlib.sha256(corpo.model_dump_json(exclude=exclude).encode()).hexdigest()
 
 
 def id_recebimento(tenant_id: str, pedido_id: str, chave: str) -> str:
@@ -77,6 +82,7 @@ async def preparar_criar_pedido(tx, u: UsuarioAtual, obra_id: str, corpo: Pedido
         unitario = x.valor_unitario or ((total * 1000 + x.quantidade // 2) // x.quantidade)
         linhas.append(LinhaPedido(insumo_id=x.insumo_id, nome=ins["nome"], unidade=ins["unidade"],
                                   tipo=ins.get("tipo", TipoInsumo.MATERIAL), etapa=x.etapa or None,
+                                  topico_id=x.topico_id or None,
                                   quantidade=x.quantidade, valor_unitario=unitario, total=total))
     contador = await tx.obter("contadores", u.tenant_id, id_contador(u.tenant_id))
     n = (contador["ultimo"] if contador else 0) + 1

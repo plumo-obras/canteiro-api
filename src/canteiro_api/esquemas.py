@@ -132,6 +132,8 @@ class LinhaPedidoCorpo(Entrada):
     total: int | None = Field(None, ge=0, description="centavos; padrão = quantidade × unitário. Informe quando o "
                                                       "total combinado não fecha com o unitário arredondado")
     etapa: str | None = Field(None, max_length=60)
+    topico_id: str | None = Field(None, max_length=80, description="tópico da `etapa` na árvore da obra (do orçamento "
+                                                                   "ou manual); opcional, e só com a etapa")
 
 
 class PedidoDados(Entrada):

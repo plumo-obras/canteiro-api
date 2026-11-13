@@ -50,7 +50,19 @@ from ..esquemas import (
 )
 from ..modelos import Papel
 from ..nucleo import Conflito, ErroNegocio, NaoEncontrado, executar_e_registrar, listar_pagina, obra_do_tenant
-from ..servicos import compras, cronograma, desembolso, estoque, importacao, obras, orcamento, pedidos, resumo, versoes
+from ..servicos import (
+    compras,
+    cronograma,
+    desembolso,
+    estoque,
+    gastos,
+    importacao,
+    obras,
+    orcamento,
+    pedidos,
+    resumo,
+    versoes,
+)
 from ..servicos import hoje as hoje_servico
 
 r = APIRouter(tags=["obras e almoxarifado"])
@@ -363,6 +375,7 @@ async def criar_pedido(obra_id: str, corpo: PedidoCorpo, response: Response, u: 
     if id_ and (ja := await arm.obter("pedidos", u.tenant_id, id_)):
         return repeticao(ja)
     await versoes.validar_etapa(arm, u.tenant_id, obra_id, [x.etapa for x in corpo.linhas])
+    await gastos.validar_topicos(arm, u.tenant_id, obra_id, corpo.linhas)
 
     async def tx_corpo(tx):
         if id_ and (ja := await tx.obter("pedidos", u.tenant_id, id_)):

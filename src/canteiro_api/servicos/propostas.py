@@ -158,6 +158,7 @@ async def criar_proposta(arm, u: UsuarioAtual, corpo: PropostaCorpo) -> tuple[di
                 await insumo_da_obra(arm, u.tenant_id, corpo.obra_id, x.insumo_id)
             await versoes.validar_etapa(arm, u.tenant_id, corpo.obra_id, [x.etapa for x in dados.linhas],
                                         exigir=False)
+            await gastos.validar_topicos(arm, u.tenant_id, corpo.obra_id, dados.linhas)
         case AjusteEstoqueDados():
             await insumo_da_obra(arm, u.tenant_id, corpo.obra_id, dados.insumo_id)
         case AvancarPedidoDados():

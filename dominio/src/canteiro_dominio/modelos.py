@@ -215,6 +215,7 @@ class LinhaPedido(BaseModel):
     unidade: str = ""
     tipo: TipoInsumo = TipoInsumo.MATERIAL
     etapa: str | None = None               # apropriação: etapa do orçamento que paga esta linha
+    topico_id: str | None = None           # tópico daquela etapa na árvore da obra (do orçamento ou manual), opcional
     quantidade: Milesimos
     valor_unitario: Centavos = 0
     total: Centavos = 0
