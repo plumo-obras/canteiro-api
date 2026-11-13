@@ -425,3 +425,41 @@ async def test_aditivo_gravado_antes_dos_topicos_cai_no_topico_do_contrato(vila)
     assert (t1["Placa de obra em chapa galvanizada"]["contratado"],
             t1["Placa de obra em chapa galvanizada"]["aditivos"]) == (238910, 20000)
     assert "Sem tópico" not in t1
+
+
+async def test_detalhe_do_aditivo_que_vai_para_outra_etapa_nao_tira_o_resto_do_grupo(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra, CONTRATO, mapa())
+    # o grupo "5.1" do aditivo: a placa vai pelo código para a etapa 1 do contrato, a argamassa fica no grupo
+    aditivo = xlsx(CABECALHO, ["5", None, None, "ACRÉSCIMOS", None, None, None, None],
+                   ["5.1", None, None, "Alvenaria extra", None, None, None, 500],
+                   [None, "74209/1", "SINAPI", "Placa de obra", "m²", 1, 300, 300],
+                   [None, None, None, "Argamassa", "m³", 1, 200, 200])
+    previa = (await versao(vila, obra, aditivo, mapa(linha_cabecalho=1), tipo="aditivo", descricao="Aditivo 01",
+                           data="2026-11-20")).json()
+    assert previa["erros"] == []
+    assert [(t["etapa"], t["nome"], t["total"]) for t in previa["topicos"]] == [("5", "Alvenaria extra", 20000)]
+    grupo = previa["topicos"][0]["id"]
+    assert [(x["descricao"], x["etapa"], x["topico_id"]) for x in previa["itens"] if x["tipo"] == "item"] == [
+        ("Placa de obra", "1", None), ("Argamassa", "5", grupo)]
+
+
+async def test_organizar_em_fases_nao_troca_o_nome_do_topico_nos_recalculos_seguintes(vila):
+    obra = (await nova_obra(vila))["id"]
+    contrato = xlsx(CABECALHO, ["7", None, None, "PAREDES", None, None, None, None],
+                    ["7.1", None, None, "Cerâmica tijolo", None, None, None, None],
+                    ["7.1.1", "87495", "SINAPI", "Alvenaria de tijolo cerâmico", "m²", 10, 100, 1000])
+    await _importar(vila, obra, contrato, mapa(linha_cabecalho=1))
+    r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
+    assert r.status_code == 200, r.text
+    orc = await orcamento(vila, obra)
+    tijolo = next(x for x in orc["itens"] if x["numero"] == "7.1.1")
+    # a linha "7.1" (o nome do tópico) não vira título de fase: vai junto com o item dela
+    titulo = next(x for x in orc["itens"] if x["numero"] == "7.1")
+    assert (titulo["descricao"], titulo["etapa"]) == ("Cerâmica tijolo", tijolo["etapa"])
+    # a ordem das etapas recalcula os tópicos pelas linhas gravadas: o nome continua o da planilha
+    ordem = [e["etapa"] for e in orc["etapas"]][::-1]
+    r = await vila.http.post(f"/obras/{obra}/orcamento/etapas/ordem", headers=vila.h,
+                             json={"ordem": ordem, "chave_idempotencia": uuid.uuid4().hex})
+    assert r.status_code == 201, r.text
+    assert [t["nome"] for e in (await _arvore(vila, obra)).values() for t in e["topicos"]] == ["Cerâmica tijolo"]

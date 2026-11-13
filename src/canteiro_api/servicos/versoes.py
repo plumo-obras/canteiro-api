@@ -1730,9 +1730,10 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     estimadas = estimar_fases_faltantes(valor_por_fase)  # fases padrão que faltam, com quantidade e valor estimados
     todas = sorted(set(nova_fase.values()) | {e.fase for e in estimadas}, key=ordem_da_fase)
     chave = {f: str(i + 1) for i, f in enumerate(todas)}  # chave numérica, na ordem de obra ("1 Fundação"...)
-    # o tópico vem junto com o item para a fase nova, pelo nome da linha de nível 2 de antes (os títulos de agora
-    # viram os das fases)
+    # o tópico vem junto com o item para a fase nova, pelo nome da linha de nível 2 (só os títulos de nível 1 viram os
+    # das fases)
     movidos = [{**x, "etapa": chave[nova_fase[x["id"]]]} for x in itens]
+
     def na_ordem(linhas: list[dict]) -> list[dict]:
         return sorted(titulos + linhas, key=lambda x: x.get("ordem", 0))
 
@@ -1753,19 +1754,26 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
                      for t in titulos]
     # reaproveita os títulos existentes para as fases; cria os que faltarem (ids determinísticos, idempotente)
-    reusar = [{"id": titulos[i]["id"], "etapa": chave[todas[i]], "descricao": todas[i], "ordem": i}
-              for i in range(min(len(titulos), len(todas)))]
+    principais = [t for t in titulos if t.get("nivel", 1) == 1]
+    reusar = [{"id": principais[i]["id"], "etapa": chave[todas[i]], "descricao": todas[i], "ordem": i}
+              for i in range(min(len(principais), len(todas)))]
     criar_tit = [(id_derivado(u.tenant_id, "etapa-fase", versao_id, f), chave[f], f, i)
-                 for i, f in enumerate(todas) if i >= len(titulos)]
+                 for i, f in enumerate(todas) if i >= len(principais)]
+    grupos = []
+    for k, t in enumerate(nova_ordem):
+        if t["tipo"] == "etapa" and t.get("nivel", 1) > 1:
+            abaixo = next((x for x in nova_ordem[k + 1:] if x["tipo"] == "item" or x.get("nivel", 1) == 1), None)
+            if abaixo and abaixo["tipo"] == "item" and abaixo["etapa"] != t["etapa"]:
+                grupos.append({"id": t["id"], "etapa": abaixo["etapa"]})
     # itens estimados (os serviços típicos de cada fase que falta), id determinístico — reexecutar atualiza, não duplica
     criar_item = []
     for n, e in enumerate(estimadas):
         iid = id_derivado(u.tenant_id, "item-estimado", versao_id, f"{e.fase}:{n}:{e.descricao}")
         criar_item.append((iid, e, n, await tx.obter("itens_orcamento", u.tenant_id, iid) is not None))
     novos_estimados = sum(e.valor_centavos for (iid, e, n, existe) in criar_item if not existe)
-    if (not itens_mud and not criar_tit and not any(not existe for (_, _, _, existe) in criar_item)
+    if (not itens_mud and not criar_tit and not grupos and not any(not existe for (_, _, _, existe) in criar_item)
             and all(t["descricao"] == f and t["etapa"] == chave[f]
-                    for t, f in zip(titulos, todas, strict=False))):
+                    for t, f in zip(principais, todas, strict=False))):
         raise ErroNegocio("O orçamento já está organizado em fases.")
 
     def aplicar() -> dict:
@@ -1775,6 +1783,8 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
         for r in reusar:
             tx.atualizar("itens_orcamento", u.tenant_id, r["id"],
                          {"etapa": r["etapa"], "descricao": r["descricao"], "ordem": r["ordem"]})
+        for g in grupos:
+            tx.atualizar("itens_orcamento", u.tenant_id, g["id"], {"etapa": g["etapa"]})
         for tid, k, f, i in criar_tit:
             tx.criar("itens_orcamento", doc(ItemOrcamento(
                 id=tid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,

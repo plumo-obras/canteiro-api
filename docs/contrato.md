@@ -320,8 +320,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     mesmos IDs, e o gasto continua no tópico. Tópico **manual** ativo com o mesmo nome na mesma etapa empresta o ID
     dele (o gasto já lançado nele continua no lugar), e na árvore aparece uma vez, como do orçamento.
   - Gravados na versão (`lista_topicos`) e em cada item (`topico_id`) pela importação, pelo somar, pela ordem das
-    etapas e pela organização em fases (o tópico vai com o item para a fase nova, e o Desfazer volta); o Desfazer de
-    uma versão leva os tópicos dela junto. Não são documento: reordenar e somar continuam livres com eles, e só o
+    etapas e pela organização em fases (o tópico vai com o item para a fase nova, e o Desfazer volta; só os títulos
+    de nível 1 viram os das fases, e a linha de nível 2 fica com o nome e vai para a fase do primeiro item abaixo
+    dela); o Desfazer de uma versão leva os tópicos dela junto. Não são documento: reordenar e somar continuam livres com eles, e só o
     lançamento (gasto, pedido, tópico manual…) numa etapa que mudaria de número trava, como antes.
 - **Somar ao orçamento** (`somar=true`, antes de aprovar): completa o orçamento com outra planilha (o caso de quem
   levou as pranchas e agora traz a planilha), **sem aditivo**. Só com `tipo=contrato`, a obra em orçamento e um contrato

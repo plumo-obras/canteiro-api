@@ -107,14 +107,14 @@ def test_item_sem_numero_de_nivel_3_e_o_detalhe_do_titulo_de_nivel_2_acima():
         _l("item", "", "1", "Concreto") | detalhe,
         _l("item", "", "1", "Aço") | detalhe,
         _l("item", "", "1", "Forma") | {"nivel": 2},         # de nível 2 (somada depois do grupo): fica solta
-        _l("item", "", "1", "Estribo") | detalhe,            # e o grupo acabou nela
+        _l("item", "", "1", "Estribo") | detalhe,            # sem interromper o grupo
         _l("item", "1.2", "1", "Blocos"),
         _l("etapa", "2", "2", "LIMPEZA"),
         _l("item", "", "2", "Caçamba") | detalhe,            # depois do título de etapa: sem tópico
     ]
     r = topicos_dos_itens(itens)
     assert [(t.etapa, t.nome) for t in r.topicos] == [("1", "Estacas"), ("1", "Blocos")]
-    assert {i: t.nome for i, t in r.do_item.items()} == {2: "Estacas", 3: "Estacas", 6: "Blocos"}
+    assert {i: t.nome for i, t in r.do_item.items()} == {2: "Estacas", 3: "Estacas", 5: "Estacas", 6: "Blocos"}
 
 
 def test_aditivo_sem_a_linha_de_nivel_2_cai_no_topico_herdado():

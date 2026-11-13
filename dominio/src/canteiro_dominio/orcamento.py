@@ -95,9 +95,9 @@ def topicos_dos_itens(itens: Sequence[dict], herdados: Mapping[str, str] | None 
         if x["tipo"] != "item":
             grupo = n if numero_do_topico(n) == n else None
             continue
-        if n or x.get("nivel", 0) < 3:
+        if n:
             grupo = None
-        tn = numero_do_topico(n) if n else grupo
+        tn = numero_do_topico(n) if n else grupo if x.get("nivel", 0) > 2 else None
         if not x.get("etapa") or tn is None or tn not in nomes:
             continue
         chave = normalizar_nome(nomes[tn])
