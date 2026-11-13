@@ -382,3 +382,46 @@ async def test_topico_de_versao_desligada_com_gasto_continua_do_orcamento(vila):
     # não é manual: o PATCH /topicos dele responde 422, e a web não oferece renomear
     assert (t11["Portas"]["origem"], t11["Portas"]["contratado"], t11["Portas"]["realizado"]) == (
         "orcamento", 0, 35000)
+
+
+async def test_aditivo_depois_de_organizar_em_fases_cai_no_topico_do_contrato(vila):
+    obra = (await nova_obra(vila))["id"]
+    contrato = xlsx(CABECALHO, ["7", None, None, "PAREDES", None, None, None, None],
+                    ["7.1", None, None, "Cerâmica tijolo", None, None, None, None],
+                    ["7.1.1", "87495", "SINAPI", "Alvenaria de tijolo cerâmico", "m²", 10, 100, 1000])
+    await _importar(vila, obra, contrato, mapa(linha_cabecalho=1))
+    r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
+    assert r.status_code == 200, r.text
+    # as fases reaproveitam a linha "7.1" como título de outra fase; o tópico continua "Cerâmica tijolo"
+    tijolo = next((k, t) for k, e in (await _arvore(vila, obra)).items() for t in e["topicos"])
+    assert tijolo[1]["nome"] == "Cerâmica tijolo"
+    # o aditivo numa etapa própria, que vai pelo código para a fase do tijolo e guarda o número do contrato
+    aditivo = xlsx(CABECALHO, ["7", None, None, "ACRÉSCIMOS", None, None, None, None],
+                   ["7.1.3", "87495", "SINAPI", "Tijolo a mais", "m²", 2, 100, 200])
+    previa = (await versao(vila, obra, aditivo, mapa(linha_cabecalho=1), tipo="aditivo", descricao="Aditivo 01",
+                           data="2026-11-20")).json()
+    assert [(x["numero"], x["etapa"], x["etapa_origem"]) for x in previa["itens"] if x["tipo"] == "item"] == [
+        ("7.1.3", tijolo[0], "codigo")]
+    assert [(t["id"], t["nome"], t["total"]) for t in previa["topicos"]] == [
+        (tijolo[1]["id"], "Cerâmica tijolo", 20000)]
+
+
+async def test_aditivo_gravado_antes_dos_topicos_cai_no_topico_do_contrato(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra, CONTRATO, mapa())
+    aditivo = xlsx(CABECALHO, ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                   ["1.1.1", None, None, "Placa adicional", "m²", 2, 100, 200])
+    await _importar(vila, obra, aditivo, mapa(linha_cabecalho=1), tipo="aditivo", descricao="Aditivo 01",
+                    data="2026-11-20")
+    # as duas versões como eram antes do campo: sem `lista_topicos` e sem `topico_id` nos itens
+    arm, tenant = vila.arm, vila.tenant_id
+    for v in (await orcamento(vila, obra))["versoes"]:
+        d = await arm.obter("versoes_orcamento", tenant, v["id"])
+        await arm.salvar("versoes_orcamento", {k: x for k, x in d.items() if k != "lista_topicos"})
+    for x in (await orcamento(vila, obra))["itens"]:
+        d = await arm.obter("itens_orcamento", tenant, x["id"])
+        await arm.salvar("itens_orcamento", {k: y for k, y in d.items() if k != "topico_id"})
+    _, t1 = _abertura(await orcamento(vila, obra), "1")
+    assert (t1["Placa de obra em chapa galvanizada"]["contratado"],
+            t1["Placa de obra em chapa galvanizada"]["aditivos"]) == (238910, 20000)
+    assert "Sem tópico" not in t1

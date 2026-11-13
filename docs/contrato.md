@@ -252,7 +252,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   descricao, complemento, unidade, quantidade, valor_unitario, total, linha, topico_id}`. `complemento` = a medida,
   marca ou detalhe da linha ("0,60 x 2,10"), da coluna `complemento` (≤ 80; `""` sem ela e nos itens gravados antes do
   campo). `topico_id` = o tópico do orçamento em que o item conta (`null` = sem tópico). `ordem` = posição na versão (0, 1, 2…); `numero` =
-  o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);
+  o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2, e 3 no item logo abaixo de um título de nível 2, o
+  detalhe do grupo que a planilha não numera);
   `etapa` = a chave da etapa raiz: o que vem antes do 1º ponto ("2" para "2.1.1"); item sem ponto fica na última linha de
   etapa; etapa sem número tem como chave o próprio nome normalizado (sem acento, minúsculo), e é assim que a "FUNDAÇÕES"
   de um aditivo sem numeração soma na do contrato; `""` antes da 1ª etapa; `linha` = linha da planilha (1-based). Etapa tem unidade `""` e quantidade/valores 0.
@@ -303,12 +304,15 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     vigente (outra reimportação passou por cima) ou se, ao desfazer um contrato, há aditivo vigente criado depois dele.
 - **Tópicos do orçamento** (regra em `canteiro_dominio.orcamento.topicos_dos_itens`): o **nível 2 da numeração** é
   tópico da etapa. O nome é a descrição da linha "7.1", seja ela título do grupo ou o próprio item; os itens "7.1.x"
-  caem nele, e os itens sem número logo abaixo do título "7.1" (o grupo que a planilha feita à mão não numera)
-  também. No aditivo, o item que guarda o número do contrato ("7.1.3") sem trazer a linha "7.1" cai no tópico do
-  contrato (o nome sai do orçamento vigente). A mesma descrição (sem acento, caixa e espaços) na mesma etapa é **um
-  tópico só** ("11.1 Portas" e "11.2 Portas" de medidas diferentes); a mesma em outra etapa é outro ("Mão de Obra" da
-  7 e da 11). Item sem linha de nível 2 que o nomeie ("2.1.1" sem a linha "2.1"), item de nível 1 e item sem número
-  fora de um grupo ficam sem tópico; planilha sem numeração não tem tópicos. A etapa do tópico é a do item. Etapa com mais de 30 tópicos fica **sem nenhum**, com aviso
+  caem nele, e os itens sem número logo abaixo do título "7.1" (o grupo que a planilha feita à mão não numera:
+  `nivel` 3, decidido na leitura da planilha; ao somar, a linha solta que entra depois de um grupo do contrato não
+  entra nele, e a que vai para outra etapa deixa o grupo) também. No aditivo, o item que guarda o número do contrato
+  ("7.1.3") sem trazer a linha "7.1" cai no tópico em que o contrato tem esse número (também no aditivo gravado antes
+  de `lista_topicos`). A mesma descrição (sem acento, caixa e espaços) na mesma etapa é **um tópico só** ("11.1
+  Portas" e "11.2 Portas" de medidas diferentes); a mesma em outra etapa é outro ("Mão de Obra" da 7 e da 11). Item
+  sem linha de nível 2 que o nomeie ("2.1.1" sem a linha "2.1"), item de nível 1 e item sem número fora de um grupo
+  ficam sem tópico; planilha sem numeração não tem tópicos. A etapa do tópico é a do item. Etapa com mais de 30
+  tópicos fica **sem nenhum**, com aviso
   `linha: 0` na prévia ("A etapa 1 SERVIÇOS tem 31 tópicos na numeração (o limite é 30): ela fica sem os tópicos do
   orçamento, e o gasto entra só na etapa."). `topicos` da prévia = os que os itens da prévia tocam, com a soma deles
   (no somar, só o que entra), nas chaves de etapa da prévia; cada `ItemPrevia` traz o `topico_id`.

@@ -99,30 +99,30 @@ def test_gastos_avulsos_por_topico():
     assert r.fora_do_orcamento == 7
 
 
-def test_itens_sem_numero_logo_abaixo_do_titulo_de_nivel_2_caem_no_topico_dele():
+def test_item_sem_numero_de_nivel_3_e_o_detalhe_do_titulo_de_nivel_2_acima():
+    detalhe = {"nivel": 3}
     itens = [
         _l("etapa", "1", "1", "FUNDAÇÃO"),
         _l("etapa", "1.1", "1", "Estacas"),                  # o título do grupo que a planilha não numera
-        _l("item", "", "1", "Concreto"),
-        _l("item", "", "1", "Aço"),
+        _l("item", "", "1", "Concreto") | detalhe,
+        _l("item", "", "1", "Aço") | detalhe,
+        _l("item", "", "1", "Forma") | {"nivel": 2},         # de nível 2 (somada depois do grupo): fica solta
+        _l("item", "", "1", "Estribo") | detalhe,            # e o grupo acabou nela
         _l("item", "1.2", "1", "Blocos"),
-        _l("item", "", "1", "Forma"),                        # depois de um item numerado: continua solto
         _l("etapa", "2", "2", "LIMPEZA"),
-        _l("item", "", "2", "Caçamba"),                      # depois do título de etapa: sem tópico
+        _l("item", "", "2", "Caçamba") | detalhe,            # depois do título de etapa: sem tópico
     ]
     r = topicos_dos_itens(itens)
     assert [(t.etapa, t.nome) for t in r.topicos] == [("1", "Estacas"), ("1", "Blocos")]
-    assert {i: t.nome for i, t in r.do_item.items()} == {2: "Estacas", 3: "Estacas", 4: "Blocos"}
+    assert {i: t.nome for i, t in r.do_item.items()} == {2: "Estacas", 3: "Estacas", 6: "Blocos"}
 
 
-def test_aditivo_sem_a_linha_de_nivel_2_usa_o_nome_do_contrato():
-    contrato = [_l("etapa", "7", "7", "PAREDES"), _l("etapa", "7.1", "7", "Cerâmica tijolo"),
-                _l("item", "7.1.1", "7", "Tijolo"), _l("item", "7.2", "7", "Mão de Obra")]
+def test_aditivo_sem_a_linha_de_nivel_2_cai_no_topico_herdado():
     aditivo = [_l("item", "7.1.3", "7", "Tijolo a mais"),
-               _l("etapa", "7.2", "7", "Mão de obra extra"),   # a linha do próprio aditivo vale sobre a do contrato
+               _l("etapa", "7.2", "7", "Mão de obra extra"),   # a linha do próprio aditivo vale sobre a herdada
                _l("item", "7.2.1", "7", "Servente"),
                _l("item", "7.9.1", "7", "Sem nome em lugar nenhum")]
-    r = topicos_dos_itens(aditivo, contrato)
+    r = topicos_dos_itens(aditivo, {"7.1": "Cerâmica tijolo", "7.2": "Mão de Obra"})
     assert {i: (t.etapa, t.nome) for i, t in r.do_item.items()} == {
         0: ("7", "Cerâmica tijolo"), 2: ("7", "Mão de obra extra")}
     assert topicos_dos_itens(aditivo).do_item.keys() == {2}

@@ -18,7 +18,12 @@ from canteiro_dominio.cronograma import estimar_fases_faltantes, fase, ordem_da_
 from canteiro_dominio.etapas import MAX_TOPICOS_POR_ETAPA, normalizar_nome
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import Insumo, ItemOrcamento, Saldo, StatusPedido, TipoVersao, VersaoOrcamento
-from canteiro_dominio.orcamento import andamento_da_linha, recebido_da_linha, topicos_dos_itens
+from canteiro_dominio.orcamento import (
+    andamento_da_linha,
+    numero_do_topico,
+    recebido_da_linha,
+    topicos_dos_itens,
+)
 from canteiro_dominio.regras import (
     EM_COTACAO,
     ItemParaCompras,
@@ -237,7 +242,22 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
                                 fonte=fonte, descricao=descricao, unidade=unidade, quantidade=quantidade,
                                 valor_unitario=unit, total=total, linha=n, complemento=complemento))
     _subtotais_e_verbas(itens, verbas, valor_titulo, avisos)
+    _detalhe_dos_grupos(itens)
     return itens, ignoradas, erros, avisos
+
+
+def _detalhe_dos_grupos(itens: list[ItemPrevia]) -> None:
+    """O item sem número logo abaixo do título de nível 2 ("1.1 Estacas" e os itens dele, sem numerar) é o detalhe do
+    grupo: nível 3, e é o nível que o põe no tópico do título (`topicos_dos_itens`). O grupo fica decidido na leitura:
+    ao somar, a linha solta da planilha que entra logo depois de um grupo do contrato não vira detalhe dele."""
+    titulo = False
+    for x in itens:
+        if x.tipo != "item":
+            titulo = bool(x.numero) and numero_do_topico(x.numero) == x.numero
+        elif x.numero:
+            titulo = False
+        elif titulo:
+            x.nivel = 3
 
 
 def _valor_sem_unidade(total_cel, unit_cel, q_crua) -> int | None:
@@ -419,6 +439,8 @@ def _encaixar(itens: list[ItemPrevia], existentes: list[dict], etapas_vigentes: 
             x.etapa, x.etapa_origem = e, "codigo"
         else:
             x.etapa = alvo
+        if not x.numero and x.nivel > 2 and x.etapa != alvo:
+            x.nivel = 2
 
     # título de etapa que ficou sem item (todos foram para outras etapas) não vira etapa vazia; no somar, o título de
     # etapa que já existe também sai, porque o novo contrato já tem o dele
@@ -632,8 +654,11 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
     linhas = _somadas(existentes, vigente, itens) if somar else itens
     manuais = await topicos_manuais(arm, u.tenant_id, obra_id)
-    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais, previa.avisos,
-                                 existentes if tipo == TipoVersao.ADITIVO else None)
+    herdados = None
+    if tipo == TipoVersao.ADITIVO:
+        herdados = _topicos_por_numero(existentes, *await topicos_das_versoes(arm, u.tenant_id, obra_id, ativas,
+                                                                              existentes))
+    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais, previa.avisos, herdados)
     # no somar, a prévia mostra só o que entra (os tópicos que os itens da planilha tocam)
     previa.topicos = _topicos_da_previa(itens, lista_topicos)
     renumeradas: dict[str, str] = {}
@@ -1521,9 +1546,9 @@ async def topicos_manuais(leitor, tenant_id: str, obra_id: str) -> dict[tuple[st
 
 
 def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict], manuais: dict[tuple[str, str], str],
-                        vigentes: list[dict] | None = None) -> tuple[list[dict], list[str | None], dict[str, int]]:
+                        herdados: dict[str, str] | None = None) -> tuple[list[dict], list[str | None], dict[str, int]]:
     """(lista_topicos, o topico_id de cada linha, etapas que passaram do limite). A regra é do domínio."""
-    r = topicos_dos_itens(linhas, vigentes or ())
+    r = topicos_dos_itens(linhas, herdados)
     ids = {t: manuais.get((t.etapa, t.chave)) or id_topico_orcamento(tenant_id, obra_id, t.etapa, t.chave)
            for t in r.topicos}
     lista = [{"etapa": t.etapa, "id": ids[t], "nome": t.nome} for t in r.topicos]
@@ -1531,11 +1556,11 @@ def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict], manuai
 
 
 def _com_topicos(tenant_id: str, obra_id: str, linhas: list[ItemPrevia], manuais: dict[tuple[str, str], str],
-                 avisos: list[Aviso] | None = None, vigentes: list[dict] | None = None) -> list[dict]:
+                 avisos: list[Aviso] | None = None, herdados: dict[str, str] | None = None) -> list[dict]:
     """Põe o `topico_id` em cada linha e devolve a `lista_topicos` da versão; a etapa cheia de tópicos ganha aviso.
-    `vigentes` = as linhas do orçamento que valem, no aditivo (o nome do tópico que o aditivo não traz)."""
+    `herdados` = os tópicos do orçamento que vale, no aditivo (`_topicos_por_numero`)."""
     lista, do_item, cheias = _topicos_das_linhas(tenant_id, obra_id, [x.model_dump() for x in linhas], manuais,
-                                                 vigentes)
+                                                 herdados)
     for x, t in zip(linhas, do_item, strict=True):
         x.topico_id = t
     if avisos is not None:
@@ -1569,30 +1594,40 @@ def _topicos_da_previa(linhas: list[ItemPrevia], lista: list[dict]) -> list[Topi
     return [TopicoPrevia(**t, total=somas[t["id"]]) for t in lista if t["id"] in somas]
 
 
+def _topicos_por_numero(linhas: list[dict], lista: list[dict], topico_de: dict[str, str | None]) -> dict[str, str]:
+    """{"7.1": nome do tópico} pelo tópico em que os itens numerados de `linhas` estão (`topico_de`, de
+    `topicos_das_versoes`). Sai do tópico, não da descrição da linha "7.1": organizar em fases reaproveita essa linha
+    como título da fase."""
+    nome = {t["id"]: t["nome"] for t in lista}
+    r: dict[str, str] = {}
+    for x in linhas:
+        tn = numero_do_topico(x.get("numero") or "")
+        if tn and (t := topico_de.get(x["id"])) in nome:
+            r.setdefault(tn, nome[t])
+    return r
+
+
 async def topicos_das_versoes(leitor, tenant_id: str, obra_id: str, ativas: list[dict],
                               itens: list[dict] | None = None) -> tuple[list[dict], dict[str, str | None]]:
     """Os tópicos do orçamento vigente (`ativas` = as versões vigentes, contrato primeiro), sem repetir ID, e o
     `topico_id` de cada item {item_id: topico_id}. Versão gravada antes de `lista_topicos` monta pelos itens (como
-    `lista_etapas`): só em obra antiga. `itens` = os itens das `ativas`, quando quem chama já leu (senão só os das
-    antigas são lidos)."""
-    antigas = [v for v in ativas if "lista_topicos" not in v]
+    `lista_etapas`), com os tópicos das versões antes dela (o aditivo antigo cai nos do contrato): só em obra antiga.
+    `itens` = os itens das `ativas`, quando quem chama já leu."""
+    antigas = {v["id"] for v in ativas if "lista_topicos" not in v}
+    if antigas and itens is None:
+        itens = await itens_das_versoes(leitor, tenant_id, obra_id, ativas)
+    manuais = await topicos_manuais(leitor, tenant_id, obra_id) if antigas else {}
     do_item: dict[str, str | None] = {}
-    derivadas: dict[str, list[dict]] = {}
-    if antigas:
-        ids_antigas = {v["id"] for v in antigas}
-        linhas = ([x for x in itens if x["versao_id"] in ids_antigas] if itens is not None
-                  else await itens_das_versoes(leitor, tenant_id, obra_id, antigas))
-        manuais = await topicos_manuais(leitor, tenant_id, obra_id)
-        for v in antigas:
-            mesmas = [x for x in linhas if x["versao_id"] == v["id"]]
-            derivadas[v["id"]], tids, _ = _topicos_das_linhas(tenant_id, obra_id, mesmas, manuais)
-            do_item.update({x["id"]: t for x, t in zip(mesmas, tids, strict=True)})
-    for x in itens or []:
-        if x["versao_id"] not in derivadas:
-            do_item[x["id"]] = x.get("topico_id")
     vistos: dict[str, dict] = {}
     for v in ativas:
-        for t in derivadas.get(v["id"], v.get("lista_topicos", [])):
+        mesmas = [x for x in itens or [] if x["versao_id"] == v["id"]]
+        if v["id"] in antigas:
+            herdados = _topicos_por_numero([x for x in itens if x["id"] in do_item], list(vistos.values()), do_item)
+            lista, tids, _ = _topicos_das_linhas(tenant_id, obra_id, mesmas, manuais, herdados)
+        else:
+            lista, tids = v.get("lista_topicos", []), [x.get("topico_id") for x in mesmas]
+        do_item.update({x["id"]: t for x, t in zip(mesmas, tids, strict=True)})
+        for t in lista:
             vistos.setdefault(t["id"], t)
     return list(vistos.values()), do_item
 

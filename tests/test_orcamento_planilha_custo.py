@@ -195,3 +195,23 @@ async def test_subtotal_da_etapa_conta_os_itens_sem_numero_e_o_grupo_vira_topico
     e1 = next(e for e in orc["etapas"] if e["etapa"] == "1")
     assert [(t["nome"], t["contratado"]) for t in e1["topicos"]] == [("Estacas", 110000), ("Blocos", 20000),
                                                                      ("Sem tópico", 3000)]
+
+
+async def test_somar_nao_poe_a_linha_solta_da_planilha_no_grupo_do_contrato(vila):
+    o = await nova_obra(vila)
+    m = {**_mapa_eap(), "linha_cabecalho": 1}
+    contrato = xlsx(CABECALHO, ["1", None, None, "FUNDAÇÃO", None, None, None, None],
+                    ["1.1", None, None, "Estacas", None, None, None, 1100],
+                    [None, None, None, "Concreto", "m³", 1, 600, 600],
+                    [None, None, None, "Aço", "kg", 10, 50, 500])
+    assert (await versao(vila, o["id"], contrato, m, aplicar=True)).status_code == 201
+    # a "Forma" vem logo abaixo da etapa, fora de qualquer grupo; somada, ela entra depois do "Aço" do contrato
+    planilha = xlsx(CABECALHO, ["1", None, None, "FUNDAÇÃO", None, None, None, None],
+                    [None, None, None, "Forma", "m²", 1, 30, 30])
+    p = (await versao(vila, o["id"], planilha, m, somar="true")).json()
+    assert p["erros"] == [] and p["topicos"] == []
+    assert [(x["descricao"], x["topico_id"]) for x in p["itens"] if x["tipo"] == "item"] == [("Forma", None)]
+    assert (await versao(vila, o["id"], planilha, m, aplicar=True, somar="true")).status_code == 201
+    orc = await orcamento(vila, o["id"])
+    e1 = next(e for e in orc["etapas"] if e["etapa"] == "1")
+    assert [(t["nome"], t["contratado"]) for t in e1["topicos"]] == [("Estacas", 110000), ("Sem tópico", 3000)]
