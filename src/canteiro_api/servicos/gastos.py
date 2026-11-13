@@ -106,7 +106,15 @@ async def arvore_da_obra(leitor, tenant_id: str, obra_id: str,
     await obra_do_tenant(leitor, tenant_id, obra_id)
     if base is None:
         base = await base_da_arvore(leitor, tenant_id, obra_id)
-    return montar_arvore(*await _extras_e_topicos(leitor, tenant_id, obra_id), base)
+    extras, topicos = await _extras_e_topicos(leitor, tenant_id, obra_id)
+    return montar_arvore(extras, topicos, base, await versoes.topicos_da_obra(leitor, tenant_id, obra_id))
+
+
+async def _nomes_dos_topicos(leitor, tenant_id: str, obra_id: str, topicos: list[dict]) -> dict[str, str]:
+    """{id do tópico: nome}: os manuais (com os arquivados) e os do orçamento (com os de versão desligada), para o
+    gasto antigo continuar com nome."""
+    return {**{t["id"]: t["nome"] for t in topicos},
+            **await versoes.nomes_dos_topicos_do_orcamento(leitor, tenant_id, obra_id)}
 
 
 async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
@@ -114,7 +122,8 @@ async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], 
     continua com nome."""
     base = await base_da_arvore(leitor, tenant_id, obra_id)
     extras, topicos = await _extras_e_topicos(leitor, tenant_id, obra_id)
-    return dict(base), {x["id"]: x["nome"] for x in extras}, {t["id"]: t["nome"] for t in topicos}
+    return (dict(base), {x["id"]: x["nome"] for x in extras},
+            await _nomes_dos_topicos(leitor, tenant_id, obra_id, topicos))
 
 
 def fora_do_orcado(g: dict, tem_orcamento: bool) -> bool:
@@ -198,11 +207,12 @@ async def criar_topico(arm, u: UsuarioAtual, obra_id: str, etapa: str, nome: str
     await obra_do_tenant(arm, u.tenant_id, obra_id)
     inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
     base = await base_da_arvore(arm, u.tenant_id, obra_id)
+    do_orcamento = await versoes.topicos_da_obra(arm, u.tenant_id, obra_id)
 
     async def corpo(tx):
         indice = await _exigir_indice(tx, u.tenant_id, obra_id, inicial)
         limpo = ativar_topico(indice["extras"], indice["topicos"], id_=None, etapa=etapa, nome=nome,
-                              chaves_base=_chaves_base(base))
+                              chaves_base=_chaves_base(base), topicos_orcamento=do_orcamento)
         nome_etapa = nome_da_etapa(etapa, orcamento=dict(base), extras=indice["extras"])
         d = doc(Topico(tenant_id=u.tenant_id, obra_id=obra_id, etapa=etapa, nome=limpo))
 
@@ -241,10 +251,12 @@ def _texto_edicao(colecao: str, antigo: dict, mudou: dict) -> str:
     return " ".join(partes)
 
 
-def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict, base: list[tuple[str, str]] | None) -> dict:
+def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict, base: list[tuple[str, str]] | None,
+                do_orcamento: list[dict] = ()) -> dict:
     """O índice depois de `item` receber `mudou` ({nome?, arquivado?}). Confere limite e nome quando o item termina
     ativo (criado, renomeado ou reativado); arquivado só sai do índice. `base` = as etapas do orçamento lidas antes da
-    transação (None = não se sabe: confere o nome contra a lista padrão e não confere a etapa do tópico)."""
+    transação (None = não se sabe: confere o nome contra a lista padrão e não confere a etapa do tópico);
+    `do_orcamento` = os tópicos do orçamento vigente, lidos junto."""
     final = {**item, **mudou}
     extras, topicos = dict(indice["extras"]), dict(indice["topicos"])
     alvo = extras if colecao == "etapas_extras" else topicos
@@ -257,12 +269,20 @@ def _indice_com(indice: dict, colecao: str, item: dict, mudou: dict, base: list[
                                           nomes_base=nomes_da_base(base) if base is not None else None)
     else:
         nome = ativar_topico(extras, topicos, id_=item["id"], etapa=item["etapa"], nome=final["nome"],
-                             chaves_base=_chaves_base(base) if base is not None else None)
+                             chaves_base=_chaves_base(base) if base is not None else None,
+                             topicos_orcamento=do_orcamento)
         topicos[item["id"]] = {"etapa": item["etapa"], "nome": nome}
     return {"extras": extras, "topicos": topicos}
 
 
+# o tópico do orçamento é a linha de nível 2 da planilha: muda com ela, e a tela não oferece renomear nem arquivar
+DO_ORCAMENTO = ("Este tópico vem do orçamento (a linha de nível 2 da planilha): ele muda quando o orçamento é "
+                "reimportado, não por aqui.")
+
+
 async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo: EdicaoArvoreCorpo) -> dict:
+    if colecao == "topicos" and id_.startswith(versoes.PREFIXO_TOPICO_ORCAMENTO):
+        raise ErroNegocio(DO_ORCAMENTO)
     atual = await arm.obter(colecao, u.tenant_id, id_)
     if not atual:
         raise NaoEncontrado("Etapa não encontrada." if colecao == "etapas_extras" else "Tópico não encontrado.")
@@ -270,6 +290,10 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
     mudancas = corpo.model_dump(exclude_none=True)
     inicial = await _indice_inicial(arm, u.tenant_id, obra_id)
     base = await base_da_arvore(arm, u.tenant_id, obra_id)
+    do_orcamento = await versoes.topicos_da_obra(arm, u.tenant_id, obra_id) if colecao == "topicos" else []
+    if any(t["id"] == id_ for t in do_orcamento):
+        # tópico manual que o orçamento reaproveitou (mesmo nome na mesma etapa): o nome agora é o da planilha
+        raise ErroNegocio(DO_ORCAMENTO)
 
     async def corpo_tx(tx):
         d = await tx.obter(colecao, u.tenant_id, id_)
@@ -281,7 +305,7 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
         if not mudou:
             raise ErroNegocio("Nada mudou.")
         # reativar também confere o nome: enquanto estava arquivado, outro pode ter nascido com ele
-        novo_indice = _indice_com(indice, colecao, d, mudou, base)
+        novo_indice = _indice_com(indice, colecao, d, mudou, base, do_orcamento)
         antes = {k: d.get(k) for k in mudou}
 
         def aplicar():
@@ -299,14 +323,19 @@ async def editar_item_arvore(arm, u: UsuarioAtual, colecao: str, id_: str, corpo
     return await arm.em_transacao(corpo_tx)
 
 
-async def base_para_desfazer_arvore(leitor, tenant_id: str, receita: dict) -> list[tuple[str, str]] | None:
-    """Fora da transação, antes do Desfazer/Refazer de uma edição da árvore: as etapas do orçamento daquela obra."""
+async def base_para_desfazer_arvore(leitor, tenant_id: str,
+                                   receita: dict) -> tuple[list[tuple[str, str]], list[dict]] | None:
+    """Fora da transação, antes do Desfazer/Refazer de uma edição da árvore: as etapas e os tópicos do orçamento
+    daquela obra."""
     d = await leitor.obter(receita["colecao"], tenant_id, receita["id"])
-    return await base_da_arvore(leitor, tenant_id, d["obra_id"]) if d else None
+    if not d:
+        return None
+    return (await base_da_arvore(leitor, tenant_id, d["obra_id"]),
+            await versoes.topicos_da_obra(leitor, tenant_id, d["obra_id"]))
 
 
 async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict,
-                                   base: list[tuple[str, str]] | None = None) -> Operacao:
+                                   base: tuple[list[tuple[str, str]], list[dict]] | None = None) -> Operacao:
     colecao = receita["colecao"]
     d = await tx.obter(colecao, u.tenant_id, receita["id"])
     if not d:
@@ -317,7 +346,9 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict,
     # (limite e nome único). Obra sem índice (gravada antes dele) só acontece em dado antigo de desenvolvimento: aplica
     # sem conferir, e o índice nasce na próxima criação.
     indice = await _indice_na_tx(tx, u.tenant_id, d["obra_id"], None)
-    novo_indice = _indice_com(indice, colecao, d, receita["antes"], base) if indice is not None else None
+    etapas, do_orcamento = base if base is not None else (None, [])
+    novo_indice = (_indice_com(indice, colecao, d, receita["antes"], etapas, do_orcamento)
+                   if indice is not None else None)
 
     def aplicar():
         tx.atualizar(colecao, u.tenant_id, d["id"], {**receita["antes"], "atualizado_em": _agora()})
@@ -594,7 +625,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     orcamento = dict(base)
     extras, topicos = await _extras_e_topicos(arm, u.tenant_id, obra_id)
     extras_nomes = {x["id"]: x["nome"] for x in extras}
-    topicos_por_id = {t["id"]: t for t in topicos}
+    nomes_topicos = await _nomes_dos_topicos(arm, u.tenant_id, obra_id, topicos)
     ordem = {e.chave: i for i, e in enumerate(montar_arvore(extras, [], base))}
 
     por_etapa: dict[str | None, dict[str | None, int]] = {}
@@ -614,7 +645,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     for chave in sorted(por_etapa, key=posicao):
         por_topico = por_etapa[chave]
         itens = [{"topico_id": tid, "total": v,
-                  "nome": topicos_por_id[tid]["nome"] if tid in topicos_por_id else "Sem tópico"}
+                  "nome": nomes_topicos.get(tid, "Sem tópico") if tid else "Sem tópico"}
                  for tid, v in por_topico.items()]
         itens.sort(key=lambda x: (x["topico_id"] is None, x["nome"]))
         total = sum(por_topico.values())

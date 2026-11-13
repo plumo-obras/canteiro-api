@@ -99,6 +99,9 @@ class VersaoOrcamento(Documento):
     assinatura: str = ""                   # hash do arquivo + tipo: a mesma chave com outro arquivo é conflito
     # [{etapa, descricao}] das etapas desta versão: os selects de apropriação leem só as versões, sem os 500 itens
     lista_etapas: list[dict[str, str]] = Field(default_factory=list)
+    # [{etapa, id, nome}] dos tópicos que saem da numeração (nível 2): a árvore lê daqui, sem os itens. Documento
+    # gravado antes do campo não tem a chave, e a leitura monta pelos itens.
+    lista_topicos: list[dict[str, str]] = Field(default_factory=list)
     edicoes: int = 0                       # linhas editadas à mão: aprovar confere que nada mudou no meio dela
     gerou_compras: bool = False            # aditivo que entrou com a obra aprovada e já mexeu em Compras
 
@@ -121,6 +124,7 @@ class ItemOrcamento(Documento):
     valor_unitario: Centavos = 0
     total: Centavos = 0                    # o total da linha na planilha, quando ela tem: é o número do contrato
     linha: int = 0
+    topico_id: str | None = None           # o tópico do orçamento em que o item conta (de `lista_topicos`)
 
 
 class CurvaABC(StrEnum):

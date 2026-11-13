@@ -15,9 +15,10 @@ from decimal import Decimal
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.cronograma import estimar_fases_faltantes, fase, ordem_da_fase
+from canteiro_dominio.etapas import MAX_TOPICOS_POR_ETAPA, normalizar_nome
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import Insumo, ItemOrcamento, Saldo, StatusPedido, TipoVersao, VersaoOrcamento
-from canteiro_dominio.orcamento import andamento_da_linha, recebido_da_linha
+from canteiro_dominio.orcamento import andamento_da_linha, recebido_da_linha, topicos_dos_itens
 from canteiro_dominio.regras import (
     EM_COTACAO,
     ItemParaCompras,
@@ -42,6 +43,7 @@ from ..esquemas import (
     PreviaVersao,
     RepetidoDe,
     Substituida,
+    TopicoPrevia,
     TotaisOrcamento,
     TotalEtapa,
 )
@@ -607,6 +609,10 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if tipo == TipoVersao.ADITIVO and not vigente:
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
     linhas = _somadas(existentes, vigente, itens) if somar else itens
+    manuais = await topicos_manuais(arm, u.tenant_id, obra_id)
+    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais, previa.avisos)
+    # no somar, a prévia mostra só o que entra (os tópicos que os itens da planilha tocam)
+    previa.topicos = _topicos_da_previa(itens, lista_topicos)
     renumeradas: dict[str, str] = {}
     if somar and (ordem := _pranchas_depois_das_preliminares(vigente, linhas)):
         if _chaves_que_mudam(linhas, ordem) & await etapas_em_uso(arm, u.tenant_id, obra_id):
@@ -617,6 +623,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
             pranchas = vigente["lista_etapas"][0]["etapa"]
             antes_dela = ordem[ordem.index(pranchas) - 1]
             linhas = _reordenar(linhas, ordem)
+            lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais)
             # a prévia continua com as chaves de antes (são elas que valem na escolha de etapa, `etapas_itens`); o
             # número com que cada etapa é gravada vai à parte, para a tela mostrar o mesmo que o orçamento terá
             previa.numeracao = {k: n for k, n in _renumeradas(ordem).items() if n != k}
@@ -644,7 +651,7 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         contrato_id=vigente["id"] if tipo == TipoVersao.ADITIVO else None, assinatura=assinatura,
         lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao}
                       for e in (_totais_por_etapa(linhas) if somar else previa.etapas) if e.etapa],
-        gerou_compras=bool(compras))
+        lista_topicos=lista_topicos, gerou_compras=bool(compras))
     # no somar a `ordem` é a posição no contrato somado (o item novo entra no fim da etapa dele)
     await _gravar_itens(arm, u, obra_id, id_, linhas, por_posicao=somar)
 
@@ -963,13 +970,15 @@ async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str],
                        "lançamento para outra etapa.")
     renumeradas = _renumeradas_no_desfazer(linhas, ordem, set(atual))
     linhas = _reordenar(linhas, ordem)
+    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, await topicos_manuais(arm, u.tenant_id, obra_id))
     so_itens = [x for x in linhas if x.tipo == "item"]
     versao = VersaoOrcamento(
         id=id_, tenant_id=u.tenant_id, obra_id=obra_id, tipo=TipoVersao.CONTRATO, descricao=vigente["descricao"],
         data=vigente.get("data"), arquivo=vigente.get("arquivo", ""), itens=len(so_itens),
         etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in linhas), total=sum(x.total for x in so_itens),
         substitui=vigente["id"], assinatura=assinatura,
-        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao} for e in _totais_por_etapa(linhas) if e.etapa])
+        lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao} for e in _totais_por_etapa(linhas) if e.etapa],
+        lista_topicos=lista_topicos)
     d_versao = {**doc(versao), "origem": "reordenar"}
     await _gravar_itens(arm, u, obra_id, id_, linhas, por_posicao=True)
 
@@ -1425,6 +1434,102 @@ async def etapas_da_obra(leitor, tenant_id: str, obra_id: str) -> list[EtapaRef]
     return [EtapaRef(etapa=k, descricao=d) for k, d in vistas.items()]
 
 
+# --- tópicos do orçamento (nível 2 da numeração): derivados dos itens, guardados na versão ---
+
+# O tópico do orçamento não é documento: o ID mostra isso, e o `PATCH /topicos/{id}` responde sem procurar.
+PREFIXO_TOPICO_ORCAMENTO = "orc-"
+
+
+def id_topico_orcamento(tenant_id: str, obra_id: str, etapa: str, chave: str) -> str:
+    """Estável: reimportar a mesma planilha devolve os mesmos IDs, e o gasto continua no tópico."""
+    return PREFIXO_TOPICO_ORCAMENTO + id_derivado(tenant_id, "topico-orc", obra_id, etapa, chave)
+
+
+async def topicos_manuais(leitor, tenant_id: str, obra_id: str) -> dict[tuple[str, str], str]:
+    """{(etapa, nome normalizado): ID} dos tópicos manuais ativos: o do orçamento de mesmo nome na mesma etapa
+    reaproveita o ID, e o gasto já lançado nele continua no lugar."""
+    ts = await leitor.consultar(Consulta("topicos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
+    return {(t["etapa"], normalizar_nome(t["nome"])): t["id"] for t in ts if not t.get("arquivado")}
+
+
+def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict],
+                        manuais: dict[tuple[str, str], str]) -> tuple[list[dict], list[str | None], dict[str, int]]:
+    """(lista_topicos, o topico_id de cada linha, etapas que passaram do limite). A regra é do domínio."""
+    r = topicos_dos_itens(linhas)
+    ids = {t: manuais.get((t.etapa, t.chave)) or id_topico_orcamento(tenant_id, obra_id, t.etapa, t.chave)
+           for t in r.topicos}
+    lista = [{"etapa": t.etapa, "id": ids[t], "nome": t.nome} for t in r.topicos]
+    return lista, [ids[r.do_item[i]] if i in r.do_item else None for i in range(len(linhas))], r.cheias
+
+
+def _com_topicos(tenant_id: str, obra_id: str, linhas: list[ItemPrevia], manuais: dict[tuple[str, str], str],
+                 avisos: list[Aviso] | None = None) -> list[dict]:
+    """Põe o `topico_id` em cada linha e devolve a `lista_topicos` da versão; a etapa cheia de tópicos ganha aviso."""
+    lista, do_item, cheias = _topicos_das_linhas(tenant_id, obra_id, [x.model_dump() for x in linhas], manuais)
+    for x, t in zip(linhas, do_item, strict=True):
+        x.topico_id = t
+    if avisos is not None:
+        nomes = _nomes_das_etapas(linhas)
+        for e, n in cheias.items():
+            avisos.append(Aviso(linha=0, mensagem=(
+                f"A etapa {f'{e} {nomes.get(e, "")}'.strip()} tem {n} tópicos na numeração (o limite é "
+                f"{MAX_TOPICOS_POR_ETAPA}): ela fica sem os tópicos do orçamento, e o gasto entra só na etapa.")))
+    return lista
+
+
+def _topicos_da_previa(linhas: list[ItemPrevia], lista: list[dict]) -> list[TopicoPrevia]:
+    """Os tópicos que alguma das `linhas` toca, com a soma delas."""
+    somas: dict[str, int] = {}
+    for x in linhas:
+        if x.tipo == "item" and x.topico_id:
+            somas[x.topico_id] = somas.get(x.topico_id, 0) + x.total
+    return [TopicoPrevia(**t, total=somas[t["id"]]) for t in lista if t["id"] in somas]
+
+
+async def topicos_das_versoes(leitor, tenant_id: str, obra_id: str, ativas: list[dict],
+                              itens: list[dict] | None = None) -> tuple[list[dict], dict[str, str | None]]:
+    """Os tópicos do orçamento vigente (`ativas` = as versões vigentes, contrato primeiro), sem repetir ID, e o
+    `topico_id` de cada item {item_id: topico_id}. Versão gravada antes de `lista_topicos` monta pelos itens (como
+    `lista_etapas`): só em obra antiga. `itens` = os itens das `ativas`, quando quem chama já leu (senão só os das
+    antigas são lidos)."""
+    antigas = [v for v in ativas if "lista_topicos" not in v]
+    do_item: dict[str, str | None] = {}
+    derivadas: dict[str, list[dict]] = {}
+    if antigas:
+        ids_antigas = {v["id"] for v in antigas}
+        linhas = ([x for x in itens if x["versao_id"] in ids_antigas] if itens is not None
+                  else await itens_das_versoes(leitor, tenant_id, obra_id, antigas))
+        manuais = await topicos_manuais(leitor, tenant_id, obra_id)
+        for v in antigas:
+            mesmas = [x for x in linhas if x["versao_id"] == v["id"]]
+            derivadas[v["id"]], tids, _ = _topicos_das_linhas(tenant_id, obra_id, mesmas, manuais)
+            do_item.update({x["id"]: t for x, t in zip(mesmas, tids, strict=True)})
+    for x in itens or []:
+        if x["versao_id"] not in derivadas:
+            do_item[x["id"]] = x.get("topico_id")
+    vistos: dict[str, dict] = {}
+    for v in ativas:
+        for t in derivadas.get(v["id"], v.get("lista_topicos", [])):
+            vistos.setdefault(t["id"], t)
+    return list(vistos.values()), do_item
+
+
+async def topicos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
+    """Os tópicos do orçamento vigente, `{etapa, id, nome}`, contrato primeiro: os da árvore de lançamento."""
+    ativas = [v for v in await versoes_da_obra(leitor, tenant_id, obra_id) if v["ativa"]]
+    ativas.sort(key=lambda v: (v["tipo"] != TipoVersao.CONTRATO, v["numero"]))
+    return (await topicos_das_versoes(leitor, tenant_id, obra_id, ativas))[0]
+
+
+async def nomes_dos_topicos_do_orcamento(leitor, tenant_id: str, obra_id: str) -> dict[str, str]:
+    """{id: nome} dos tópicos do orçamento de todas as versões, inclusive as desligadas: o gasto lançado num tópico
+    de versão desfeita continua com nome."""
+    versoes_ = await versoes_da_obra(leitor, tenant_id, obra_id)
+    nomes = {t["id"]: t["nome"] for v in reversed(versoes_) for t in v.get("lista_topicos", [])}
+    nomes.update({t["id"]: t["nome"] for t in await topicos_da_obra(leitor, tenant_id, obra_id)})
+    return nomes
+
+
 async def validar_etapa(leitor, tenant_id: str, obra_id: str, etapas: list[str | None],
                         exigir: bool = True) -> dict[str, str]:
     """Confere as etapas informadas contra o orçamento da obra; devolve {chave: descrição} para os textos."""
@@ -1475,9 +1580,10 @@ async def organizar_em_fases(arm, u: UsuarioAtual, obra_id: str) -> dict:
                                           key=lambda x: x["ordem"])]
     if not item_ids:
         raise ErroNegocio("O orçamento não tem serviços para organizar.")
+    manuais = await topicos_manuais(arm, u.tenant_id, obra_id)
 
     async def tx_corpo(tx):
-        op = await _preparar_organizar_fases(tx, u, obra_id, contrato["id"], item_ids, titulo_ids)
+        op = await _preparar_organizar_fases(tx, u, obra_id, contrato["id"], item_ids, titulo_ids, manuais)
         r, entrada = executar_e_registrar(tx, u, op)
         return {**r, "registro_id": entrada["id"]}
 
@@ -1485,7 +1591,8 @@ async def organizar_em_fases(arm, u: UsuarioAtual, obra_id: str) -> dict:
 
 
 async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id: str,
-                                    item_ids: list[str], titulo_ids: list[str]) -> Operacao:
+                                    item_ids: list[str], titulo_ids: list[str],
+                                    manuais: dict[tuple[str, str], str]) -> Operacao:
     o = await obra_do_tenant(tx, u.tenant_id, obra_id)
     recusar_se_desfazendo(o)
     v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id)
@@ -1505,8 +1612,21 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     estimadas = estimar_fases_faltantes(valor_por_fase)  # fases padrão que faltam, com quantidade e valor estimados
     todas = sorted(set(nova_fase.values()) | {e.fase for e in estimadas}, key=ordem_da_fase)
     chave = {f: str(i + 1) for i, f in enumerate(todas)}  # chave numérica, na ordem de obra ("1 Fundação"...)
-    itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": chave[nova_fase[x["id"]]]}
-                 for x in itens if x["etapa"] != chave[nova_fase[x["id"]]]]
+    # o tópico vem junto com o item para a fase nova, pelo nome da linha de nível 2 de antes (os títulos de agora
+    # viram os das fases)
+    movidos = [{**x, "etapa": chave[nova_fase[x["id"]]]} for x in itens]
+    nova_lista, novos_topicos, _ = _topicos_das_linhas(u.tenant_id, obra_id, titulos + movidos, manuais)
+    topico_novo = {x["id"]: t for x, t in zip(itens, novos_topicos[len(titulos):], strict=True)}
+    if "lista_topicos" in v:
+        lista_antes, topico_antes = v["lista_topicos"], {x["id"]: x.get("topico_id") for x in itens}
+    else:
+        # versão gravada antes de `lista_topicos`: o Desfazer volta para o que a leitura montava pelos itens
+        lista_antes, ts, _ = _topicos_das_linhas(u.tenant_id, obra_id, titulos + itens, manuais)
+        topico_antes = {x["id"]: t for x, t in zip(itens, ts[len(titulos):], strict=True)}
+    itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": chave[nova_fase[x["id"]]],
+                  "topico_antes": topico_antes[x["id"]], "topico_depois": topico_novo[x["id"]]}
+                 for x in itens if x["etapa"] != chave[nova_fase[x["id"]]]
+                 or topico_antes[x["id"]] != topico_novo[x["id"]]]
     titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
                      for t in titulos]
     # reaproveita os títulos existentes para as fases; cria os que faltarem (ids determinísticos, idempotente)
@@ -1527,7 +1647,8 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
 
     def aplicar() -> dict:
         for m in itens_mud:
-            tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["depois"]})
+            tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["depois"],
+                                                                    "topico_id": m["topico_depois"]})
         for r in reusar:
             tx.atualizar("itens_orcamento", u.tenant_id, r["id"],
                          {"etapa": r["etapa"], "descricao": r["descricao"], "ordem": r["ordem"]})
@@ -1549,6 +1670,7 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
         # cache de etapas da versão (Compras/apropriação leem dele) e total (cresce com as fases estimadas)
         tx.atualizar("versoes_orcamento", u.tenant_id, versao_id,
                      {"lista_etapas": [{"etapa": chave[f], "descricao": f} for f in todas],
+                      "lista_topicos": nova_lista,
                       "total": (v.get("total") or 0) + novos_estimados})
         evento(tx, u.tenant_id, "orcamento.organizado_fases", obra_id,
                 {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": todas})
@@ -1556,8 +1678,9 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
 
     # Desfazer: volta a etapa dos itens reais, o nome dos títulos, o cache e o total; zera os itens estimados criados.
     receita = {"op": "restaurar_etapas", "obra_id": obra_id, "versao_id": versao_id,
-               "itens": [{"id": m["id"], "etapa": m["antes"]} for m in itens_mud], "titulos": titulos_antes,
-               "lista_etapas": v.get("lista_etapas"), "total": v.get("total"),
+               "itens": [{"id": m["id"], "etapa": m["antes"], "topico_id": m["topico_antes"]} for m in itens_mud],
+               "titulos": titulos_antes, "lista_etapas": v.get("lista_etapas"), "lista_topicos": lista_antes,
+               "total": v.get("total"),
                "zerar": [iid for (iid, e, n, existe) in criar_item if not existe]}
     ne = len(estimadas)
     return Operacao(obra_id=obra_id, aplicar=aplicar,
@@ -1575,12 +1698,15 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
     versao_id = receita.get("versao_id")
     v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id) if versao_id else None
     lista_atual = v.get("lista_etapas") if v else None  # a de agora, para o Refazer
+    topicos_atual = v.get("lista_topicos") if v else None
     total_atual = v.get("total") if v else None
     zerar = [z for z in receita.get("zerar", []) if await tx.obter("itens_orcamento", u.tenant_id, z)]
 
     def aplicar() -> dict:
         for m in itens:
-            tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["etapa"]})
+            # receita de antes dos tópicos do orçamento não tem `topico_id`: só a etapa volta
+            tx.atualizar("itens_orcamento", u.tenant_id, m["id"],
+                         {"etapa": m["etapa"], **({"topico_id": m["topico_id"]} if "topico_id" in m else {})})
         for t in titulos:
             campos_t = {"etapa": t["etapa"], "descricao": t["descricao"]}
             if "ordem" in t:
@@ -1592,6 +1718,8 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
             campos = {}
             if receita.get("lista_etapas") is not None:
                 campos["lista_etapas"] = receita["lista_etapas"]
+            if receita.get("lista_topicos") is not None:
+                campos["lista_topicos"] = receita["lista_topicos"]
             if receita.get("total") is not None:
                 campos["total"] = receita["total"]
             if campos:
@@ -1599,8 +1727,8 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
         return {"itens": len(itens)}
 
     inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": versao_id,
-               "itens": [{"id": m["id"], "etapa": m["etapa"]} for m in itens],
+               "itens": [{k: m[k] for k in ("id", "etapa", "topico_id") if k in m} for m in itens],
                "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos],
-               "lista_etapas": lista_atual, "total": total_atual}
+               "lista_etapas": lista_atual, "lista_topicos": topicos_atual, "total": total_atual}
     return Operacao(obra_id=receita["obra_id"], aplicar=aplicar,
                     texto=lambda d: "Desfez a organização do orçamento em fases", desfazer=lambda d: inversa)

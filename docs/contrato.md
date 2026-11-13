@@ -234,7 +234,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
 - `VersaoOrcamento` = `{id, obra_id, tipo: "contrato" | "aditivo", numero, descricao, data, arquivo, itens, etapas,
   total, ativa, substitui, criado_em}`. `numero`: 0 no contrato, 1, 2… nos aditivos (o maior ativo + 1). `data`
   `"AAAA-MM-DD"` ou `null`. `itens`/`etapas` = quantos de cada; `total` em centavos (soma dos itens). `ativa: false` =
-  desfeita ou substituída. `substitui` = a versão de contrato que esta tirou de vigência (ou `null`).
+  desfeita ou substituída. `substitui` = a versão de contrato que esta tirou de vigência (ou `null`). `lista_etapas`
+  = `[{etapa, descricao}]` e `lista_topicos` = `[{etapa, id, nome}]` (os tópicos do orçamento desta versão; versão
+  gravada antes do campo não o tem, e a API monta pelos itens).
   Em `GET …/orcamento` cada versão traz também: `origem` = `"somar"` (contrato gravado pelo somar, da planilha ou de
   `…/estrutura`) | `"reordenar"` (pela ordem das etapas) | `null` (as outras, e as gravadas antes deste campo);
   `rotulo` = o nome para a pessoa, sem nome de arquivo do sistema ("Materiais das pranchas" no lugar de
@@ -247,8 +249,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   separa as duas; a API resolve pelo registro de cada versão, então a cadeia pranchas → somar → reordenar dá
   substituida, substituida, vigente, e desfazer a reordenação dá substituida, vigente, desfeita. O `arquivo` gravado não muda: o sufixo " (projeto).csv" é como a API reconhece as pranchas.
 - `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
-  descricao, complemento, unidade, quantidade, valor_unitario, total, linha}`. `complemento` = a medida, marca ou
-  detalhe da linha ("0,60 x 2,10"), da coluna `complemento` (≤ 80; `""` sem ela e nos itens gravados antes do campo). `ordem` = posição na versão (0, 1, 2…); `numero` =
+  descricao, complemento, unidade, quantidade, valor_unitario, total, linha, topico_id}`. `complemento` = a medida,
+  marca ou detalhe da linha ("0,60 x 2,10"), da coluna `complemento` (≤ 80; `""` sem ela e nos itens gravados antes do
+  campo). `topico_id` = o tópico do orçamento em que o item conta (`null` = sem tópico). `ordem` = posição na versão (0, 1, 2…); `numero` =
   o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);
   `etapa` = a chave da etapa raiz: o que vem antes do 1º ponto ("2" para "2.1.1"); item sem ponto fica na última linha de
   etapa; etapa sem número tem como chave o próprio nome normalizado (sem acento, minúsculo), e é assim que a "FUNDAÇÕES"
@@ -257,7 +260,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `descricao?` (≤ 200), `data?`, `aplicar` = bool, `chave_idempotencia` (obrigatória com `aplicar`), `etapas_itens?`,
   `somar?` = bool (padrão `false`), `ignorar_itens?` = JSON lista de `ordem`) → `PreviaVersao` =
   `{aplicado, tipo, itens: [ItemPrevia], ignoradas, erros, avisos: [{linha, mensagem}], total, n_itens, n_etapas,
-  etapas: [{etapa, descricao, total}], substitui: {versao_id, total, itens} | null, total_apos, versao_id, registro_id}`
+  etapas: [{etapa, descricao, total}], topicos: [{etapa, id, nome, total}], substitui: {versao_id, total, itens} | null,
+  total_apos, versao_id, registro_id}`
   (`ItemPrevia` = `ItemOrcamento` sem `id/obra_id/versao_id`, mais `etapa_origem`, `etapa_planilha` e `repetido_de`;
   `versao_id`/`registro_id` só depois de aplicar).
   - `ignorar_itens` (JSON `[3, 7]`, as `ordem` da prévia; inválido → 422): esses itens saem da prévia e da gravação
@@ -296,6 +300,22 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     versão já gravada (200); a mesma chave com outro arquivo/tipo → 409.
   - Desfazer (`desligar_versao`): a versão sai de vigência e a que ela substituiu volta. 409 se ela já não está
     vigente (outra reimportação passou por cima) ou se, ao desfazer um contrato, há aditivo vigente criado depois dele.
+- **Tópicos do orçamento** (regra em `canteiro_dominio.orcamento.topicos_dos_itens`): o **nível 2 da numeração** é
+  tópico da etapa. O nome é a descrição da linha "7.1", seja ela título do grupo ou o próprio item; os itens "7.1.x"
+  caem nele. A mesma descrição (sem acento, caixa e espaços) na mesma etapa é **um tópico só** ("11.1 Portas" e "11.2
+  Portas" de medidas diferentes); a mesma em outra etapa é outro ("Mão de Obra" da 7 e da 11). Item sem linha de nível
+  2 que o nomeie ("2.1.1" sem a linha "2.1"), item de nível 1 e item sem número ficam sem tópico; planilha sem
+  numeração não tem tópicos. A etapa do tópico é a do item. Etapa com mais de 30 tópicos fica **sem nenhum**, com aviso
+  `linha: 0` na prévia ("A etapa 1 SERVIÇOS tem 31 tópicos na numeração (o limite é 30): ela fica sem os tópicos do
+  orçamento, e o gasto entra só na etapa."). `topicos` da prévia = os que os itens da prévia tocam, com a soma deles
+  (no somar, só o que entra), nas chaves de etapa da prévia; cada `ItemPrevia` traz o `topico_id`.
+  - **ID**: `orc-` + um ID derivado da obra, da etapa e do nome normalizado: reimportar a mesma planilha devolve os
+    mesmos IDs, e o gasto continua no tópico. Tópico **manual** ativo com o mesmo nome na mesma etapa empresta o ID
+    dele (o gasto já lançado nele continua no lugar), e na árvore aparece uma vez, como do orçamento.
+  - Gravados na versão (`lista_topicos`) e em cada item (`topico_id`) pela importação, pelo somar, pela ordem das
+    etapas e pela organização em fases (o tópico vai com o item para a fase nova, e o Desfazer volta); o Desfazer de
+    uma versão leva os tópicos dela junto. Não são documento: reordenar e somar continuam livres com eles, e só o
+    lançamento (gasto, pedido, tópico manual…) numa etapa que mudaria de número trava, como antes.
 - **Somar ao orçamento** (`somar=true`, antes de aprovar): completa o orçamento com outra planilha (o caso de quem
   levou as pranchas e agora traz a planilha), **sem aditivo**. Só com `tipo=contrato`, a obra em orçamento e um contrato
   vigente; senão 422 ("Somar vale para o orçamento, não para o aditivo." / "O orçamento já foi aprovado: para
@@ -623,20 +643,27 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
 
 **Árvore de gasto:**
 
-- `GET /obras/{obra_id}/arvore` (qualquer papel) → `[{chave, nome, inclui, fixa, origem, topicos: [{id, nome}]}]`.
+- `GET /obras/{obra_id}/arvore` (qualquer papel) → `[{chave, nome, inclui, fixa, origem, topicos: [{id, nome,
+  origem}]}]`.
   Com orçamento: as etapas dele (`origem: "orcamento"`, `fixa: true`, `inclui: ""`, `nome` = "18 INSTALAÇÃO ELÉTRICA
   - 220V", com o código na frente; etapa sem número da planilha fica só com a descrição) e depois as extras
   (`origem: "extra"`, `fixa: false`, chave `x-<id>`). Sem orçamento: as 24 da lista padrão (`origem: "padrao"`,
   `fixa: true`), as extras antes de "Outros". Os **tópicos** de cada etapa ficam presos à chave dela (no orçamento, o
   código). Arquivados não aparecem; tópico de uma etapa que saiu da árvore também não.
+  - Tópico `origem: "orcamento"` = a linha de nível 2 da numeração do orçamento vigente (ver "Tópicos do orçamento"),
+    na ordem da planilha, antes dos manuais; `origem: "manual"` = criado por `POST …/topicos`, pela criação. Tópico do
+    orçamento não se renomeia nem se arquiva (a tela não oferece): ele muda quando o orçamento é reimportado.
 - `POST /obras/{obra_id}/etapas-extras` `{nome}` e `POST /obras/{obra_id}/topicos` `{etapa, nome}` (admin) → 201 +
   `registro_id`. Nome até 60, sem repetir (sem diferenciar acento e maiúscula) entre as etapas da obra (com orçamento:
-  a descrição de cada etapa dele, com ou sem o código; sem: a lista padrão) / os tópicos da etapa → 422. `etapa` do
-  tópico tem de estar na árvore de hoje → 422. Até 20 etapas extras por obra e 30 tópicos por etapa. Desfazer a
+  a descrição de cada etapa dele, com ou sem o código; sem: a lista padrão) / os tópicos da etapa, os do orçamento
+  inclusive → 422. `etapa` do tópico tem de estar na árvore de hoje → 422. Até 20 etapas extras por obra e 30 tópicos
+  por etapa (os do orçamento contam). Desfazer a
   criação arquiva; refazer reativa. Limite e nome único valem também com pedidos simultâneos e no Desfazer/Refazer
   (reativar ou voltar o nome antigo que outro pegou nesse meio-tempo → 422 "Já existe: …").
 - `PATCH /etapas-extras/{id}` e `PATCH /topicos/{id}` `{nome?, arquivado?}` (admin) → renomeia e/ou arquiva/reativa,
   com Desfazer e Refazer. Nada mudou → 422. Arquivado sai da árvore e não recebe gasto novo; gasto antigo fica.
+  Tópico do orçamento (ID `orc-…`, ou o manual que o orçamento reaproveitou) → 422 "Este tópico vem do orçamento (a
+  linha de nível 2 da planilha): ele muda quando o orçamento é reimportado, não por aqui."
 
 **Comprovantes:**
 

@@ -582,6 +582,7 @@ class ItemPrevia(BaseModel):
     total: int
     linha: int
     complemento: str = ""
+    topico_id: str | None = Field(None, description="o tópico do orçamento em que o item conta (`topicos` da prévia)")
     # no aditivo e no somar: de onde veio a etapa do item. "planilha" = como veio (ou etapa nova, com o número
     # trocado se ele já era de outra); "nome" = etapa de mesmo nome no orçamento; "codigo" = o mesmo código está nesta
     # etapa do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).
@@ -601,6 +602,13 @@ class TotalEtapa(BaseModel):
     total: int
 
 
+class TopicoPrevia(BaseModel):
+    etapa: str
+    id: str = Field(description="o ID com que o tópico fica na árvore (o de um tópico manual de mesmo nome, se há)")
+    nome: str
+    total: int = Field(description="soma dos itens do tópico (centavos)")
+
+
 class Substituida(BaseModel):
     versao_id: str
     total: int
@@ -618,6 +626,8 @@ class PreviaVersao(BaseModel):
     n_itens: int
     n_etapas: int
     etapas: list[TotalEtapa]
+    topicos: list[TopicoPrevia] = Field(default_factory=list, description=(
+        "os tópicos que saem da numeração (nível 2), na ordem da planilha; com as chaves de etapa da prévia"))
     substitui: Substituida | None = None
     total_apos: int | None = Field(None, description="no somar: o orçamento depois de somar (o vigente + `total`)")
     numeracao: dict[str, str] = Field(default_factory=dict, description=(
@@ -1279,6 +1289,9 @@ class MedicaoSaida(BaseModel):
 class TopicoNaArvoreSaida(BaseModel):
     id: str
     nome: str
+    origem: Literal["orcamento", "manual"] = Field(
+        "manual", description="'orcamento' = a linha de nível 2 da planilha (não se renomeia nem se arquiva: muda com "
+                              "a reimportação); 'manual' = criado na tela")
 
 
 class EtapaNaArvoreSaida(BaseModel):

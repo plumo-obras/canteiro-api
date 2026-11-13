@@ -1,7 +1,12 @@
-"""Contas do orçamento da obra (EAP) que não dependem de banco: o andamento de cada linha de pedido contra o orçado.
+"""Regras do orçamento da obra (EAP) que não dependem de banco: os tópicos que saem da numeração e o andamento de
+cada linha de pedido contra o orçado.
 
 A API soma por etapa (e por tópico) o que cada linha devolve aqui; a tela e o agente só mostram o resultado.
 """
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+
+from .etapas import MAX_TOPICOS_POR_ETAPA, normalizar_nome
 from .modelos import StatusPedido
 from .regras import EM_COTACAO
 
@@ -27,3 +32,73 @@ def andamento_da_linha(status: StatusPedido, linha: dict) -> tuple[int, int, int
     recebido = recebido_da_linha(linha)
     encerrado_com_sobra = status == StatusPedido.CONFERIDO and linha.get("recebida", 0) < linha["quantidade"]
     return 0, recebido if encerrado_com_sobra else max(total, recebido), recebido
+
+
+# --- tópicos do orçamento: o nível 2 da numeração ---
+#
+# Na planilha numerada, "7 PAREDES" é a etapa, "7.1 Cerâmica tijolo" é o tópico e "7.1.1 …" é detalhe do tópico. O
+# tópico não é documento: sai dos itens de cada versão (e a versão guarda a lista pronta, `lista_topicos`, como guarda
+# `lista_etapas`). Assim reordenar e somar continuam livres antes de aprovar, e o Desfazer da versão leva os tópicos
+# junto, sem receita própria.
+
+
+@dataclass(frozen=True)
+class TopicoDoOrcamento:
+    etapa: str
+    nome: str                          # como veio na 1ª linha dele
+    chave: str                         # o nome normalizado: a mesma "Portas" duas vezes na etapa é um tópico só
+
+
+@dataclass
+class TopicosDosItens:
+    topicos: list[TopicoDoOrcamento] = field(default_factory=list)
+    # posição do item (na lista recebida) -> o tópico dele; item sem tópico não entra
+    do_item: dict[int, TopicoDoOrcamento] = field(default_factory=dict)
+    # etapa -> quantos tópicos ela teria, quando passa do limite: ela fica sem tópicos do orçamento
+    cheias: dict[str, int] = field(default_factory=dict)
+
+
+def numero_do_topico(numero: str) -> str | None:
+    """"7.1.2" -> "7.1"; número de etapa ("7") ou sem número -> None."""
+    partes = numero.split(".")
+    if len(partes) < 2 or not partes[0] or not partes[1]:
+        return None
+    return f"{partes[0]}.{partes[1]}"
+
+
+def topicos_dos_itens(itens: Sequence[dict]) -> TopicosDosItens:
+    """Os tópicos de uma versão do orçamento e o tópico de cada item (`tipo`, `numero`, `etapa`, `descricao`).
+
+    O nome do tópico é a descrição da linha de nível 2 ("7.1"), seja ela título do grupo ou o próprio item; o item
+    "7.1.3" cai no tópico "7.1". Item sem linha de nível 2 que o nomeie (a EAP que numera "2.1.1" sem a linha "2.1")
+    fica sem tópico. A etapa do tópico é a do item (`etapa`), não o prefixo do número: depois de organizar em fases
+    os dois podem diferir. Etapa com mais de `MAX_TOPICOS_POR_ETAPA` tópicos fica sem nenhum (`cheias`): a árvore com
+    um tópico por serviço de uma EAP longa não ajudaria ninguém a escolher, e o leitor de comprovantes recebe a lista.
+    """
+    nomes: dict[str, str] = {}
+    for x in itens:
+        n = x.get("numero") or ""
+        if numero_do_topico(n) == n and n not in nomes:
+            nomes[n] = " ".join(x["descricao"].split())
+    r = TopicosDosItens()
+    vistos: dict[tuple[str, str], TopicoDoOrcamento] = {}
+    for i, x in enumerate(itens):
+        if x["tipo"] != "item" or not x.get("etapa"):
+            continue
+        tn = numero_do_topico(x.get("numero") or "")
+        if tn is None or tn not in nomes:
+            continue
+        chave = normalizar_nome(nomes[tn])
+        t = vistos.get((x["etapa"], chave))
+        if t is None:
+            t = vistos[(x["etapa"], chave)] = TopicoDoOrcamento(etapa=x["etapa"], nome=nomes[tn], chave=chave)
+            r.topicos.append(t)
+        r.do_item[i] = t
+    por_etapa: dict[str, int] = {}
+    for t in r.topicos:
+        por_etapa[t.etapa] = por_etapa.get(t.etapa, 0) + 1
+    r.cheias = {e: n for e, n in por_etapa.items() if n > MAX_TOPICOS_POR_ETAPA}
+    if r.cheias:
+        r.topicos = [t for t in r.topicos if t.etapa not in r.cheias]
+        r.do_item = {i: t for i, t in r.do_item.items() if t.etapa not in r.cheias}
+    return r
