@@ -260,7 +260,23 @@ def _subtotais_e_verbas(itens: list[ItemPrevia], verbas: dict[int, str], valor_t
     junto com o das linhas contaria duas vezes. A que não tem linha embaixo e veio sem unidade é verba. Os dois casos
     ganham aviso na prévia, para a pessoa conferir."""
     com_filhos = {".".join(p[:k]) for x in itens if x.numero for p in [x.numero.split(".")] for k in range(1, len(p))}
+    # a verba seguida de item sem número também é grupo (os itens dela é que não trazem a numeração): {posição: a soma
+    # desses itens}. Só a linha sem unidade: o item com unidade seguido de item solto continua item, como sempre foi.
+    soltos: dict[int, int] = {}
+    for i in verbas:
+        j, soma = i + 1, None
+        while j < len(itens) and itens[j].tipo == "item" and not itens[j].numero:
+            soma = (soma or 0) + itens[j].total
+            j += 1
+        if soma is not None:
+            soltos[i] = soma
     for i, x in enumerate(itens):
+        if i in soltos:
+            valor_titulo[i] = x.total
+            verbas.pop(i)
+            itens[i] = x.model_copy(update={"tipo": "etapa", "etapa": x.numero.split(".")[0], "unidade": "",
+                                            "quantidade": 0, "valor_unitario": 0, "total": 0})
+            continue
         if x.tipo == "item" and x.numero in com_filhos:
             if x.total:
                 valor_titulo[i] = x.total
@@ -270,8 +286,9 @@ def _subtotais_e_verbas(itens: list[ItemPrevia], verbas: dict[int, str], valor_t
     for i, valor in sorted(valor_titulo.items()):
         x = itens[i]
         nome = f"{x.numero} {x.descricao}"
-        if x.numero in com_filhos:
-            soma = sum(y.total for y in itens if y.tipo == "item" and y.numero.startswith(x.numero + "."))
+        if i in soltos or x.numero in com_filhos:
+            soma = soltos[i] if i in soltos else sum(y.total for y in itens
+                                                     if y.tipo == "item" and y.numero.startswith(x.numero + "."))
             if soma != valor:
                 avisos.append(Aviso(linha=x.linha, mensagem=f"{nome} diz {fmt_reais(valor)} e as linhas dele somam "
                                                             f"{fmt_reais(soma)}: vale a soma das linhas."))

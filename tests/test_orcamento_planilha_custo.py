@@ -139,3 +139,26 @@ def test_data_base_pelo_titulo():
     assert _data_base(["Valor de março 2024"]) == "2024-03"
     assert _data_base(["Total", "Unitário"]) is None
     assert [_letra(j) for j in (0, 2, 25, 26, 27)] == ["A", "C", "Z", "AA", "AB"]
+
+
+async def test_verba_seguida_de_itens_sem_numero_e_titulo_do_grupo(vila):
+    o = await nova_obra(vila)
+    planilha = xlsx(
+        CABECALHO,
+        ["1", None, None, "FUNDAÇÃO", None, None, None, None],
+        # sem unidade, com valor, e os itens dele vêm sem número: é o título do grupo, não verba
+        ["1.1", None, None, "Estacas", None, None, None, 1000],
+        [None, None, None, "Concreto", "m³", 1, 600, 600],
+        [None, None, None, "Aço", "kg", 10, 50, 500],
+        # com unidade, seguido de item sem número: continua item (como sempre foi)
+        ["1.2", None, None, "Blocos", "un", 2, 100, 200],
+        [None, None, None, "Forma", "m²", 1, 30, 30],
+    )
+    p = (await versao(vila, o["id"], planilha, {**_mapa_eap(), "linha_cabecalho": 1})).json()
+    assert p["erros"] == []
+    assert [(x["numero"], x["tipo"], x["total"]) for x in p["itens"]] == [
+        ("1", "etapa", 0), ("1.1", "etapa", 0), ("", "item", 60000), ("", "item", 50000), ("1.2", "item", 20000),
+        ("", "item", 3000)]
+    assert p["total"] == 133000
+    assert [a["mensagem"] for a in p["avisos"]] == [
+        "1.1 Estacas diz R$ 1.000,00 e as linhas dele somam R$ 1.100,00: vale a soma das linhas."]

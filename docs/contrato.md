@@ -281,7 +281,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     fora ("… A quantidade 34 ficou de fora: ponha a unidade na planilha para entrar por quantidade.").
   - **Subtotal de grupo**: linha numerada com linhas embaixo dela ("7.1" com "7.1.1", "7.1.2") é título do grupo
     (`tipo: "etapa"`, nível dela), mesmo que tenha unidade, quantidade e valor: o valor dela é subtotal, e somar junto
-    contaria duas vezes. Se a linha do título trazia valor e ele não fecha com a soma das linhas embaixo, aviso "1.1
+    contaria duas vezes. A linha numerada sem unidade seguida de itens **sem número** também é título do grupo (os
+    itens são dela); a com unidade seguida de item sem número continua item. Se a linha do título trazia valor e ele não fecha com a soma das linhas embaixo, aviso "1.1
     Portas diz R$ 2.500,00 e as linhas dele somam R$ 2.100,00: vale a soma das linhas.". Etapa (nível 1) com valor e
     nenhuma linha: o valor não entra, com aviso "A etapa 2 LIMPEZA tem R$ 500,00 e nenhuma linha: o valor não entra
     no orçamento. Ponha o valor numa linha 2.1.".
