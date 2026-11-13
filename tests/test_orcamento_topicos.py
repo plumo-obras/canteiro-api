@@ -463,3 +463,36 @@ async def test_organizar_em_fases_nao_troca_o_nome_do_topico_nos_recalculos_segu
                              json={"ordem": ordem, "chave_idempotencia": uuid.uuid4().hex})
     assert r.status_code == 201, r.text
     assert [t["nome"] for e in (await _arvore(vila, obra)).values() for t in e["topicos"]] == ["Cerâmica tijolo"]
+
+
+async def test_organizar_de_novo_o_orcamento_organizado_antes_dos_topicos_nao_muda_nada(vila):
+    obra = (await nova_obra(vila))["id"]
+    # sem preço, nenhuma fase é estimada: organizar de novo não tem o que mudar
+    contrato = xlsx(CABECALHO, ["7", None, None, "PAREDES", None, None, None, None],
+                    ["7.1", None, None, "Cerâmica tijolo", None, None, None, None],
+                    ["7.1.1", None, None, "Tapume de obra", "m", 10, 0, 0],
+                    ["7.1.2", None, None, "Alvenaria de tijolo cerâmico", "m²", 10, 0, 0],
+                    ["7.1.3", None, None, "Pintura látex (2 demãos)", "m²", 10, 0, 0])
+    p = await _importar(vila, obra, contrato, mapa(linha_cabecalho=1))
+    r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
+    assert r.status_code == 200, r.text
+    fases = r.json()["fases"]
+    assert (fases, r.json()["estimadas"]) == (["Serviços preliminares", "Alvenaria", "Pintura"], 0)
+    # o orçamento como a organização de antes gravava: "7 PAREDES" virou a 1ª fase, a linha "7.1" (nível 2) virou a
+    # 2ª (o título criado para ela não existe), a 3ª foi criada, e não havia tópicos na versão nem nos itens
+    arm, tenant = vila.arm, vila.tenant_id
+    itens = (await orcamento(vila, obra))["itens"]
+    titulo = next(x for x in itens if x["numero"] == "7.1")
+    criado = next(x for x in itens if x["tipo"] == "etapa" and x["etapa"] == "2" and x["id"] != titulo["id"])
+    await arm.apagar_ids("itens_orcamento", tenant, [criado["id"]])
+    await arm.atualizar("itens_orcamento", tenant, titulo["id"], {"etapa": "2", "descricao": fases[1], "ordem": 1})
+    v = await arm.obter("versoes_orcamento", tenant, p["versao_id"])
+    await arm.salvar("versoes_orcamento", {k: x for k, x in v.items() if k != "lista_topicos"})
+    for x in (await orcamento(vila, obra))["itens"]:
+        d = await arm.obter("itens_orcamento", tenant, x["id"])
+        await arm.salvar("itens_orcamento", {k: y for k, y in d.items() if k != "topico_id"})
+    antes = (await orcamento(vila, obra))["itens"]
+
+    r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
+    assert r.status_code == 422 and "já está organizado em fases" in r.json()["detail"], r.text
+    assert (await orcamento(vila, obra))["itens"] == antes

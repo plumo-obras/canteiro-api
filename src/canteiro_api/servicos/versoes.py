@@ -1596,8 +1596,8 @@ def _topicos_da_previa(linhas: list[ItemPrevia], lista: list[dict]) -> list[Topi
 
 def _topicos_por_numero(linhas: list[dict], lista: list[dict], topico_de: dict[str, str | None]) -> dict[str, str]:
     """{"7.1": nome do tópico} pelo tópico em que os itens numerados de `linhas` estão (`topico_de`, de
-    `topicos_das_versoes`). Sai do tópico, não da descrição da linha "7.1": organizar em fases reaproveita essa linha
-    como título da fase."""
+    `topicos_das_versoes`). Sai do tópico, não da descrição da linha "7.1": no orçamento organizado em fases antes de
+    os tópicos existirem, essa linha virou título de fase."""
     nome = {t["id"]: t["nome"] for t in lista}
     r: dict[str, str] = {}
     for x in linhas:
@@ -1754,15 +1754,17 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
                      for t in titulos]
     # reaproveita os títulos existentes para as fases; cria os que faltarem (ids determinísticos, idempotente)
-    principais = [t for t in titulos if t.get("nivel", 1) == 1]
+    das_fases = {(e["etapa"], e["descricao"]) for e in v.get("lista_etapas") or []}
+    principais = [t for t in titulos if t.get("nivel", 1) == 1 or (t["etapa"], t["descricao"]) in das_fases]
+    de_fase = {t["id"] for t in principais}
     reusar = [{"id": principais[i]["id"], "etapa": chave[todas[i]], "descricao": todas[i], "ordem": i}
               for i in range(min(len(principais), len(todas)))]
     criar_tit = [(id_derivado(u.tenant_id, "etapa-fase", versao_id, f), chave[f], f, i)
                  for i, f in enumerate(todas) if i >= len(principais)]
     grupos = []
     for k, t in enumerate(nova_ordem):
-        if t["tipo"] == "etapa" and t.get("nivel", 1) > 1:
-            abaixo = next((x for x in nova_ordem[k + 1:] if x["tipo"] == "item" or x.get("nivel", 1) == 1), None)
+        if t["tipo"] == "etapa" and t["id"] not in de_fase:
+            abaixo = next((x for x in nova_ordem[k + 1:] if x["tipo"] == "item" or x["id"] in de_fase), None)
             if abaixo and abaixo["tipo"] == "item" and abaixo["etapa"] != t["etapa"]:
                 grupos.append({"id": t["id"], "etapa": abaixo["etapa"]})
     # itens estimados (os serviços típicos de cada fase que falta), id determinístico — reexecutar atualiza, não duplica
