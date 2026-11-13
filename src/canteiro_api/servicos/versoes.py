@@ -286,9 +286,13 @@ def _subtotais_e_verbas(itens: list[ItemPrevia], verbas: dict[int, str], valor_t
     for i, valor in sorted(valor_titulo.items()):
         x = itens[i]
         nome = f"{x.numero} {x.descricao}"
-        if i in soltos or x.numero in com_filhos:
-            soma = soltos[i] if i in soltos else sum(y.total for y in itens
-                                                     if y.tipo == "item" and y.numero.startswith(x.numero + "."))
+        if "." in x.numero:
+            linhas = [y.total for y in itens if y.tipo == "item" and y.numero.startswith(x.numero + ".")]
+            linhas += [soltos[i]] if i in soltos else []
+        else:
+            linhas = [y.total for y in itens if y.tipo == "item" and y.etapa == x.etapa]
+        if linhas:
+            soma = sum(linhas)
             if soma != valor:
                 avisos.append(Aviso(linha=x.linha, mensagem=f"{nome} diz {fmt_reais(valor)} e as linhas dele somam "
                                                             f"{fmt_reais(soma)}: vale a soma das linhas."))
@@ -628,7 +632,8 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         raise ErroNegocio("Importe o orçamento contratado antes do aditivo.")
     linhas = _somadas(existentes, vigente, itens) if somar else itens
     manuais = await topicos_manuais(arm, u.tenant_id, obra_id)
-    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais, previa.avisos)
+    lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais, previa.avisos,
+                                 existentes if tipo == TipoVersao.ADITIVO else None)
     # no somar, a prévia mostra só o que entra (os tópicos que os itens da planilha tocam)
     previa.topicos = _topicos_da_previa(itens, lista_topicos)
     renumeradas: dict[str, str] = {}
@@ -641,7 +646,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
             pranchas = vigente["lista_etapas"][0]["etapa"]
             antes_dela = ordem[ordem.index(pranchas) - 1]
             linhas = _reordenar(linhas, ordem)
-            lista_topicos = _com_topicos(u.tenant_id, obra_id, linhas, manuais)
+            antes, lista_topicos = lista_topicos, _com_topicos(u.tenant_id, obra_id, linhas, manuais)
+            previa.topicos = _topicos_da_previa(
+                itens, _topicos_renumerados(itens, antes, lista_topicos, _renumeradas(ordem)))
             # a prévia continua com as chaves de antes (são elas que valem na escolha de etapa, `etapas_itens`); o
             # número com que cada etapa é gravada vai à parte, para a tela mostrar o mesmo que o orçamento terá
             previa.numeracao = {k: n for k, n in _renumeradas(ordem).items() if n != k}
@@ -1513,10 +1520,10 @@ async def topicos_manuais(leitor, tenant_id: str, obra_id: str) -> dict[tuple[st
     return {(t["etapa"], normalizar_nome(t["nome"])): t["id"] for t in ts if not t.get("arquivado")}
 
 
-def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict],
-                        manuais: dict[tuple[str, str], str]) -> tuple[list[dict], list[str | None], dict[str, int]]:
+def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict], manuais: dict[tuple[str, str], str],
+                        vigentes: list[dict] | None = None) -> tuple[list[dict], list[str | None], dict[str, int]]:
     """(lista_topicos, o topico_id de cada linha, etapas que passaram do limite). A regra é do domínio."""
-    r = topicos_dos_itens(linhas)
+    r = topicos_dos_itens(linhas, vigentes or ())
     ids = {t: manuais.get((t.etapa, t.chave)) or id_topico_orcamento(tenant_id, obra_id, t.etapa, t.chave)
            for t in r.topicos}
     lista = [{"etapa": t.etapa, "id": ids[t], "nome": t.nome} for t in r.topicos]
@@ -1524,9 +1531,11 @@ def _topicos_das_linhas(tenant_id: str, obra_id: str, linhas: list[dict],
 
 
 def _com_topicos(tenant_id: str, obra_id: str, linhas: list[ItemPrevia], manuais: dict[tuple[str, str], str],
-                 avisos: list[Aviso] | None = None) -> list[dict]:
-    """Põe o `topico_id` em cada linha e devolve a `lista_topicos` da versão; a etapa cheia de tópicos ganha aviso."""
-    lista, do_item, cheias = _topicos_das_linhas(tenant_id, obra_id, [x.model_dump() for x in linhas], manuais)
+                 avisos: list[Aviso] | None = None, vigentes: list[dict] | None = None) -> list[dict]:
+    """Põe o `topico_id` em cada linha e devolve a `lista_topicos` da versão; a etapa cheia de tópicos ganha aviso.
+    `vigentes` = as linhas do orçamento que valem, no aditivo (o nome do tópico que o aditivo não traz)."""
+    lista, do_item, cheias = _topicos_das_linhas(tenant_id, obra_id, [x.model_dump() for x in linhas], manuais,
+                                                 vigentes)
     for x, t in zip(linhas, do_item, strict=True):
         x.topico_id = t
     if avisos is not None:
@@ -1536,6 +1545,19 @@ def _com_topicos(tenant_id: str, obra_id: str, linhas: list[ItemPrevia], manuais
                 f"A etapa {f'{e} {nomes.get(e, "")}'.strip()} tem {n} tópicos na numeração (o limite é "
                 f"{MAX_TOPICOS_POR_ETAPA}): ela fica sem os tópicos do orçamento, e o gasto entra só na etapa.")))
     return lista
+
+
+def _topicos_renumerados(itens: list[ItemPrevia], antes: list[dict], depois: list[dict],
+                         nova: dict[str, str]) -> list[dict]:
+    """A prévia continua nas chaves de etapa de antes da renumeração, mas com o ID que cada tópico tem no orçamento
+    gravado (a etapa entra no ID): troca o `topico_id` dos itens da prévia e devolve `antes` com os IDs de `depois`.
+    O tópico é o mesmo quando é o mesmo nome na etapa renumerada."""
+    final = {(t["etapa"], normalizar_nome(t["nome"])): t["id"] for t in depois}
+    troca = {t["id"]: final.get((nova.get(t["etapa"], t["etapa"]), normalizar_nome(t["nome"]))) for t in antes}
+    for x in itens:
+        if x.topico_id:
+            x.topico_id = troca[x.topico_id]
+    return [{**t, "id": troca[t["id"]]} for t in antes if troca[t["id"]]]
 
 
 def _topicos_da_previa(linhas: list[ItemPrevia], lista: list[dict]) -> list[TopicoPrevia]:
@@ -1676,14 +1698,19 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     # o tópico vem junto com o item para a fase nova, pelo nome da linha de nível 2 de antes (os títulos de agora
     # viram os das fases)
     movidos = [{**x, "etapa": chave[nova_fase[x["id"]]]} for x in itens]
-    nova_lista, novos_topicos, _ = _topicos_das_linhas(u.tenant_id, obra_id, titulos + movidos, manuais)
-    topico_novo = {x["id"]: t for x, t in zip(itens, novos_topicos[len(titulos):], strict=True)}
+    def na_ordem(linhas: list[dict]) -> list[dict]:
+        return sorted(titulos + linhas, key=lambda x: x.get("ordem", 0))
+
+    nova_ordem = na_ordem(movidos)
+    nova_lista, novos_topicos, _ = _topicos_das_linhas(u.tenant_id, obra_id, nova_ordem, manuais)
+    topico_novo = {x["id"]: t for x, t in zip(nova_ordem, novos_topicos, strict=True) if x["tipo"] == "item"}
     if "lista_topicos" in v:
         lista_antes, topico_antes = v["lista_topicos"], {x["id"]: x.get("topico_id") for x in itens}
     else:
         # versão gravada antes de `lista_topicos`: o Desfazer volta para o que a leitura montava pelos itens
-        lista_antes, ts, _ = _topicos_das_linhas(u.tenant_id, obra_id, titulos + itens, manuais)
-        topico_antes = {x["id"]: t for x, t in zip(itens, ts[len(titulos):], strict=True)}
+        ordem_antes = na_ordem(itens)
+        lista_antes, ts, _ = _topicos_das_linhas(u.tenant_id, obra_id, ordem_antes, manuais)
+        topico_antes = {x["id"]: t for x, t in zip(ordem_antes, ts, strict=True) if x["tipo"] == "item"}
     itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": chave[nova_fase[x["id"]]],
                   "topico_antes": topico_antes[x["id"]], "topico_depois": topico_novo[x["id"]]}
                  for x in itens if x["etapa"] != chave[nova_fase[x["id"]]]

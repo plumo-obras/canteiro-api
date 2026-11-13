@@ -288,10 +288,15 @@ def _mesclar_ajustes(prop: dict, ajustes: dict) -> tuple[dict, dict]:
 
 def _guardado(tipo: TipoProposta, dados: dict) -> dict:
     """Como a proposta fica gravada: a de pedido com uma linha só fica no formato plano (insumo, quantidade, valor),
-    que é o que o cartão de aprovação mostra e o que o ajuste edita."""
-    if tipo == TipoProposta.CRIAR_PEDIDO and len(dados.get("linhas", [])) == 1:
-        return _pedido_plano(dados)
-    return dados
+    que é o que o cartão de aprovação mostra e o que o ajuste edita.
+
+    `topico_id` vazio fica fora da linha: a proposta sem tópico grava (e trava) como antes do campo, e a repetição de
+    uma chave enviada antes dele continua sendo a mesma proposta."""
+    if tipo != TipoProposta.CRIAR_PEDIDO:
+        return dados
+    dados = {**dados, "linhas": [{k: v for k, v in x.items() if k != "topico_id" or v is not None}
+                                 for x in dados["linhas"]]}
+    return _pedido_plano(dados) if len(dados["linhas"]) == 1 else dados
 
 
 def _pedido_plano(dados: dict) -> dict:
@@ -306,7 +311,7 @@ def _pedido_plano(dados: dict) -> dict:
     if total is None:
         total = (x["quantidade"] * x.get("valor_unitario", 0) + 500) // 1000
     return {**resto, "insumo_id": x["insumo_id"], "quantidade": x["quantidade"], "valor": total,
-            "etapa": x.get("etapa")}
+            "etapa": x.get("etapa"), **({"topico_id": x["topico_id"]} if x.get("topico_id") else {})}
 
 
 async def _unidade(tx, u: UsuarioAtual, prop: dict) -> str:

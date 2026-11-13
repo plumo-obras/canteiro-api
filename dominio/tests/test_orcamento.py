@@ -97,3 +97,32 @@ def test_gastos_avulsos_por_topico():
     r = gastos_no_orcamento(gastos, {"1"})
     assert r.por_etapa == {"1": 150} and r.por_topico == {"1": {"orc-a": 100, None: 50}}
     assert r.fora_do_orcamento == 7
+
+
+def test_itens_sem_numero_logo_abaixo_do_titulo_de_nivel_2_caem_no_topico_dele():
+    itens = [
+        _l("etapa", "1", "1", "FUNDAÇÃO"),
+        _l("etapa", "1.1", "1", "Estacas"),                  # o título do grupo que a planilha não numera
+        _l("item", "", "1", "Concreto"),
+        _l("item", "", "1", "Aço"),
+        _l("item", "1.2", "1", "Blocos"),
+        _l("item", "", "1", "Forma"),                        # depois de um item numerado: continua solto
+        _l("etapa", "2", "2", "LIMPEZA"),
+        _l("item", "", "2", "Caçamba"),                      # depois do título de etapa: sem tópico
+    ]
+    r = topicos_dos_itens(itens)
+    assert [(t.etapa, t.nome) for t in r.topicos] == [("1", "Estacas"), ("1", "Blocos")]
+    assert {i: t.nome for i, t in r.do_item.items()} == {2: "Estacas", 3: "Estacas", 4: "Blocos"}
+
+
+def test_aditivo_sem_a_linha_de_nivel_2_usa_o_nome_do_contrato():
+    contrato = [_l("etapa", "7", "7", "PAREDES"), _l("etapa", "7.1", "7", "Cerâmica tijolo"),
+                _l("item", "7.1.1", "7", "Tijolo"), _l("item", "7.2", "7", "Mão de Obra")]
+    aditivo = [_l("item", "7.1.3", "7", "Tijolo a mais"),
+               _l("etapa", "7.2", "7", "Mão de obra extra"),   # a linha do próprio aditivo vale sobre a do contrato
+               _l("item", "7.2.1", "7", "Servente"),
+               _l("item", "7.9.1", "7", "Sem nome em lugar nenhum")]
+    r = topicos_dos_itens(aditivo, contrato)
+    assert {i: (t.etapa, t.nome) for i, t in r.do_item.items()} == {
+        0: ("7", "Cerâmica tijolo"), 2: ("7", "Mão de obra extra")}
+    assert topicos_dos_itens(aditivo).do_item.keys() == {2}

@@ -361,6 +361,8 @@ async def preparar_desfazer_arvore(tx, u: UsuarioAtual, receita: dict,
     # sem conferir, e o índice nasce na próxima criação.
     indice = await _indice_na_tx(tx, u.tenant_id, d["obra_id"], None)
     etapas, do_orcamento = base if base is not None else (None, [])
+    if colecao == "topicos" and any(t["id"] == d["id"] for t in do_orcamento):
+        raise ErroNegocio(DO_ORCAMENTO)
     novo_indice = (_indice_com(indice, colecao, d, receita["antes"], etapas, do_orcamento)
                    if indice is not None else None)
 

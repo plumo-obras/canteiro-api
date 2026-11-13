@@ -303,10 +303,12 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     vigente (outra reimportação passou por cima) ou se, ao desfazer um contrato, há aditivo vigente criado depois dele.
 - **Tópicos do orçamento** (regra em `canteiro_dominio.orcamento.topicos_dos_itens`): o **nível 2 da numeração** é
   tópico da etapa. O nome é a descrição da linha "7.1", seja ela título do grupo ou o próprio item; os itens "7.1.x"
-  caem nele. A mesma descrição (sem acento, caixa e espaços) na mesma etapa é **um tópico só** ("11.1 Portas" e "11.2
-  Portas" de medidas diferentes); a mesma em outra etapa é outro ("Mão de Obra" da 7 e da 11). Item sem linha de nível
-  2 que o nomeie ("2.1.1" sem a linha "2.1"), item de nível 1 e item sem número ficam sem tópico; planilha sem
-  numeração não tem tópicos. A etapa do tópico é a do item. Etapa com mais de 30 tópicos fica **sem nenhum**, com aviso
+  caem nele, e os itens sem número logo abaixo do título "7.1" (o grupo que a planilha feita à mão não numera)
+  também. No aditivo, o item que guarda o número do contrato ("7.1.3") sem trazer a linha "7.1" cai no tópico do
+  contrato (o nome sai do orçamento vigente). A mesma descrição (sem acento, caixa e espaços) na mesma etapa é **um
+  tópico só** ("11.1 Portas" e "11.2 Portas" de medidas diferentes); a mesma em outra etapa é outro ("Mão de Obra" da
+  7 e da 11). Item sem linha de nível 2 que o nomeie ("2.1.1" sem a linha "2.1"), item de nível 1 e item sem número
+  fora de um grupo ficam sem tópico; planilha sem numeração não tem tópicos. A etapa do tópico é a do item. Etapa com mais de 30 tópicos fica **sem nenhum**, com aviso
   `linha: 0` na prévia ("A etapa 1 SERVIÇOS tem 31 tópicos na numeração (o limite é 30): ela fica sem os tópicos do
   orçamento, e o gasto entra só na etapa."). `topicos` da prévia = os que os itens da prévia tocam, com a soma deles
   (no somar, só o que entra), nas chaves de etapa da prévia; cada `ItemPrevia` traz o `topico_id`.
@@ -416,7 +418,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
 - **Por tópico** (`etapas[].topicos`): cada etapa aberta em `[{topico_id, nome, origem, contratado, aditivos, atual,
   cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
   ordem: os tópicos do orçamento da etapa (mesmo sem nada lançado; `contratado`/`aditivos` = a soma dos itens dele),
-  os tópicos manuais (ou de versão desligada) que têm pedido ou gasto avulso na etapa (`origem: "manual"`, orçado 0) e
+  os tópicos manuais que têm pedido ou gasto avulso na etapa (`origem: "manual"`, orçado 0), os de versão desligada
+  que têm (`origem: "orcamento"`, orçado 0: continuam sem renomear nem arquivar) e
   **"Sem tópico"** (`topico_id: null`, `origem: null`: os itens sem tópico, as linhas de pedido e os gastos lançados
   só na etapa; some quando tudo nele é 0). Somados, dão a etapa. Etapa sem tópico nenhum → `topicos: []`. Cada item
   de `itens` traz o `topico_id` dele (também nas versões gravadas antes do campo, montado pela numeração).
@@ -675,7 +678,8 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
 - `PATCH /etapas-extras/{id}` e `PATCH /topicos/{id}` `{nome?, arquivado?}` (admin) → renomeia e/ou arquiva/reativa,
   com Desfazer e Refazer. Nada mudou → 422. Arquivado sai da árvore e não recebe gasto novo; gasto antigo fica.
   Tópico do orçamento (ID `orc-…`, ou o manual que o orçamento reaproveitou) → 422 "Este tópico vem do orçamento (a
-  linha de nível 2 da planilha): ele muda quando o orçamento é reimportado, não por aqui."
+  linha de nível 2 da planilha): ele muda quando o orçamento é reimportado, não por aqui." O Desfazer/Refazer da
+  criação ou da edição do manual que o orçamento reaproveitou responde o mesmo 422.
 
 **Comprovantes:**
 
@@ -854,9 +858,11 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
     não contam), volta ela, com 200 e `ja_existia: true`, e nada é gravado. Aprovar ou recusar libera: depois disso a
     mesma proposta pode ser criada de novo. Por trás, um documento `propostas_pendentes/{id derivado de tenant, obra,
     tipo e dados}` aponta para a pendente, e aprovar/recusar o solta na mesma transação.
-  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, previsao?}` (o corpo do POST
-  de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra tem orçamento;
-  `linhas[].topico_id?` é conferido contra a árvore na criação da proposta, como no POST, e tópico sem etapa → 422) · `avancar_pedido` = `{pedido_id, para, quantidade_recebida?, nf?}` (as mesmas regras do
+  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, topico_id?, previsao?}` (o
+  corpo do POST de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra
+  tem orçamento; `topico_id` (ou `linhas[].topico_id`) é conferido contra a árvore na criação da proposta, como no
+  POST, tópico sem etapa → 422, e o pedido aprovado nasce com ele) · `avancar_pedido` = `{pedido_id, para,
+  quantidade_recebida?, nf?}` (as mesmas regras do
   `POST …/avancar`; de `parcial`, sem quantidade/NF) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}` ·
   `registrar_entrega` = `{pedido_id, linhas: [{indice, quantidade}], nf_numero?, nf_data? ("AAAA-MM-DD"), nf_valor?
   (centavos), confirmar_excesso?=false}` (o corpo de `POST /pedidos/{id}/recebimentos` sem a chave).

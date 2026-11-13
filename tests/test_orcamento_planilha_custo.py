@@ -162,3 +162,36 @@ async def test_verba_seguida_de_itens_sem_numero_e_titulo_do_grupo(vila):
     assert p["total"] == 133000
     assert [a["mensagem"] for a in p["avisos"]] == [
         "1.1 Estacas diz R$ 1.000,00 e as linhas dele somam R$ 1.100,00: vale a soma das linhas."]
+
+
+async def test_subtotal_da_etapa_conta_os_itens_sem_numero_e_o_grupo_vira_topico(vila):
+    o = await nova_obra(vila)
+    planilha = xlsx(
+        CABECALHO,
+        # 1.100 do grupo das estacas (itens sem número) + 200 dos blocos + 30 da forma: fecha com os 1.330 da etapa
+        ["1", None, None, "FUNDAÇÃO", None, None, None, 1330],
+        ["1.1", None, None, "Estacas", None, None, None, 1100],
+        [None, None, None, "Concreto", "m³", 1, 600, 600],
+        [None, None, None, "Aço", "kg", 10, 50, 500],
+        ["1.2", None, None, "Blocos", "un", 2, 100, 200],
+        [None, None, None, "Forma", "m²", 1, 30, 30],
+        # a etapa com valor e só itens sem número: os itens entram no orçamento, e o valor confere com eles
+        ["2", None, None, "LIMPEZA", None, None, None, 500],
+        [None, None, None, "Caçamba", "un", 1, 500, 500],
+    )
+    p = (await versao(vila, o["id"], planilha, {**_mapa_eap(), "linha_cabecalho": 1})).json()
+    assert p["erros"] == [] and p["avisos"] == []
+    assert p["total"] == 183000
+    # os itens sem número do grupo "1.1" caem no tópico dele; o item solto depois do item "1.2" continua sem tópico
+    assert [(t["etapa"], t["nome"], t["total"]) for t in p["topicos"]] == [("1", "Estacas", 110000),
+                                                                         ("1", "Blocos", 20000)]
+    estacas = p["topicos"][0]["id"]
+    assert [(x["descricao"], x["topico_id"] == estacas) for x in p["itens"] if x["tipo"] == "item"] == [
+        ("Concreto", True), ("Aço", True), ("Blocos", False), ("Forma", False), ("Caçamba", False)]
+
+    assert (await versao(vila, o["id"], planilha, {**_mapa_eap(), "linha_cabecalho": 1}, aplicar=True)).status_code \
+        == 201
+    orc = await orcamento(vila, o["id"])
+    e1 = next(e for e in orc["etapas"] if e["etapa"] == "1")
+    assert [(t["nome"], t["contratado"]) for t in e1["topicos"]] == [("Estacas", 110000), ("Blocos", 20000),
+                                                                     ("Sem tópico", 3000)]

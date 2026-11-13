@@ -303,3 +303,82 @@ async def test_etapa_sem_topico_nao_abre(vila):
     assert e2["topicos"] == []
     _, t1 = _abertura(orc, "1")
     assert [t["origem"] for t in t1.values()] == ["orcamento", "orcamento"]
+
+
+async def test_proposta_de_pedido_aprovada_leva_o_topico(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra)
+    portas = (await _arvore(vila, obra))["11"]["topicos"][0]["id"]
+    insumo, outro = await _insumo(vila, obra), await _insumo(vila, obra, "Dobradiça")
+    linha = {"insumo_id": insumo, "quantidade": 2000, "valor_unitario": 49866, "etapa": "11"}
+
+    async def propor(*linhas):
+        r = await vila.http.post("/propostas", headers=vila.h, json={
+            "obra_id": obra, "tipo": "criar_pedido", "chave_idempotencia": uuid.uuid4().hex, "titulo": "Portas",
+            "dados": {"fornecedor": "Madeireira", "linhas": list(linhas)}})
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    # a proposta de uma linha (o formato do agente) guarda o tópico, e o pedido aprovado nasce com ele
+    p = await propor({**linha, "topico_id": portas})
+    assert p["dados"]["topico_id"] == portas
+    r = await vila.http.post(f"/propostas/{p['id']}/aprovar", headers=vila.h)
+    assert r.status_code == 200, r.text
+    pedidos = (await vila.http.get(f"/obras/{obra}/pedidos", headers=vila.h)).json()
+    assert [x["topico_id"] for p in pedidos for x in p["linhas"]] == [portas]
+
+    # sem tópico, a proposta grava como antes do campo (a trava e a repetição da chave antiga continuam as mesmas)
+    assert "topico_id" not in (await propor(linha))["dados"]
+    varias = await propor(linha, {**linha, "insumo_id": outro})
+    assert all("topico_id" not in x for x in varias["dados"]["linhas"])
+
+
+async def test_desfazer_nao_arquiva_o_manual_que_o_orcamento_reaproveitou(vila):
+    obra = (await nova_obra(vila))["id"]
+    so_mao_de_obra = xlsx([None, None, None, None, None, None, "qtdade", "vlr unit orç", "x", "ORÇADO SET/23"],
+                          [None, None, 11, "ESQUADRIA MADEIRA", None, None, None, None, None, None],
+                          [None, None, 11.6, "Mão de Obra", None, None, 114, 86, 0, 9804])
+    await _importar(vila, obra, so_mao_de_obra)
+    manual = await vila.http.post(f"/obras/{obra}/topicos", headers=vila.h, json={"etapa": "11", "nome": "Portas"})
+    assert manual.status_code == 201, manual.text
+    await _importar(vila, obra)
+    assert (await _arvore(vila, obra))["11"]["topicos"][0]["id"] == manual.json()["id"]
+    # o Desfazer da criação arquivaria o tópico que agora é do orçamento: a mesma recusa do PATCH
+    r = await _desfazer(vila, manual.json()["registro_id"], status=422)
+    assert "vem do orçamento" in r["detail"]
+    assert (await vila.arm.obter("topicos", vila.tenant_id, manual.json()["id"])).get("arquivado") is not True
+
+
+async def test_aditivo_com_o_numero_do_contrato_cai_no_topico_do_contrato(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra, CONTRATO, mapa())
+    placa = next(t for t in (await _arvore(vila, obra))["1"]["topicos"]
+                 if t["nome"] == "Placa de obra em chapa galvanizada")
+    # o aditivo mexe no "1.1.1" do contrato sem trazer a linha "1.1"
+    aditivo = xlsx(CABECALHO, ["1", None, None, "SERVIÇOS PRELIMINARES", None, None, None, None],
+                   ["1.1.1", None, None, "Placa adicional", "m²", 2, 100, 200])
+    previa = (await versao(vila, obra, aditivo, mapa(linha_cabecalho=1), tipo="aditivo", descricao="Aditivo 01",
+                           data="2026-11-20")).json()
+    assert [(t["id"], t["total"]) for t in previa["topicos"]] == [(placa["id"], 20000)]
+    r = await versao(vila, obra, aditivo, mapa(linha_cabecalho=1), tipo="aditivo", descricao="Aditivo 01",
+                     data="2026-11-20", aplicar=True)
+    assert r.status_code == 201, r.text
+    _, t1 = _abertura(await orcamento(vila, obra), "1")
+    assert (t1["Placa de obra em chapa galvanizada"]["contratado"],
+            t1["Placa de obra em chapa galvanizada"]["aditivos"]) == (238910, 20000)
+    assert "Sem tópico" not in t1
+
+
+async def test_topico_de_versao_desligada_com_gasto_continua_do_orcamento(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra)
+    portas = next(t for t in (await _arvore(vila, obra))["11"]["topicos"] if t["nome"] == "Portas")
+    await _gasto(vila, obra, etapa="11", topico_id=portas["id"])
+    so_mao_de_obra = xlsx([None, None, None, None, None, None, "qtdade", "vlr unit orç", "x", "ORÇADO SET/23"],
+                          [None, None, 11, "ESQUADRIA MADEIRA", None, None, None, None, None, None],
+                          [None, None, 11.6, "Mão de Obra", None, None, 114, 86, 0, 9804])
+    await _importar(vila, obra, so_mao_de_obra)
+    _, t11 = _abertura(await orcamento(vila, obra), "11")
+    # não é manual: o PATCH /topicos dele responde 422, e a web não oferece renomear
+    assert (t11["Portas"]["origem"], t11["Portas"]["contratado"], t11["Portas"]["realizado"]) == (
+        "orcamento", 0, 35000)

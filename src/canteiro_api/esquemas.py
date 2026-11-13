@@ -152,7 +152,8 @@ class PedidoDados(Entrada):
         if isinstance(d, dict) and "linhas" not in d and "insumo_id" in d:
             d = dict(d)
             d["linhas"] = [{"insumo_id": d.pop("insumo_id"), "quantidade": d.pop("quantidade", 0),
-                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None)}]
+                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None),
+                            "topico_id": d.pop("topico_id", None)}]
         return d
 
     @field_validator("linhas")

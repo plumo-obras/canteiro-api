@@ -66,27 +66,42 @@ def numero_do_topico(numero: str) -> str | None:
     return f"{partes[0]}.{partes[1]}"
 
 
-def topicos_dos_itens(itens: Sequence[dict]) -> TopicosDosItens:
-    """Os tópicos de uma versão do orçamento e o tópico de cada item (`tipo`, `numero`, `etapa`, `descricao`).
-
-    O nome do tópico é a descrição da linha de nível 2 ("7.1"), seja ela título do grupo ou o próprio item; o item
-    "7.1.3" cai no tópico "7.1". Item sem linha de nível 2 que o nomeie (a EAP que numera "2.1.1" sem a linha "2.1")
-    fica sem tópico. A etapa do tópico é a do item (`etapa`), não o prefixo do número: depois de organizar em fases
-    os dois podem diferir. Etapa com mais de `MAX_TOPICOS_POR_ETAPA` tópicos fica sem nenhum (`cheias`): a árvore com
-    um tópico por serviço de uma EAP longa não ajudaria ninguém a escolher, e o leitor de comprovantes recebe a lista.
-    """
+def _nomes_dos_topicos(itens: Sequence[dict]) -> dict[str, str]:
+    """{"7.1": a descrição da 1ª linha de nível 2 com esse número}."""
     nomes: dict[str, str] = {}
     for x in itens:
         n = x.get("numero") or ""
         if numero_do_topico(n) == n and n not in nomes:
             nomes[n] = " ".join(x["descricao"].split())
+    return nomes
+
+
+def topicos_dos_itens(itens: Sequence[dict], vigentes: Sequence[dict] = ()) -> TopicosDosItens:
+    """Os tópicos de uma versão do orçamento e o tópico de cada item (`tipo`, `numero`, `etapa`, `descricao`), com os
+    itens na ordem da planilha.
+
+    O nome do tópico é a descrição da linha de nível 2 ("7.1"), seja ela título do grupo ou o próprio item; o item
+    "7.1.3" cai no tópico "7.1". Os itens sem número logo abaixo do título de nível 2 são o detalhe dele (o grupo que a
+    planilha feita à mão escreve sem numerar) e caem no tópico dele. `vigentes` = as linhas do orçamento que valem
+    (no aditivo): o item que guarda o número do contrato ("7.1.3") sem trazer a linha "7.1" cai no tópico do contrato.
+    Item sem linha de nível 2 que o nomeie (a EAP que numera "2.1.1" sem a linha "2.1") fica sem tópico. A etapa do
+    tópico é a do item (`etapa`), não o prefixo do número: depois de organizar em fases os dois podem diferir. Etapa
+    com mais de `MAX_TOPICOS_POR_ETAPA` tópicos fica sem nenhum (`cheias`): a árvore com um tópico por serviço de uma
+    EAP longa não ajudaria ninguém a escolher, e o leitor de comprovantes recebe a lista.
+    """
+    nomes = {**_nomes_dos_topicos(vigentes), **_nomes_dos_topicos(itens)}
     r = TopicosDosItens()
     vistos: dict[tuple[str, str], TopicoDoOrcamento] = {}
+    grupo: str | None = None
     for i, x in enumerate(itens):
-        if x["tipo"] != "item" or not x.get("etapa"):
+        n = x.get("numero") or ""
+        if x["tipo"] != "item":
+            grupo = n if numero_do_topico(n) == n else None
             continue
-        tn = numero_do_topico(x.get("numero") or "")
-        if tn is None or tn not in nomes:
+        tn = numero_do_topico(n) if n else grupo
+        if n:
+            grupo = None
+        if not x.get("etapa") or tn is None or tn not in nomes:
             continue
         chave = normalizar_nome(nomes[tn])
         t = vistos.get((x["etapa"], chave))
