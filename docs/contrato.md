@@ -153,15 +153,25 @@ mesmo arquivo de novo com o mapeamento confirmado para `importar`. Aceita `.xlsx
 pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 
 - `POST /obras/{obra_id}/orcamento/ler` (multipart `arquivo`, form `planilha?` = nome da aba) →
-  `{planilhas: [str], planilha, linha_cabecalho, colunas: [{indice, titulo}], amostra: [[str]], sugestao: Mapeamento}`.
+  `{planilhas: [str], planilha, linha_cabecalho, colunas: [{indice, titulo}], amostra: [[str]], sugestao: Mapeamento,
+  data_base}`.
   O cabeçalho é a 1ª das 30 primeiras linhas com pelo menos dois títulos conhecidos (pula título e dados da obra);
   `linha_cabecalho` é 1-based e os índices de coluna são 0-based. `amostra` = até 8 linhas de dados como texto
   (`37,9`, datas `dd/mm/aaaa`). CSV tem uma aba só, `"CSV"`.
+  - **Coluna sem título com dado** (nas 300 linhas abaixo do cabeçalho) também vem em `colunas`, com `titulo`
+    `"Coluna C"` (a letra do Excel); coluna sem título e vazia não vem. As linhas de dados podem ser mais largas que o
+    cabeçalho, e `amostra` acompanha. É a planilha de custo feita à mão, em que só os valores têm título.
+  - Sem coluna com título de item/descrição, a sugestão procura nas colunas sem título: `item` = a 1ª só com números
+    de item ("7", "7.1"; na amostra o número aparece "7,1"), com algum ponto ou vírgula; `nome` = a de mais texto (pelo
+    menos 12 letras na amostra). A pessoa confere na tela.
+  - `data_base` = `"AAAA-MM"` achado num título de coluna ("ORÇADO SET/23" → `"2023-09"`, "preço 09/2023" →
+    `"2023-09"`), ou `null`. Só sugestão para a data-base da obra (`PATCH /obras/{id}`); nada é gravado na leitura.
 - `Mapeamento` = `{planilha, linha_cabecalho, item, codigo, fonte, nome, unidade, quantidade, valor_unitario,
-  valor_total, saldo, curva}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do item, "3.2.1")
-  · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço · un/und/unid/unidade ·
-  quant/qtd/qtde · "unit" (preço unitário) · total · saldo/estoque · curva/abc. `item`, `codigo`, `fonte` só valem no
-  orçamento (EAP); `saldo` e `curva`, só na lista de materiais.
+  valor_total, saldo, curva, complemento}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do
+  item, "3.2.1") · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço ·
+  un/und/unid/unidade · quant/qtd/qtde · "unit" (preço unitário) · total/orçado · saldo/estoque · curva/abc ·
+  complemento. `item`, `codigo`, `fonte` e `complemento` só valem no orçamento (EAP); `saldo` e `curva`, só na lista
+  de materiais.
 - A planilha é uma de duas coisas, e a tela pergunta antes de importar: o **orçamento da obra** (serviços por etapa,
   `POST …/orcamento/versoes`, abaixo) ou uma **lista de materiais** (insumos para comprar e estocar, `…/importar`).
 
@@ -237,7 +247,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   separa as duas; a API resolve pelo registro de cada versão, então a cadeia pranchas → somar → reordenar dá
   substituida, substituida, vigente, e desfazer a reordenação dá substituida, vigente, desfeita. O `arquivo` gravado não muda: o sufixo " (projeto).csv" é como a API reconhece as pranchas.
 - `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
-  descricao, unidade, quantidade, valor_unitario, total, linha}`. `ordem` = posição na versão (0, 1, 2…); `numero` =
+  descricao, complemento, unidade, quantidade, valor_unitario, total, linha}`. `complemento` = a medida, marca ou
+  detalhe da linha ("0,60 x 2,10"), da coluna `complemento` (≤ 80; `""` sem ela e nos itens gravados antes do campo). `ordem` = posição na versão (0, 1, 2…); `numero` =
   o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2);
   `etapa` = a chave da etapa raiz: o que vem antes do 1º ponto ("2" para "2.1.1"); item sem ponto fica na última linha de
   etapa; etapa sem número tem como chave o próprio nome normalizado (sem acento, minúsculo), e é assim que a "FUNDAÇÕES"
@@ -251,13 +262,30 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `versao_id`/`registro_id` só depois de aplicar).
   - `ignorar_itens` (JSON `[3, 7]`, as `ordem` da prévia; inválido → 422): esses itens saem da prévia e da gravação
     (ordem que não é de item é ignorada). Entra na assinatura de idempotência, como `somar` e `etapas_itens`.
-  - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
+  - `nome` tem de estar mapeado (422 "Diga qual coluna é a descrição."), e `quantidade` ou `valor_total` (422 "Diga
+    qual coluna é a quantidade ou o valor total."). Sem `unidade` mapeada a planilha é lida (a de custo feita à mão
+    não tem): as linhas numeradas com valor entram como verba, as outras ficam de fora, e a prévia abre com um aviso
+    `linha: 0` dizendo isso.
   - **Etapa**: linha com descrição, sem unidade e sem quantidade, que não é subtotal/total (descrição começando por
-    "subtotal", "total" ou "soma" → ignorada). **Item**: descrição + unidade + quantidade ≠ 0. Resto vazio → ignorado.
+    "subtotal", "total" ou "soma" → ignorada; na linha **sem número**, também "custo total", "custo geral" e "custo mão
+    de obra", o pé da etapa da planilha de custo). **Item**: descrição + unidade + quantidade ≠ 0. Resto vazio →
+    ignorado.
+  - **Verba**: linha com número de nível 2 ou mais ("7.7"), **sem unidade**, com valor (a coluna total; sem ela,
+    quantidade × unitário) maior que zero e **sem linha embaixo dela** na numeração vira item com `unidade: "vb"`,
+    `quantidade` 1000 (1 vb) e `valor_unitario` = `total` = o valor. Aviso por verba: "7.7 Materiais diversos: sem
+    unidade, entra como verba (1 vb de R$ 154.859,70)."; se a linha trazia quantidade, o aviso diz que ela ficou de
+    fora ("… A quantidade 34 ficou de fora: ponha a unidade na planilha para entrar por quantidade.").
+  - **Subtotal de grupo**: linha numerada com linhas embaixo dela ("7.1" com "7.1.1", "7.1.2") é título do grupo
+    (`tipo: "etapa"`, nível dela), mesmo que tenha unidade, quantidade e valor: o valor dela é subtotal, e somar junto
+    contaria duas vezes. Se a linha do título trazia valor e ele não fecha com a soma das linhas embaixo, aviso "1.1
+    Portas diz R$ 2.500,00 e as linhas dele somam R$ 2.100,00: vale a soma das linhas.". Etapa (nível 1) com valor e
+    nenhuma linha: o valor não entra, com aviso "A etapa 2 LIMPEZA tem R$ 500,00 e nenhuma linha: o valor não entra
+    no orçamento. Ponha o valor numa linha 2.1.".
   - `total` da linha = a coluna total, quando mapeada e preenchida (é o número do contrato); senão quantidade ×
     unitário arredondado. `valor_unitario` = a coluna unitária; sem ela, total ÷ quantidade.
   - **Erro da linha** (nada é gravado): número inválido/ambíguo, quantidade negativa no contrato (no aditivo, negativa
-    = supressão, vale), descrição > 300, unidade > 12, código/fonte/número > 40. Mais de 2000 linhas → erro.
+    = supressão, vale), descrição > 300, complemento > 80, unidade > 12, código/fonte/número > 40. Mais de 2000 linhas
+    → erro.
   - **Aviso** (grava mesmo assim): o mesmo código (e fonte) com unidades diferentes na planilha: "O código 92916 aparece em m² (linha
     37) e em kg (linha 44): uma das duas unidades está errada." Um aviso por linha divergente.
   - Contrato com outro contrato vigente → `substitui` diz qual sai (a tela avisa antes de aplicar). Aditivo sem

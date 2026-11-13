@@ -74,6 +74,14 @@ from .orcamento import MAX_LINHAS, _arredonda, _grade, _normal, _numero, _texto,
 ITENS_POR_TRANSACAO = 400
 # Linha de subtotal ou total no meio da planilha: soma o que já está nos itens, contar de novo dobraria a etapa.
 SUBTOTAL = re.compile(r"^(sub ?total|total|soma)\b")
+# Os da planilha de custo feita à mão ("CUSTO TOTAL", "CUSTO MÃO DE OBRA" no pé da etapa). Só em linha sem número:
+# "7.2 Custo mão de obra" numerado é linha do orçamento.
+SUBTOTAL_SEM_NUMERO = re.compile(r"^custo (total|geral|mao de ?obra)\b")
+MAX_COMPLEMENTO = 80
+# Linha numerada sem unidade, com valor e sem linhas embaixo dela: é verba ("Materiais diversos R$ 154.859,70"), um
+# valor fechado. Entra como 1 vb para somar na etapa e poder ser comprado/contratado como qualquer item.
+VERBA = "vb"
+UMA_VERBA = 1000                       # 1 vb em milésimos
 NUMERO_ITEM = re.compile(r"^\d+(\.\d+)*\.?$")
 # O nome que `importar_estrutura` grava: é por ele que se sabe que a versão veio das pranchas (material, não serviço).
 SUFIXO_PROJETO = " (projeto).csv"
@@ -105,6 +113,8 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
     avisos: list[Aviso] = []
     unidade_do_codigo: dict[str, tuple[str, int]] = {}
     etapa_atual = ""
+    verbas: dict[int, str] = {}                # posição em `itens` -> a quantidade sem unidade que veio na linha
+    valor_titulo: dict[int, int] = {}          # posição em `itens` -> o valor escrito na própria linha do título
 
     def cel(row, idx):
         return row[idx] if idx is not None and idx < len(row) else None
@@ -123,10 +133,11 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
         if not descricao:
             ignoradas.append(LinhaIgnorada(linha=n, texto=texto, motivo="sem descrição"))
             continue
-        if SUBTOTAL.match(_normal(descricao)):
+        numero = _numero_item(cel(row, m.item))
+        if SUBTOTAL.match(_normal(descricao)) or (not numero and SUBTOTAL_SEM_NUMERO.match(_normal(descricao))):
             ignoradas.append(LinhaIgnorada(linha=n, texto=texto, motivo="subtotal ou total"))
             continue
-        numero = _numero_item(cel(row, m.item))
+        complemento = _texto(cel(row, m.complemento))
         codigo = _texto(cel(row, m.codigo))
         fonte = _texto(cel(row, m.fonte))
         unidade = _texto(cel(row, m.unidade))
@@ -137,11 +148,25 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
                 erros_linha.append(ErroLinha(linha=n, campo=campo, mensagem="Passa de 40 caracteres."))
         if len(descricao) > 300:
             erros_linha.append(ErroLinha(linha=n, campo="nome", mensagem="Descrição passa de 300 caracteres."))
+        if len(complemento) > MAX_COMPLEMENTO:
+            erros_linha.append(ErroLinha(linha=n, campo="complemento",
+                                         mensagem=f"Complemento passa de {MAX_COMPLEMENTO} caracteres."))
+        if not unidade and "." in numero and not erros_linha and (
+                valor := _valor_sem_unidade(cel(row, m.valor_total), cel(row, m.valor_unitario), q_crua)):
+            # verba ou subtotal de grupo: só se sabe qual depois de ver se há linha embaixo dela (`_subtotais_e_verbas`)
+            verbas[len(itens)] = _texto(q_crua) if _valor_sem_unidade(q_crua, None, None) else ""
+            itens.append(ItemPrevia(ordem=len(itens), tipo="item", numero=numero, nivel=numero.count(".") + 1,
+                                    etapa=numero.split(".")[0], codigo=codigo, fonte=fonte, descricao=descricao,
+                                    unidade=VERBA, quantidade=UMA_VERBA, valor_unitario=valor, total=valor, linha=n,
+                                    complemento=complemento))
+            continue
         if not unidade and _vazio(q_crua):
             # título de etapa: sem unidade e sem quantidade
             if erros_linha:
                 erros.extend(erros_linha)
                 continue
+            if numero and (valor := _valor_sem_unidade(cel(row, m.valor_total), None, None)):
+                valor_titulo[len(itens)] = valor
             if numero:
                 nivel = numero.count(".") + 1
                 if nivel == 1:
@@ -207,8 +232,56 @@ def _ler(grade: list[list], m: Mapeamento, tipo: TipoVersao):
         etapa = numero.split(".")[0] if "." in numero else etapa_atual
         itens.append(ItemPrevia(ordem=len(itens), tipo="item", numero=numero, nivel=nivel, etapa=etapa, codigo=codigo,
                                 fonte=fonte, descricao=descricao, unidade=unidade, quantidade=quantidade,
-                                valor_unitario=unit, total=total, linha=n))
+                                valor_unitario=unit, total=total, linha=n, complemento=complemento))
+    _subtotais_e_verbas(itens, verbas, valor_titulo, avisos)
     return itens, ignoradas, erros, avisos
+
+
+def _valor_sem_unidade(total_cel, unit_cel, q_crua) -> int | None:
+    """O valor de uma linha sem unidade (total da coluna; sem ela, quantidade × unitário), ou None. Célula que não é
+    número não vira erro aqui: na linha de título ela sempre foi ignorada, e continua."""
+    def ler(v, leitor):
+        try:
+            return None if _vazio(v) else _numero(v, leitor)
+        except (ValueError, ArithmeticError):
+            return None
+    total = ler(total_cel, reais)
+    if total is None and (unit := ler(unit_cel, reais)) is not None and (q := ler(q_crua, qtd)) is not None:
+        total = _arredonda(Decimal(q) * unit / 1000)
+    return total if total and total > 0 else None
+
+
+def _subtotais_e_verbas(itens: list[ItemPrevia], verbas: dict[int, str], valor_titulo: dict[int, int],
+                        avisos: list[Aviso]) -> None:
+    """Linha numerada com linhas embaixo dela ("7.1" com "7.1.1") é título do grupo: o valor dela é subtotal, e somar
+    junto com o das linhas contaria duas vezes. A que não tem linha embaixo e veio sem unidade é verba. Os dois casos
+    ganham aviso na prévia, para a pessoa conferir."""
+    com_filhos = {".".join(p[:k]) for x in itens if x.numero for p in [x.numero.split(".")] for k in range(1, len(p))}
+    for i, x in enumerate(itens):
+        if x.tipo == "item" and x.numero in com_filhos:
+            if x.total:
+                valor_titulo[i] = x.total
+            verbas.pop(i, None)
+            itens[i] = x.model_copy(update={"tipo": "etapa", "etapa": x.numero.split(".")[0], "unidade": "",
+                                            "quantidade": 0, "valor_unitario": 0, "total": 0})
+    for i, valor in sorted(valor_titulo.items()):
+        x = itens[i]
+        nome = f"{x.numero} {x.descricao}"
+        if x.numero in com_filhos:
+            soma = sum(y.total for y in itens if y.tipo == "item" and y.numero.startswith(x.numero + "."))
+            if soma != valor:
+                avisos.append(Aviso(linha=x.linha, mensagem=f"{nome} diz {fmt_reais(valor)} e as linhas dele somam "
+                                                            f"{fmt_reais(soma)}: vale a soma das linhas."))
+        else:
+            avisos.append(Aviso(linha=x.linha, mensagem=f"A etapa {nome} tem {fmt_reais(valor)} e nenhuma linha: o "
+                                                        f"valor não entra no orçamento. Ponha o valor numa linha "
+                                                        f"{x.numero}.1."))
+    for i, q in sorted(verbas.items()):
+        x = itens[i]
+        texto = f"{x.numero} {x.descricao}: sem unidade, entra como verba (1 vb de {fmt_reais(x.total)})."
+        if q:
+            texto += f" A quantidade {q} ficou de fora: ponha a unidade na planilha para entrar por quantidade."
+        avisos.append(Aviso(linha=x.linha, mensagem=texto))
 
 
 def _preco(v, campo: str, n: int, erros: list[ErroLinha]) -> int | None:
@@ -465,10 +538,11 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     do vigente. É o "completar o orçamento" de quem trouxe as pranchas e agora traz a planilha: aditivo é documento com
     o cliente depois do contrato fechado, e chamar o complemento de aditivo inflava o % de aditivo."""
     o = await obra_do_tenant(arm, u.tenant_id, obra_id)
-    faltando = [r for c, r in (("nome", "descrição"), ("unidade", "unidade"), ("quantidade", "quantidade"))
-                if getattr(m, c) is None]
-    if faltando:
-        raise ErroNegocio(f"Diga qual coluna é a {', '.join(faltando)}.")
+    if m.nome is None:
+        raise ErroNegocio("Diga qual coluna é a descrição.")
+    if m.quantidade is None and m.valor_total is None:
+        # a planilha de custo feita à mão pode não ter quantidade (só verbas), mas sem as duas não há valor nenhum
+        raise ErroNegocio("Diga qual coluna é a quantidade ou o valor total.")
     if aplicar and not chave:
         raise ErroNegocio("Falta a chave de idempotência.")
     escolhidas = escolhidas or {}
@@ -487,6 +561,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
 
     _, _, grade = _grade(conteudo, nome_arquivo, m.planilha)
     itens, ignoradas, erros, avisos = _ler(grade, m, tipo)
+    if m.unidade is None:
+        avisos.insert(0, Aviso(linha=0, mensagem="Sem a coluna da unidade, as linhas numeradas com valor entram como "
+                                                 "verba (vb) e as outras ficam de fora."))
     versoes = await versoes_da_obra(arm, u.tenant_id, obra_id)
     vigente = _contrato_vigente(versoes)
     recusar_se_desfazendo(o)

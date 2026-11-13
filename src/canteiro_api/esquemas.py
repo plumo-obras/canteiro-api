@@ -452,6 +452,8 @@ class Mapeamento(Entrada):
     valor_total: int | None = Field(None, ge=0, le=500)
     saldo: int | None = Field(None, ge=0, le=500)
     curva: int | None = Field(None, ge=0, le=500)
+    # só no orçamento da obra (EAP): medida, marca ou detalhe da linha ("0,60 x 2,10", "Tigre")
+    complemento: int | None = Field(None, ge=0, le=500)
 
 
 class LeituraPlanilha(BaseModel):
@@ -461,6 +463,8 @@ class LeituraPlanilha(BaseModel):
     colunas: list[ColunaPlanilha]
     amostra: list[list[str]]
     sugestao: Mapeamento
+    data_base: str | None = Field(None, description='"AAAA-MM" achado num título de coluna ("ORÇADO SET/23"); só '
+                                                    "sugestão para a data-base da obra")
 
 
 class LinhaOrcamento(BaseModel):
@@ -577,6 +581,7 @@ class ItemPrevia(BaseModel):
     valor_unitario: int
     total: int
     linha: int
+    complemento: str = ""
     # no aditivo e no somar: de onde veio a etapa do item. "planilha" = como veio (ou etapa nova, com o número
     # trocado se ele já era de outra); "nome" = etapa de mesmo nome no orçamento; "codigo" = o mesmo código está nesta
     # etapa do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).

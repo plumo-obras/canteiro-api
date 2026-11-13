@@ -115,6 +115,7 @@ class ItemOrcamento(Documento):
     codigo: str = ""
     fonte: str = ""
     descricao: str
+    complemento: str = ""                  # medida, marca ou detalhe da linha ("0,60 x 2,10"), quando a planilha tem
     unidade: str = ""
     quantidade: Milesimos = 0              # negativa só em aditivo (supressão)
     valor_unitario: Centavos = 0
