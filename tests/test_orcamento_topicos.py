@@ -246,3 +246,60 @@ async def test_pedido_sem_topico_assina_como_antes_do_campo(vila):
     assert (await _pedido(vila, obra, linha, chave=chave)).status_code == 200
     portas = (await _arvore(vila, obra))["11"]["topicos"][0]["id"]
     assert (await _pedido(vila, obra, {**linha, "topico_id": portas}, chave=chave)).status_code == 409
+
+
+# --- orçado × realizado por tópico ---
+
+def _abertura(orc, etapa):
+    e = next(x for x in orc["etapas"] if x["etapa"] == etapa)
+    return e, {t["nome"]: t for t in e["topicos"]}
+
+
+async def test_orcado_e_realizado_por_topico(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra)
+    a = await _arvore(vila, obra)
+    portas, mao_11 = (t["id"] for t in a["11"]["topicos"])
+    insumo, outro = await _insumo(vila, obra), await _insumo(vila, obra, "Dobradiça")
+    r = await vila.http.post(f"/obras/{obra}/pedidos", headers=vila.h, json={
+        "fornecedor": "Madeireira", "aprovado": True, "chave_idempotencia": uuid.uuid4().hex, "linhas": [
+            {"insumo_id": insumo, "quantidade": 34000, "valor_unitario": 50000, "etapa": "11", "topico_id": portas},
+            {"insumo_id": outro, "quantidade": 10000, "valor_unitario": 1000, "etapa": "11"}]})
+    assert r.status_code == 201, r.text
+    # gasto avulso no tópico do orçamento, e num tópico manual criado na tela (que só aparece por ter lançamento)
+    await _gasto(vila, obra, etapa="11", topico_id=mao_11, valor=1_000_000)
+    telhado = (await vila.http.post(f"/obras/{obra}/topicos", headers=vila.h,
+                                    json={"etapa": "7", "nome": "Andaime"})).json()["id"]
+    await _gasto(vila, obra, etapa="7", topico_id=telhado)
+
+    orc = await orcamento(vila, obra)
+    e11, t11 = _abertura(orc, "11")
+    assert list(t11) == ["Portas", "Mão de Obra", "Sem tópico"]
+    assert (t11["Portas"]["contratado"], t11["Portas"]["comprometido"], t11["Portas"]["origem"]) == (
+        3464668, 1700000, "orcamento")
+    assert t11["Portas"]["saldo"] == 3464668 - 1700000 and not t11["Portas"]["estourou"]
+    # R$ 9.804,00 orçados e R$ 10.000,00 gastos: o tópico estoura, a etapa não
+    m = t11["Mão de Obra"]
+    assert (m["contratado"], m["gastos_avulsos"], m["realizado"], m["estourou"]) == (980400, 1_000_000, 1_000_000, True)
+    assert not e11["estourou"]
+    sem = t11["Sem tópico"]
+    assert (sem["topico_id"], sem["origem"], sem["contratado"], sem["comprometido"]) == (None, None, 0, 10000)
+    for k in ("contratado", "atual", "cotando", "comprometido", "realizado", "saldo", "gastos_avulsos"):
+        assert sum(t[k] for t in e11["topicos"]) == e11[k], k
+
+    _, t7 = _abertura(orc, "7")
+    assert list(t7) == ["Materiasi diversos", "Mão de Obra", "Andaime"]
+    assert (t7["Andaime"]["origem"], t7["Andaime"]["contratado"], t7["Andaime"]["realizado"]) == ("manual", 0, 35000)
+    _, t12 = _abertura(orc, "12")
+    assert list(t12) == ["Mão de Obra"]
+    assert {x["topico_id"] for x in orc["itens"] if x["descricao"] == "Portas"} == {portas}
+
+
+async def test_etapa_sem_topico_nao_abre(vila):
+    obra = (await nova_obra(vila))["id"]
+    await _importar(vila, obra, CONTRATO, mapa())
+    orc = await orcamento(vila, obra)
+    e2, _ = _abertura(orc, "2")
+    assert e2["topicos"] == []
+    _, t1 = _abertura(orc, "1")
+    assert [t["origem"] for t in t1.values()] == ["orcamento", "orcamento"]

@@ -652,9 +652,7 @@ class _Andamento(BaseModel):
     realizado: int = 0
 
 
-class EtapaOrcamento(_Andamento):
-    etapa: str
-    descricao: str
+class _OrcadoRealizado(_Andamento):
     contratado: int
     aditivos: int
     atual: int
@@ -663,6 +661,20 @@ class EtapaOrcamento(_Andamento):
     estourou: bool = Field(False, description="comprometido passou do orçado atual")
     gastos_avulsos: int = Field(0, description="gastos confirmados por comprovante, sem pedido, nesta etapa; já "
                                                "somados no comprometido e no realizado")
+
+
+class TopicoOrcamento(_OrcadoRealizado):
+    topico_id: str | None = Field(description="null = o que entrou só na etapa, sem tópico (\"Sem tópico\")")
+    nome: str
+    origem: Literal["orcamento", "manual"] | None = Field(description="null no \"Sem tópico\"")
+
+
+class EtapaOrcamento(_OrcadoRealizado):
+    etapa: str
+    descricao: str
+    topicos: list[TopicoOrcamento] = Field(default_factory=list, description=(
+        "a etapa aberta por tópico: os do orçamento (mesmo sem nada lançado), os manuais que têm lançamento e \"Sem "
+        "tópico\"; somados dão a etapa. Vazio quando a etapa não tem tópico nenhum"))
 
 
 class GastosNoOrcamentoSaida(BaseModel):

@@ -2,6 +2,7 @@
 import pytest
 
 from canteiro_dominio.etapas import ativar_topico, montar_arvore
+from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import StatusPedido
 from canteiro_dominio.orcamento import andamento_da_linha, numero_do_topico, recebido_da_linha, topicos_dos_itens
 from canteiro_dominio.regras import RegraViolada
@@ -87,3 +88,12 @@ def test_arvore_com_topicos_do_orcamento_e_manuais():
     # renomear o manual reaproveitado não esbarra nele mesmo
     assert ativar_topico({}, {"m-1": {"etapa": "2", "nome": "estacas"}}, id_="m-1", etapa="2", nome="Estacas",
                          chaves_base={"1", "2"}, topicos_orcamento=do_orc) == "Estacas"
+
+
+def test_gastos_avulsos_por_topico():
+    gastos = [{"etapa": "1", "topico_id": "orc-a", "valor": 100}, {"etapa": "1", "topico_id": None, "valor": 50},
+              {"etapa": "1", "topico_id": "orc-a", "valor": 10, "pedido_id": "p"},     # pagamento de pedido: não soma
+              {"etapa": "x-9", "topico_id": "t", "valor": 7}]
+    r = gastos_no_orcamento(gastos, {"1"})
+    assert r.por_etapa == {"1": 150} and r.por_topico == {"1": {"orc-a": 100, None: 50}}
+    assert r.fora_do_orcamento == 7

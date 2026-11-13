@@ -43,6 +43,7 @@ from ..esquemas import (
     PreviaVersao,
     RepetidoDe,
     Substituida,
+    TopicoOrcamento,
     TopicoPrevia,
     TotaisOrcamento,
     TotalEtapa,
@@ -1076,9 +1077,11 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
     itens = await itens_das_versoes(arm, tenant_id, obra_id, ativas)
     curvas = _curvas([x for x in itens if x["tipo"] == "item"])
     contrato_ids = {v["id"] for v in ativas if v["tipo"] == TipoVersao.CONTRATO}
+    lista_topicos, topico_do_item = await topicos_das_versoes(arm, tenant_id, obra_id, ativas, itens)
 
     descricoes: dict[str, str] = {}
     somas: dict[str, list[int]] = {}
+    por_topico: dict[str, dict[str | None, list[int]]] = {}
     for x in itens:
         if x["tipo"] == "etapa" and x["nivel"] == 1:
             # a descrição do contrato manda; a do aditivo só para etapa que nasceu nele
@@ -1086,15 +1089,26 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                 descricoes[x["etapa"]] = x["descricao"]
             somas.setdefault(x["etapa"], [0, 0])
         elif x["tipo"] == "item":
-            s = somas.setdefault(x["etapa"], [0, 0])
-            s[0 if x["versao_id"] in contrato_ids else 1] += x["total"]
-    gasto = await andamento_por_etapa(arm, tenant_id, obra_id)
+            lado = 0 if x["versao_id"] in contrato_ids else 1
+            somas.setdefault(x["etapa"], [0, 0])[lado] += x["total"]
+            t = por_topico.setdefault(x["etapa"], {}).setdefault(topico_do_item.get(x["id"]), [0, 0])
+            t[lado] += x["total"]
+    pedidos = await pedidos_da_obra(arm, tenant_id, obra_id)
+    gasto = andamento_dos_pedidos(pedidos)
+    gasto_topico = andamento_dos_pedidos(pedidos, por_topico=True)
     # Gasto avulso (comprovante confirmado, sem pedido) é dinheiro que saiu: soma no comprometido e no realizado da
     # etapa dele, e por isso mexe no saldo e no estouro. A repartição é do domínio (inclusive o que não entra em etapa).
     avulsos = gastos_no_orcamento(await gastos_da_obra(arm, tenant_id, obra_id), {e for e in somas if e})
-    etapas = [_etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}),
-                     avulsos.por_etapa.get(e, 0))
-              for e, (c, a) in somas.items()]
+    nomes_topicos = {**{t["id"]: t["nome"] for t in await arm.consultar(
+        Consulta("topicos", tenant_id, [Filtro("obra_id", "==", obra_id)]))},
+        **await nomes_dos_topicos_do_orcamento(arm, tenant_id, obra_id)}
+    etapas = []
+    for e, (c, a) in somas.items():
+        etapa = _etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}),
+                       avulsos.por_etapa.get(e, 0))
+        etapa.topicos = _topicos_da_etapa(e, [t for t in lista_topicos if t["etapa"] == e], por_topico.get(e, {}),
+                                          gasto_topico.get(e, {}), avulsos.por_topico.get(e, {}), nomes_topicos)
+        etapas.append(etapa)
     # gasto numa etapa que não está no orçamento (pedido de antes da importação, ou etapa de versão desfeita)
     sem = {k: sum(g[k] for g in gasto.values()) for k in ("cotando", "comprometido", "realizado")}
     fora = avulsos.fora_das_etapas
@@ -1107,7 +1121,8 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"]), **_textos_da_versao(v, versoes),
                   "situacao": await _situacao(arm, tenant_id, v)}
                  for v in versoes],
-        itens=[{**x, "curva": curvas.get(x["id"])} for x in itens], etapas=etapas,
+        itens=[{**x, "curva": curvas.get(x["id"]), "topico_id": topico_do_item.get(x["id"])} for x in itens],
+        etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
                                saldo=contratado + aditivos - andamento["comprometido"],
                                aditivos_pct=pct(aditivos, contratado) if contratado else None,
@@ -1318,14 +1333,45 @@ async def gastos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
                                                                   Filtro("estornado", "==", False)]))
 
 
-def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: dict[str, int],
-           avulsos: int = 0) -> EtapaOrcamento:
+def _contas(contratado: int, aditivos: int, gasto: dict[str, int], avulsos: int) -> dict:
     """Saldo e estouro saem daqui prontos: quem lê (tela, agente) só mostra."""
     gasto = {"cotando": gasto.get("cotando", 0), "comprometido": gasto.get("comprometido", 0) + avulsos,
              "realizado": gasto.get("realizado", 0) + avulsos}
     atual, comprometido = contratado + aditivos, gasto["comprometido"]
-    return EtapaOrcamento(etapa=etapa, descricao=descricao, contratado=contratado, aditivos=aditivos, atual=atual,
-                          saldo=atual - comprometido, estourou=comprometido > atual, gastos_avulsos=avulsos, **gasto)
+    return {"contratado": contratado, "aditivos": aditivos, "atual": atual, "saldo": atual - comprometido,
+            "estourou": comprometido > atual, "gastos_avulsos": avulsos, **gasto}
+
+
+def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: dict[str, int],
+           avulsos: int = 0) -> EtapaOrcamento:
+    return EtapaOrcamento(etapa=etapa, descricao=descricao, **_contas(contratado, aditivos, gasto, avulsos))
+
+
+SEM_TOPICO = "Sem tópico"
+
+
+def _topicos_da_etapa(etapa: str, do_orcamento: list[dict], orcado: dict[str | None, list[int]],
+                      pedidos: dict[str | None, dict[str, int]], avulsos: dict[str | None, int],
+                      nomes: dict[str, str]) -> list[TopicoOrcamento]:
+    """A etapa aberta por tópico, com as mesmas contas da etapa: os tópicos do orçamento dela (mesmo sem nada
+    lançado), os manuais que têm lançamento e, no fim, "Sem tópico" (o que entrou só na etapa e os itens sem
+    tópico). Somados dão a etapa. Etapa sem tópico nenhum fica com a lista vazia."""
+    ids = [t["id"] for t in do_orcamento]
+    outros = sorted({k for k in (*orcado, *pedidos, *avulsos) if k is not None and k not in ids},
+                    key=lambda k: (nomes.get(k, ""), k))
+    if not ids and not outros:
+        return []
+    saida = []
+    for k in [*ids, *outros, None]:
+        c, a = orcado.get(k, [0, 0])
+        contas = _contas(c, a, pedidos.get(k, {}), avulsos.get(k, 0))
+        if k is None and not any(contas[x] for x in ("atual", "cotando", "comprometido", "realizado")):
+            continue
+        nome = (next(t["nome"] for t in do_orcamento if t["id"] == k) if k in ids
+                else nomes.get(k, "Tópico") if k else SEM_TOPICO)
+        origem = None if k is None else "orcamento" if k in ids or k.startswith(PREFIXO_TOPICO_ORCAMENTO) else "manual"
+        saida.append(TopicoOrcamento(topico_id=k, nome=nome, origem=origem, **contas))
+    return saida
 
 
 CEM = 10000                            # 100% em centésimos de ponto percentual (290 = 2,9%)
@@ -1336,24 +1382,22 @@ def pct(parte: int, todo: int) -> int:
     return (parte * CEM + todo // 2) // todo if todo else 0
 
 
-async def andamento_por_etapa(leitor, tenant_id: str, obra_id: str) -> dict[str, dict[str, int]]:
-    return andamento_dos_pedidos(await pedidos_da_obra(leitor, tenant_id, obra_id))
-
-
 async def pedidos_da_obra(leitor, tenant_id: str, obra_id: str) -> list[dict]:
     return await leitor.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id)]))
 
 
-def andamento_dos_pedidos(pedidos: list[dict]) -> dict[str, dict[str, int]]:
+def andamento_dos_pedidos(pedidos: list[dict], *, por_topico: bool = False) -> dict:
     """Cotando, comprometido e realizado por etapa, somados das linhas dos pedidos da obra (centavos). A conta de cada
-    linha é do domínio (`andamento_da_linha`)."""
-    soma: dict[str, dict[str, int]] = {}
+    linha é do domínio (`andamento_da_linha`). `por_topico`: {etapa: {topico_id (None = sem tópico): …}}."""
+    soma: dict = {}
     for p in pedidos:
         st = StatusPedido(p["status"])
         if st == StatusPedido.CANCELADO:
             continue
         for x in linhas_de(p):
-            g = soma.setdefault(x.get("etapa") or "", {"cotando": 0, "comprometido": 0, "realizado": 0})
+            onde = soma.setdefault(x.get("etapa") or "", {}) if por_topico else soma
+            chave = x.get("topico_id") if por_topico else x.get("etapa") or ""
+            g = onde.setdefault(chave, {"cotando": 0, "comprometido": 0, "realizado": 0})
             cotando, comprometido, realizado = andamento_da_linha(st, x)
             g["cotando"] += cotando
             g["comprometido"] += comprometido

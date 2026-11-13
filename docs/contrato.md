@@ -412,6 +412,13 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `null` sem contrato. A base (`contratado`) é o total do **contrato vigente**: o orçamento aprovado inteiro, já com o
   que foi somado antes de aprovar (pranchas + planilha), não só a primeira importação. Sem aditivo de verdade, 0. É
   número neutro (não há limite legal: obra privada).
+- **Por tópico** (`etapas[].topicos`): cada etapa aberta em `[{topico_id, nome, origem, contratado, aditivos, atual,
+  cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
+  ordem: os tópicos do orçamento da etapa (mesmo sem nada lançado; `contratado`/`aditivos` = a soma dos itens dele),
+  os tópicos manuais (ou de versão desligada) que têm pedido ou gasto avulso na etapa (`origem: "manual"`, orçado 0) e
+  **"Sem tópico"** (`topico_id: null`, `origem: null`: os itens sem tópico, as linhas de pedido e os gastos lançados
+  só na etapa; some quando tudo nele é 0). Somados, dão a etapa. Etapa sem tópico nenhum → `topicos: []`. Cada item
+  de `itens` traz o `topico_id` dele (também nas versões gravadas antes do campo, montado pela numeração).
 - `PATCH /obras/{obra_id}/orcamento/itens/{item_id}` (admin) `{quantidade?, valor_unitario?}` → `{item: ItemOrcamento,
   total_versao, registro_id}`. O total da linha vira quantidade × unitário, e a diferença soma no total da versão.
   Título de etapa, quantidade zero, quantidade negativa fora de aditivo, preço negativo ou nada mudou → 422; versão fora
