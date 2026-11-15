@@ -1344,8 +1344,9 @@ class TopicoNaArvoreSaida(BaseModel):
     id: str
     nome: str
     origem: Literal["orcamento", "manual"] = Field(
-        "manual", description="'orcamento' = a linha de nível 2 da planilha (não se renomeia nem se arquiva: muda com "
-                              "a reimportação); 'manual' = criado na tela")
+        "manual", description="'orcamento' = a linha de nível 2 da planilha, ou a etapa da planilha no orçamento "
+                              "padronizado (não se renomeia nem se arquiva: muda com a reimportação); 'manual' = "
+                              "criado na tela")
 
 
 class EtapaNaArvoreSaida(BaseModel):
