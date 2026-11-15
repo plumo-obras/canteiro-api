@@ -10,7 +10,7 @@ from canteiro_dominio.encaixe import (
     nome_da_etapa,
     ordem_da_etapa,
 )
-from canteiro_dominio.etapas import CHAVES_FIXAS
+from canteiro_dominio.etapas import CHAVES_FIXAS, nome_etapa_orcamento
 
 
 @pytest.mark.parametrize(("descricao", "titulo", "esperada"), [
@@ -68,3 +68,8 @@ def test_toda_estimativa_da_previsao_cai_numa_etapa_da_mesma_fase():
             assert etapa in CHAVES_FIXAS and fase_da_etapa(etapa) == fase, (fase, descricao, etapa)
     assert etapa_da_estimativa("Instalações", "Instalação elétrica (pontos e fiação)") == "eletrica"
     assert etapa_da_estimativa("Revestimento", "Contrapiso") == "pisos"
+
+
+def test_nome_da_etapa_do_orcamento_padronizado_sem_a_chave_na_frente():
+    assert nome_etapa_orcamento("alvenaria", "Alvenaria e vedações") == "Alvenaria e vedações"
+    assert nome_etapa_orcamento("18", "INSTALAÇÃO ELÉTRICA - 220V") == "18 INSTALAÇÃO ELÉTRICA - 220V"

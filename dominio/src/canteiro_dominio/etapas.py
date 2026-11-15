@@ -116,11 +116,14 @@ def _chave_sem_numero(descricao: str) -> str:
 
 def nome_etapa_orcamento(etapa: str, descricao: str) -> str:
     """"18 INSTALAÇÃO ELÉTRICA - 220V": com o código na frente, como na planilha da construtora. Etapa sem número tem
-    o próprio nome como chave, e repetir não ajuda."""
+    o próprio nome como chave, e repetir não ajuda; a chave da lista padrão ("alvenaria", no orçamento padronizado)
+    também não é código de nada."""
     descricao = " ".join(descricao.split())
     if not descricao:
         return f"Etapa {etapa}"
-    return descricao if _chave_sem_numero(descricao) == etapa else f"{etapa} {descricao}"
+    if _chave_sem_numero(descricao) == etapa or etapa in CHAVES_FIXAS:
+        return descricao
+    return f"{etapa} {descricao}"
 
 
 def origem_da_etapa(chave: str | None, etapas_orcamento: Collection[str]) -> Origem:

@@ -42,6 +42,11 @@ async def test_planilha_feita_a_mao_entra_encaixada_na_lista_padrao(vila):
         ("esquadrias", "Esquadrias", 22445068, [("ESQUADRIA MADEIRA", 4445068), ("ESQUADRIA METÁLICA", 18000000)])]
     assert orc["totais"]["atual"] == 53727968 and orc["totais"]["estimado"] == 0
     assert next(v for v in orc["versoes"] if v["id"] == p["versao_id"])["padronizada"] is True
+    # na árvore de lançamento, o nome da etapa padrão sem a chave na frente e os tópicos do orçamento travados
+    r = await vila.http.get(f"/obras/{obra}/arvore", headers=vila.h)
+    assert [(e["chave"], e["nome"], [(t["nome"], t["origem"]) for t in e["topicos"]]) for e in r.json()] == [
+        ("alvenaria", "Alvenaria e vedações", [("PAREDES E PAINES", "orcamento")]),
+        ("esquadrias", "Esquadrias", [("ESQUADRIA MADEIRA", "orcamento"), ("ESQUADRIA METÁLICA", "orcamento")])]
 
     # o gasto lançado no tópico conta nele e na fase
     metalica = next(t for t in orc["etapas"][1]["topicos"] if t["nome"] == "ESQUADRIA METÁLICA")
