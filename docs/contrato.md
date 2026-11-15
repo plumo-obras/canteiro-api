@@ -236,7 +236,9 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `"AAAA-MM-DD"` ou `null`. `itens`/`etapas` = quantos de cada; `total` em centavos (soma dos itens). `ativa: false` =
   desfeita ou substituída. `substitui` = a versão de contrato que esta tirou de vigência (ou `null`). `lista_etapas`
   = `[{etapa, descricao}]` e `lista_topicos` = `[{etapa, id, nome}]` (os tópicos do orçamento desta versão; versão
-  gravada antes do campo não o tem, e a API monta pelos itens).
+  gravada antes do campo não o tem, e a API monta pelos itens). `padronizada` = as linhas estão nas etapas da lista
+  padrão (ver **Orçamento padronizado**); `natureza` = `"custo"` | `"venda"` e `bdi` (centésimos de %, só na venda):
+  ver **Custo e venda**. Os três faltam no documento gravado antes deles e valem `false`, `"custo"` e 0.
   Em `GET …/orcamento` cada versão traz também: `origem` = `"somar"` (contrato gravado pelo somar, da planilha ou de
   `…/estrutura`) | `"reordenar"` (pela ordem das etapas) | `null` (as outras, e as gravadas antes deste campo);
   `rotulo` = o nome para a pessoa, sem nome de arquivo do sistema ("Materiais das pranchas" no lugar de
@@ -251,7 +253,10 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
 - `ItemOrcamento` = `{id, obra_id, versao_id, ordem, tipo: "etapa" | "item", numero, nivel, etapa, codigo, fonte,
   descricao, complemento, unidade, quantidade, valor_unitario, total, linha, topico_id}`. `complemento` = a medida,
   marca ou detalhe da linha ("0,60 x 2,10"), da coluna `complemento` (≤ 80; `""` sem ela e nos itens gravados antes do
-  campo). `topico_id` = o tópico do orçamento em que o item conta (`null` = sem tópico). `ordem` = posição na versão (0, 1, 2…); `numero` =
+  campo). `topico_id` = o tópico do orçamento em que o item conta (`null` = sem tópico). `grupo` = a etapa da planilha
+  de onde o item veio, no orçamento padronizado, quando ela não tem o nome da etapa padrão (`""` nos outros); é o
+  tópico do item. `valor_unitario_venda`/`total_venda` = o preço do cliente, só na planilha de venda (`null` nas
+  outras); aí `valor_unitario`/`total` são o custo. `ordem` = posição na versão (0, 1, 2…); `numero` =
   o da coluna item ("3.2.1", "A1.2", pode ser `""`); `nivel` = 1 + pontos do número (sem número: etapa 1, item 2, e 3 no item logo abaixo de um título de nível 2, o
   detalhe do grupo que a planilha não numera);
   `etapa` = a chave da etapa raiz: o que vem antes do 1º ponto ("2" para "2.1.1"); item sem ponto fica na última linha de
@@ -259,12 +264,14 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   de um aditivo sem numeração soma na do contrato; `""` antes da 1ª etapa; `linha` = linha da planilha (1-based). Etapa tem unidade `""` e quantidade/valores 0.
 - `POST /obras/{obra_id}/orcamento/versoes` (multipart `arquivo`, `mapeamento` = JSON, `tipo` = `contrato` | `aditivo`,
   `descricao?` (≤ 200), `data?`, `aplicar` = bool, `chave_idempotencia` (obrigatória com `aplicar`), `etapas_itens?`,
-  `somar?` = bool (padrão `false`), `ignorar_itens?` = JSON lista de `ordem`) → `PreviaVersao` =
+  `somar?` = bool (padrão `false`), `ignorar_itens?` = JSON lista de `ordem`, `padronizar?` = bool (padrão `false`),
+  `destinos?` = JSON, `natureza?` = `custo` | `venda` (padrão `custo`), `bdi?` = 1..10000) → `PreviaVersao` =
   `{aplicado, tipo, itens: [ItemPrevia], ignoradas, erros, avisos: [{linha, mensagem}], total, n_itens, n_etapas,
   etapas: [{etapa, descricao, total}], topicos: [{etapa, id, nome, total}], substitui: {versao_id, total, itens} | null,
-  total_apos, versao_id, registro_id}`
+  total_apos, padronizada, encaixe, etapas_disponiveis, natureza, bdi, total_venda, versao_id, registro_id}`
   (`ItemPrevia` = `ItemOrcamento` sem `id/obra_id/versao_id`, mais `etapa_origem`, `etapa_planilha` e `repetido_de`;
-  `versao_id`/`registro_id` só depois de aplicar).
+  `versao_id`/`registro_id` só depois de aplicar; `padronizada`, `encaixe` e `etapas_disponiveis` no **Orçamento
+  padronizado**; `natureza`, `bdi` e `total_venda` em **Custo e venda**).
   - `ignorar_itens` (JSON `[3, 7]`, as `ordem` da prévia; inválido → 422): esses itens saem da prévia e da gravação
     (ordem que não é de item é ignorada). Entra na assinatura de idempotência, como `somar` e `etapas_itens`.
   - `nome` tem de estar mapeado (422 "Diga qual coluna é a descrição."), e `quantidade` ou `valor_total` (422 "Diga
@@ -320,10 +327,49 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     mesmos IDs, e o gasto continua no tópico. Tópico **manual** ativo com o mesmo nome na mesma etapa empresta o ID
     dele (o gasto já lançado nele continua no lugar), e na árvore aparece uma vez, como do orçamento.
   - Gravados na versão (`lista_topicos`) e em cada item (`topico_id`) pela importação, pelo somar, pela ordem das
-    etapas e pela organização em fases (o tópico vai com o item para a fase nova, e o Desfazer volta; só os títulos
-    de nível 1 viram os das fases, e a linha de nível 2 fica com o nome e vai para a fase do primeiro item abaixo
+    etapas e pelo `organizar-fases` (o tópico vai com o item para a etapa padrão, e o Desfazer volta; só os títulos
+    de nível 1 viram os das etapas, e a linha de nível 2 fica com o nome e vai para a etapa do primeiro item abaixo
     dela); o Desfazer de uma versão leva os tópicos dela junto. Não são documento: reordenar e somar continuam livres com eles, e só o
     lançamento (gasto, pedido, tópico manual…) numa etapa que mudaria de número trava, como antes.
+- **Orçamento padronizado** (`padronizar=true`, só no contrato novo; com `somar` ou `tipo=aditivo` → 422): cada linha
+  da planilha é **encaixada numa etapa da lista padrão** (`ETAPAS_FIXAS`, as 24 da obra sem orçamento), e a obra fica
+  comparável com as outras. Regra em `canteiro_dominio.encaixe.etapa_no_contexto`: a linha que diz o que é ("Porta
+  0,60", "Pintura látex") vai para a etapa dela, mesmo numa etapa mista da planilha ("ACABAMENTOS"); a linha genérica
+  ("Mão de obra", "Materiais diversos", uma verba) herda a etapa do título da planilha ("7 PAREDES E PAINÉIS" →
+  `alvenaria`); concreto, fôrma e armação num título de fundação são `fundacao`; sem nada que indique, `outros`.
+  - A chave da etapa é a da lista (`"alvenaria"`), com o nome dela ("Alvenaria e vedações") e `numero` = a posição na
+    lista; as etapas saem na ordem da lista. O gasto lançado na lista padrão antes da planilha continua na etapa (não
+    vira "sem etapa do orçamento").
+  - **Tópico** = a etapa da planilha de onde a linha veio (`grupo`): "11 ESQUADRIA MADEIRA" e "12 ESQUADRIA METÁLICA"
+    viram dois tópicos de Esquadrias, e a "Mão de Obra" de cada uma fica no seu. Quando a etapa da planilha já tem o
+    nome da etapa padrão ("ALVENARIA", "FUNDAÇÕES"), o tópico continua saindo da numeração (nível 2).
+  - `encaixe` (prévia) = `[{etapa_planilha, descricao, destino, destino_nome, escolhida, total, etapas: [{etapa, nome,
+    total, itens}]}]`: cada etapa da planilha, o destino da maior parte do valor e, na etapa mista, a divisão pelas
+    etapas padrão. `etapas_disponiveis` = `[{etapa, descricao}]` da lista padrão.
+  - `destinos` (JSON) = o que a pessoa trocou: `{"7": "alvenaria"}` leva a etapa inteira da planilha, `{"linha:12":
+    "pisos"}` uma linha só (a `linha` da planilha), e a linha vale sobre a etapa. Etapa fora da lista → 422 "Etapa
+    desconhecida". `padronizar` e `destinos` entram na assinatura de idempotência.
+  - Depois de gravado: o **aditivo** encaixa sozinho (a linha que casa com o contrato pelo código fica na etapa e no
+    tópico dele; a que não casa é encaixada como na importação); **somar** → 422 ("Este orçamento está nas etapas
+    padrão: importe a planilha inteira de novo…"); **reordenar** as etapas → 422 (a ordem é a da lista).
+- `POST /obras/{obra_id}/orcamento/organizar-fases` (admin) → `{itens, estimadas, fases: [nome], registro_id}`. Encaixa
+  o contrato vigente na lista padrão, se ele ainda não está (o orçamento importado sem `padronizar`, ou o organizado
+  pelas fases de antes da lista), e **prevê a obra completa**: das fases de obra que já têm orçamento estima o porte e
+  descreve os serviços típicos das que faltam (`canteiro_dominio.cronograma.estimar_fases_faltantes`), gravados como
+  itens com `fonte: "estimativa"` na etapa padrão da fase (`encaixe.etapa_da_estimativa`). O estimado **não é orçado**:
+  fica em `estimado` (ver Previsto × realizado), não entra no `total` da versão nem em Compras, e o cronograma usa
+  orçado + estimado como peso. `fases` = os nomes das etapas do orçamento depois. 422 se não há orçamento, se nada muda
+  ("O orçamento já está nas etapas padrão, e a obra já está prevista inteira.") ou se há aditivo num contrato ainda fora
+  da lista; 409 se há gasto ou pedido numa etapa que mudaria de sentido ("Há gasto ou pedido lançado nas etapas 7…").
+  O item que já está numa etapa padrão fica onde está (a escolha da pessoa não se desfaz). Registro "Previu a obra
+  completa: N etapas, M estimadas", Desfazer `restaurar_etapas` (volta etapa, tópico e `grupo` dos itens, os títulos e
+  `padronizada`; zera os estimados criados).
+- **Custo e venda** (`natureza`): `custo` (padrão) = a planilha já é custo (a de quem orça à mão). `venda` = a planilha
+  é o preço do cliente, com BDI: cada item guarda o preço em `valor_unitario_venda`/`total_venda` e fica com o custo,
+  preço ÷ (1 + `bdi`) linha a linha (`canteiro_dominio.orcamento.custo_da_venda`, arredondado ao centavo). `bdi` vem do
+  campo ou, sem ele, do BDI da obra; venda sem nenhum dos dois → 422 "Diga o BDI da planilha de venda…". A prévia traz
+  `natureza`, `bdi` e `total_venda` (`total` é o custo); `natureza`/`bdi` entram na assinatura de idempotência. O
+  orçado × realizado é sempre custo contra custo.
 - **Somar ao orçamento** (`somar=true`, antes de aprovar): completa o orçamento com outra planilha (o caso de quem
   levou as pranchas e agora traz a planilha), **sem aditivo**. Só com `tipo=contrato`, a obra em orçamento e um contrato
   vigente; senão 422 ("Somar vale para o orçamento, não para o aditivo." / "O orçamento já foi aprovado: para
@@ -403,8 +449,12 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
   encerrado com sobra compromete só o que chegou) · `realizado` = o que já foi entregue ou medido, pelo preço do pedido.
   Cancelado não conta. `totais.sem_etapa` = o pedido sem etapa ou em etapa que não está nas versões vigentes (já somado
-  nos totais). Atenção: `atual` é preço de contrato (com BDI e mão de obra); comprometido e realizado são custo de
-  compra.
+  nos totais). `atual` é o orçado da planilha como veio: na de **venda** (`natureza: "venda"`) já é o custo, e o preço
+  do cliente vem à parte em `venda` (por etapa e em `totais`; `null` sem planilha de venda); na planilha de engenheiro
+  importada como `custo` ele ainda é preço de contrato (com BDI). Comprometido e realizado são custo de compra.
+  `estimado` (por etapa e em `totais`) = os serviços que a previsão da obra estimou (`fonte: "estimativa"`), **fora**
+  de `contratado`/`atual`/`saldo`; a etapa só estimada aparece com `atual` 0. As etapas saem na ordem de `lista_etapas`
+  das versões vigentes (contrato primeiro).
 - **Gastos no realizado** (regra em `canteiro_dominio.gastos.gastos_no_orcamento`): o **gasto avulso** (comprovante
   confirmado **sem** `pedido_id`, não estornado) é dinheiro que saiu e soma, pelo `valor`, no `comprometido` **e** no
   `realizado` da etapa dele, mexendo no `saldo` e no `estourou`; cada etapa traz `gastos_avulsos` (a parte que veio de
@@ -437,7 +487,7 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   mudou de novo, ou se a edição é de antes da aprovação e a obra já foi aprovada.
 - `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + {registro_id, insumos_criados, insumos_atualizados}`. Tira a obra de
   `em_orcamento` para `em_andamento` e, **com contrato vigente, gera Compras**: cada item com quantidade > 0 das versões
-  vigentes vira insumo (`precisa_ate_o_fim` = quantidade, `valor_unitario`, `etapa`). O que veio das pranchas é
+  vigentes (menos o estimado pela previsão da obra, `fonte: "estimativa"`) vira insumo (`precisa_ate_o_fim` = quantidade, `valor_unitario`, `etapa`). O que veio das pranchas é
   `material`; o que veio de planilha, `servico`. Mesmo nome em mais de uma linha = um insumo só (quantidades somadas,
   preço médio ponderado, etapa de maior valor). Insumo já cadastrado não duplica: fica o maior `precisa_ate_o_fim`, e o
   preço só entra se o dele for 0. Mesmo nome com unidades diferentes (no orçamento, ou contra o cadastrado) → 422

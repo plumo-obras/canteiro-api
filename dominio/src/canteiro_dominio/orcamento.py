@@ -68,17 +68,18 @@ def numero_do_topico(numero: str) -> str | None:
 
 def topicos_dos_itens(itens: Sequence[dict], herdados: Mapping[str, str] | None = None) -> TopicosDosItens:
     """Os tópicos de uma versão do orçamento e o tópico de cada item (`tipo`, `numero`, `nivel`, `etapa`,
-    `descricao`), com os itens na ordem da planilha.
+    `descricao`, `grupo`), com os itens na ordem da planilha.
 
     O nome do tópico é a descrição da linha de nível 2 ("7.1"), seja ela título do grupo ou o próprio item; o item
     "7.1.3" cai no tópico "7.1". O item sem número de nível 3 é o detalhe do título de nível 2 logo acima dele (o grupo
     que a planilha feita à mão escreve sem numerar) e cai no tópico dele. `herdados` = {"7.1": nome do tópico} do
     orçamento que vale (no aditivo): o item que guarda o número do contrato ("7.1.3") sem trazer a linha "7.1" cai no
     tópico do contrato; a linha do próprio aditivo vale sobre ele. Item sem linha de nível 2 que o nomeie (a EAP que
-    numera "2.1.1" sem a linha "2.1") fica sem tópico. A etapa do tópico é a do item (`etapa`), não o prefixo do
-    número: depois de organizar em fases os dois podem diferir. Etapa com mais de `MAX_TOPICOS_POR_ETAPA` tópicos fica
-    sem nenhum (`cheias`): a árvore com um tópico por serviço de uma EAP longa não ajudaria ninguém a escolher, e o
-    leitor de comprovantes recebe a lista.
+    numera "2.1.1" sem a linha "2.1") fica sem tópico. O item encaixado numa etapa padrão (`grupo` = a etapa da planilha
+    de onde ele veio) cai no tópico com o nome dela: a etapa padrão junta etapas da planilha, e o tópico as mantém
+    separadas. A etapa do tópico é a do item (`etapa`), não o prefixo do número: depois do encaixe nas etapas padrão os
+    dois diferem. Etapa com mais de `MAX_TOPICOS_POR_ETAPA` tópicos fica sem nenhum (`cheias`): a árvore com um tópico
+    por serviço de uma EAP longa não ajudaria ninguém a escolher, e o leitor de comprovantes recebe a lista.
     """
     nomes = dict(herdados or {})
     proprios: set[str] = set()
@@ -97,13 +98,20 @@ def topicos_dos_itens(itens: Sequence[dict], herdados: Mapping[str, str] | None 
             continue
         if n:
             grupo = None
-        tn = numero_do_topico(n) if n else grupo if x.get("nivel", 0) > 2 else None
-        if not x.get("etapa") or tn is None or tn not in nomes:
+        da_planilha = " ".join((x.get("grupo") or "").split())
+        if da_planilha:
+            nome = da_planilha
+        else:
+            tn = numero_do_topico(n) if n else grupo if x.get("nivel", 0) > 2 else None
+            if tn is None or tn not in nomes:
+                continue
+            nome = nomes[tn]
+        if not x.get("etapa"):
             continue
-        chave = normalizar_nome(nomes[tn])
+        chave = normalizar_nome(nome)
         t = vistos.get((x["etapa"], chave))
         if t is None:
-            t = vistos[(x["etapa"], chave)] = TopicoDoOrcamento(etapa=x["etapa"], nome=nomes[tn], chave=chave)
+            t = vistos[(x["etapa"], chave)] = TopicoDoOrcamento(etapa=x["etapa"], nome=nome, chave=chave)
             r.topicos.append(t)
         r.do_item[i] = t
     por_etapa: dict[str, int] = {}
@@ -114,3 +122,19 @@ def topicos_dos_itens(itens: Sequence[dict], herdados: Mapping[str, str] | None 
         r.topicos = [t for t in r.topicos if t.etapa not in r.cheias]
         r.do_item = {i: t for i, t in r.do_item.items() if t.etapa not in r.cheias}
     return r
+
+
+# --- custo e venda ---
+
+_CEM = 10000                           # 100% em centésimos de ponto percentual (BDI 22,91% = 2291)
+
+
+def custo_da_venda(valor: int, bdi: int) -> int:
+    """O custo de um preço de venda com BDI: preço ÷ (1 + BDI), em centavos, arredondado para o mais próximo (meio para
+    longe do zero, para a supressão do aditivo dar o mesmo número com o sinal trocado). O orçado × realizado compara
+    custo com custo: sem tirar o BDI, a margem apareceria como dinheiro que falta gastar."""
+    if bdi <= 0:
+        return valor
+    d = _CEM + bdi
+    sinal = -1 if valor < 0 else 1
+    return sinal * ((abs(valor) * _CEM * 2 + d) // (2 * d))

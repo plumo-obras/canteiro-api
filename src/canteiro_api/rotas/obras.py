@@ -1,6 +1,7 @@
 """Obras, almoxarifado (insumos com a Conta, movimentos, importação) e pedidos."""
 import json
 from datetime import date, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from pydantic import ValidationError
@@ -183,6 +184,10 @@ async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile 
                           etapas_itens: str | None = Form(None, max_length=20000),
                           somar: bool = Form(False),
                           ignorar_itens: str | None = Form(None, max_length=20000),
+                          padronizar: bool = Form(False),
+                          destinos: str | None = Form(None, max_length=20000),
+                          natureza: Literal["custo", "venda"] = Form("custo"),
+                          bdi: int | None = Form(None, ge=1, le=10_000),
                           u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
     try:
         m = Mapeamento.model_validate(json.loads(mapeamento))
@@ -198,11 +203,17 @@ async def importar_versao(obra_id: str, response: Response, arquivo: UploadFile 
         ignorar = [int(x) for x in json.loads(ignorar_itens)] if ignorar_itens else []
     except (ValueError, TypeError):
         raise ErroNegocio("ignorar_itens inválido: use uma lista de `ordem`, como [3, 7].") from None
+    try:
+        # padronizar: {"etapa da planilha": "etapa padrão"} ou {"linha:N": "etapa padrão"}, o que a pessoa trocou
+        destinos_ = {str(k): str(v) for k, v in json.loads(destinos).items()} if destinos else {}
+    except (ValueError, AttributeError):
+        raise ErroNegocio("destinos inválido: use {\"etapa da planilha\": \"etapa padrão\"}.") from None
     conteudo = await _ler_arquivo(arquivo)
     try:
         previa, criada = await versoes.importar(arm, u, obra_id, conteudo, arquivo.filename or "", m, tipo,
                                                 descricao, data or None, aplicar, chave_idempotencia,
-                                                escolhidas, somar=somar, ignorar=ignorar)
+                                                escolhidas, somar=somar, ignorar=ignorar, padronizar=padronizar,
+                                                natureza=natureza, bdi=bdi, destinos=destinos_)
     except ConflitoDeId:
         raise Conflito("Esta importação já foi gravada agora há pouco; recarregue o orçamento.") from None
     if criada:
@@ -219,8 +230,8 @@ async def editar_item_orcamento(obra_id: str, item_id: str, corpo: ItemOrcamento
 
 @r.post("/obras/{obra_id}/orcamento/organizar-fases", tags=["orçamento"])
 async def organizar_fases(obra_id: str, u: UsuarioAtual = Depends(admin), arm=Depends(_arm)):
-    """Reorganiza os serviços do orçamento em etapas por fase de obra (Fundação, Estrutura... Entrega), para o
-    cronograma prever a obra completa. Com Desfazer."""
+    """Encaixa o orçamento contratado nas etapas padrão (se ainda não está) e prevê as fases de obra que faltam
+    (serviços estimados, fora do orçado), para o cronograma ver a obra completa. Com Desfazer."""
     return await versoes.organizar_em_fases(arm, u, obra_id)
 
 

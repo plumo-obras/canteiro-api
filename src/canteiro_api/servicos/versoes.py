@@ -14,12 +14,28 @@ import re
 from decimal import Decimal
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.cronograma import estimar_fases_faltantes, fase, ordem_da_fase
-from canteiro_dominio.etapas import MAX_TOPICOS_POR_ETAPA, normalizar_nome
+from canteiro_dominio.cronograma import estimar_fases_faltantes, ordem_da_fase
+from canteiro_dominio.encaixe import (
+    etapa_da_estimativa,
+    etapa_no_contexto,
+    etapa_pelo_nome,
+    fase_da_etapa,
+    nome_da_etapa,
+    ordem_da_etapa,
+)
+from canteiro_dominio.etapas import (
+    CHAVES_FIXAS,
+    ETAPAS_FIXAS,
+    MAX_NOME,
+    MAX_TOPICOS_POR_ETAPA,
+    OUTROS,
+    normalizar_nome,
+)
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import Insumo, ItemOrcamento, Saldo, StatusPedido, TipoVersao, VersaoOrcamento
 from canteiro_dominio.orcamento import (
     andamento_da_linha,
+    custo_da_venda,
     numero_do_topico,
     recebido_da_linha,
     topicos_dos_itens,
@@ -37,6 +53,8 @@ from canteiro_dominio.tipos import fmt_qtd, fmt_reais, qtd, reais
 from ..auth import UsuarioAtual
 from ..esquemas import (
     Aviso,
+    DestinoDoEncaixe,
+    EncaixeEtapa,
     ErroLinha,
     EtapaOrcamento,
     EtapaRef,
@@ -574,16 +592,144 @@ def _marcar_repetidos(itens: list[ItemPrevia], existentes: list[dict], avisos: l
                                                     "está no orçamento."))
 
 
+# --- custo × venda e o encaixe na lista padrão de etapas, na importação ---
+
+# o serviço que a previsão da obra estimou para uma fase sem orçamento: conta no cronograma, não no orçado
+FONTE_ESTIMATIVA = "estimativa"
+
+
+def _para_custo(itens: list[ItemPrevia], bdi: int) -> None:
+    """Planilha de venda: cada item guarda o preço do cliente à parte e fica com o custo (a conta é do domínio)."""
+    for x in itens:
+        if x.tipo == "item":
+            x.valor_unitario_venda, x.total_venda = x.valor_unitario, x.total
+            x.valor_unitario, x.total = custo_da_venda(x.valor_unitario, bdi), custo_da_venda(x.total, bdi)
+
+
+def _mesmo_nome(titulo: str, chave: str) -> bool:
+    """O título da planilha é o nome da etapa padrão ("ALVENARIA" é "Alvenaria e vedações", "FUNDAÇÕES" é "Fundação"):
+    compara sem acento, o nome inteiro ou o pedaço antes do "e", no singular."""
+    def sing(t: str) -> str:
+        t = normalizar_nome(t)
+        return t[:-3] + "ao" if t.endswith("oes") else t[:-1] if t.endswith("s") else t
+    nome = nome_da_etapa(chave)
+    return sing(titulo) in {sing(nome), sing(re.split(r"\s+e\s+|,", normalizar_nome(nome))[0])}
+
+
+def _grupo(titulo: str, chave: str) -> str:
+    """A etapa da planilha vira o tópico do item dentro da etapa padrão ("Esquadrias › ESQUADRIA MADEIRA"), a não ser
+    que ela já seja a etapa padrão ("ALVENARIA" em Alvenaria): aí o tópico continua saindo da numeração, como na
+    planilha que não precisou de encaixe."""
+    t = " ".join(titulo.split())
+    return "" if not t or _mesmo_nome(t, chave) else t[:MAX_NOME]
+
+
+def _titulo_da_etapa(chave: str, ordem: int = 0) -> ItemPrevia:
+    return ItemPrevia(ordem=ordem, tipo="etapa", numero=str(ordem_da_etapa(chave) + 1), nivel=1, etapa=chave,
+                      codigo="", fonte="", descricao=nome_da_etapa(chave), unidade="", quantidade=0,
+                      valor_unitario=0, total=0, linha=0)
+
+
+def _padronizar_previa(itens: list[ItemPrevia], escolhas: dict[str, str]) -> tuple[list[ItemPrevia],
+                                                                                   list[EncaixeEtapa]]:
+    """Encaixa cada linha da planilha numa etapa da lista padrão (o nosso modelo de orçamento) e devolve as linhas já
+    na ordem da lista, com o título de cada etapa, e o encaixe de cada etapa da planilha para a prévia.
+
+    A etapa de cada item vem do domínio, sabendo a etapa da planilha em que ele está (`etapa_no_contexto`). `escolhas`
+    é o que a pessoa trocou na prévia: {etapa da planilha: etapa padrão} para a etapa inteira, {"linha:N": etapa
+    padrão} para uma linha (N = a linha da planilha); a linha vale sobre a etapa."""
+    for k in escolhas.values():
+        if k not in CHAVES_FIXAS:
+            raise ErroNegocio(f"Etapa desconhecida: {k}. Use uma da lista padrão.")
+    titulo = {x.etapa: x.descricao for x in itens if x.tipo == "etapa" and x.nivel == 1}
+    destino: dict[int, str] = {}
+    for i, x in enumerate(itens):
+        if x.tipo == "item":
+            destino[i] = (escolhas.get(f"linha:{x.linha}") or escolhas.get(x.etapa)
+                          or etapa_no_contexto(x.descricao, titulo.get(x.etapa, "")))
+    # o subtítulo (nível 2 em diante) vai com o primeiro item abaixo dele na mesma etapa da planilha
+    for i, x in enumerate(itens):
+        if x.tipo == "etapa" and x.nivel > 1:
+            abaixo = next((destino[j] for j in range(i + 1, len(itens))
+                           if j in destino and itens[j].etapa == x.etapa), None)
+            destino[i] = (abaixo or escolhas.get(x.etapa) or etapa_pelo_nome(titulo.get(x.etapa, "")) or OUTROS)
+    por_etapa: dict[str, dict[str, list[int]]] = {}
+    for i, x in enumerate(itens):
+        if x.tipo == "item":
+            conta = por_etapa.setdefault(x.etapa, {}).setdefault(destino[i], [0, 0])
+            conta[0] += x.total
+            conta[1] += 1
+    encaixe = []
+    for e, por in por_etapa.items():
+        # a etapa padrão com mais valor; no empate, a que vem antes na lista
+        principal = min(por, key=lambda k: (-por[k][0], ordem_da_etapa(k)))
+        encaixe.append(EncaixeEtapa(
+            etapa_planilha=e, descricao=titulo.get(e) or (f"Etapa {e}" if e else "Sem etapa"), destino=principal,
+            destino_nome=nome_da_etapa(principal), escolhida=e in escolhas, total=sum(v[0] for v in por.values()),
+            etapas=[DestinoDoEncaixe(etapa=k, nome=nome_da_etapa(k), total=v[0], itens=v[1])
+                    for k, v in sorted(por.items(), key=lambda kv: ordem_da_etapa(kv[0]))]))
+    linhas: list[ItemPrevia] = []
+    for k in sorted(set(destino.values()), key=ordem_da_etapa):
+        linhas.append(_titulo_da_etapa(k))
+        linhas.extend(x.model_copy(update={"etapa": k, "etapa_planilha": x.etapa,
+                                           "grupo": _grupo(titulo.get(x.etapa, ""), k)})
+                      for i, x in enumerate(itens) if destino.get(i) == k)
+    for n, x in enumerate(linhas):
+        x.ordem = n
+    return linhas, encaixe
+
+
+def _aditivo_padronizado(itens: list[ItemPrevia], existentes: list[dict],
+                         etapas_vigentes: dict[str, str]) -> list[ItemPrevia]:
+    """O aditivo de um orçamento na lista padrão, depois de `_encaixar`: a linha que casou com o contrato (pelo código,
+    pelo nome ou pela escolha) fica na etapa dele e no mesmo tópico (o `grupo` do item do contrato com o mesmo código);
+    a que não casou é encaixada na lista como na importação. As linhas saem na ordem da lista, cada etapa com o seu
+    título."""
+    grupo_do_codigo: dict[str, str] = {}
+    for x in existentes:
+        if x["tipo"] == "item" and x.get("codigo"):
+            grupo_do_codigo.setdefault(f"{x.get('fonte', '').casefold()}|{x['codigo'].casefold()}", x.get("grupo", ""))
+    titulo = {x.etapa_planilha: x.descricao for x in itens if x.tipo == "etapa" and x.nivel == 1}
+    for x in itens:
+        if x.tipo != "item":
+            continue
+        da_planilha = titulo.get(x.etapa_planilha, "")
+        if x.etapa in etapas_vigentes and x.etapa in CHAVES_FIXAS:
+            x.grupo = (grupo_do_codigo.get(f"{x.fonte.casefold()}|{x.codigo.casefold()}", "")
+                       if x.etapa_origem == "codigo" else _grupo(da_planilha, x.etapa))
+        else:
+            k = etapa_no_contexto(x.descricao, da_planilha)
+            x.etapa, x.grupo = k, _grupo(da_planilha, k)
+    # a `ordem` da leitura continua (é a chave de `etapas_itens` na prévia); o título novo pega uma que não colide
+    livre = max((x.ordem for x in itens), default=0) + 1
+    linhas: list[ItemPrevia] = []
+    for k in sorted({x.etapa for x in itens if x.tipo == "item"}, key=ordem_da_etapa):
+        linhas.append(_titulo_da_etapa(k, livre))
+        livre += 1
+        linhas.extend(x for x in itens if x.tipo == "item" and x.etapa == k)
+    return linhas
+
 async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo: str, m: Mapeamento,
                    tipo: TipoVersao, descricao: str, data: str | None, aplicar: bool,
                    chave: str | None, escolhidas: dict[int, str] | None = None, somar: bool = False,
-                   ignorar: list[int] | None = None) -> tuple[PreviaVersao, bool]:
+                   ignorar: list[int] | None = None, *, padronizar: bool = False, natureza: str = "custo",
+                   bdi: int | None = None, destinos: dict[str, str] | None = None) -> tuple[PreviaVersao, bool]:
     """Devolve (prévia ou versão gravada, criada agora?).
 
     `somar` (contrato, antes de aprovar): grava um contrato novo com os itens do vigente mais os da planilha, no lugar
     do vigente. É o "completar o orçamento" de quem trouxe as pranchas e agora traz a planilha: aditivo é documento com
-    o cliente depois do contrato fechado, e chamar o complemento de aditivo inflava o % de aditivo."""
+    o cliente depois do contrato fechado, e chamar o complemento de aditivo inflava o % de aditivo.
+
+    `padronizar` (contrato novo): encaixa cada linha numa etapa da lista padrão já na prévia (`encaixe`), e a pessoa
+    troca o que estiver errado em `destinos`. `natureza="venda"`: a planilha é o preço do cliente; o custo de cada
+    linha sai com o `bdi` (o da obra, quando não vem)."""
     o = await obra_do_tenant(arm, u.tenant_id, obra_id)
+    if natureza not in ("custo", "venda"):
+        raise ErroNegocio("A planilha é de custo ou de venda.")
+    bdi_ = (o.get("bdi") or 0) if bdi is None else bdi
+    if natureza == "venda" and bdi_ <= 0:
+        raise ErroNegocio("Diga o BDI da planilha de venda: é com ele que sai o custo de cada linha.")
+    destinos = destinos or {}
     if m.nome is None:
         raise ErroNegocio("Diga qual coluna é a descrição.")
     if m.quantidade is None and m.valor_total is None:
@@ -594,7 +740,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     escolhidas = escolhidas or {}
     ignorar_ = sorted(set(ignorar or ()))
     # o sufixo só aparece com somar/ignorar: a assinatura de quem não usa nenhum dos dois fica a de antes
-    extra = ("|somar" if somar else "") + (f"|ignorar={ignorar_}" if ignorar_ else "")
+    extra = (("|somar" if somar else "") + (f"|ignorar={ignorar_}" if ignorar_ else "")
+             + (f"|venda={bdi_}" if natureza == "venda" else "")
+             + (f"|padronizar={sorted(destinos.items())}" if padronizar else ""))
     assinatura = hashlib.sha256(conteudo + f"|{tipo.value}|{m.model_dump_json()}|{sorted(escolhidas.items())}{extra}"
                                 .encode()).hexdigest()
     id_ = id_versao(u.tenant_id, obra_id, chave) if chave else None
@@ -628,6 +776,19 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
     if ignorar_:
         tirar = set(ignorar_)
         itens = [x for x in itens if not (x.tipo == "item" and x.ordem in tirar)]
+    if natureza == "venda":
+        _para_custo(itens, bdi_)
+    na_lista = bool(vigente and vigente.get("padronizada"))
+    if somar and na_lista:
+        # as etapas da planilha ("7 PAREDES") não casam com as da lista padrão: importe tudo de novo
+        raise ErroNegocio("Este orçamento está nas etapas padrão: importe a planilha inteira de novo (ela substitui "
+                          "a atual) ou lance um aditivo.")
+    if padronizar and (somar or tipo != TipoVersao.CONTRATO):
+        raise ErroNegocio("Encaixar nas etapas padrão vale para o orçamento novo; o aditivo de um orçamento nas "
+                          "etapas padrão já cai nelas.")
+    encaixe: list[EncaixeEtapa] = []
+    if padronizar:
+        itens, encaixe = _padronizar_previa(itens, destinos)
     descricoes_contrato = None
     existentes: list[dict] = []
     if (tipo == TipoVersao.ADITIVO or somar) and vigente:
@@ -639,6 +800,9 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
             for e in v.get("lista_etapas", []):
                 etapas_vigentes.setdefault(e["etapa"], e["descricao"])
         descricoes_contrato = _encaixar(itens, existentes, etapas_vigentes, escolhidas, somar=somar)
+        if na_lista:
+            itens = _aditivo_padronizado(itens, existentes, etapas_vigentes)
+            descricoes_contrato.update({x.etapa: x.descricao for x in itens if x.tipo == "etapa" and x.nivel == 1})
         _marcar_repetidos(itens, existentes, avisos)
     so_itens = [x for x in itens if x.tipo == "item"]
     previa = PreviaVersao(
@@ -647,7 +811,11 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         n_etapas=sum(x.tipo == "etapa" and x.nivel == 1 for x in itens),
         etapas=_totais_por_etapa(itens, descricoes_contrato),
         substitui=(Substituida(versao_id=vigente["id"], total=vigente["total"], itens=vigente["itens"])
-                   if vigente and tipo == TipoVersao.CONTRATO else None))
+                   if vigente and tipo == TipoVersao.CONTRATO else None),
+        padronizada=padronizar, encaixe=encaixe,
+        etapas_disponiveis=[EtapaRef(etapa=e.chave, descricao=e.nome) for e in ETAPAS_FIXAS] if padronizar else [],
+        natureza=natureza, bdi=bdi_ if natureza == "venda" else 0,
+        total_venda=sum(x.total_venda or 0 for x in so_itens) if natureza == "venda" else None)
     if somar:
         previa.total_apos = vigente["total"] + previa.total
     if tipo == TipoVersao.ADITIVO and not vigente:
@@ -701,7 +869,8 @@ async def importar(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arq
         contrato_id=vigente["id"] if tipo == TipoVersao.ADITIVO else None, assinatura=assinatura,
         lista_etapas=[{"etapa": e.etapa, "descricao": e.descricao}
                       for e in (_totais_por_etapa(linhas) if somar else previa.etapas) if e.etapa],
-        lista_topicos=lista_topicos, gerou_compras=bool(compras))
+        lista_topicos=lista_topicos, gerou_compras=bool(compras), natureza=natureza,
+        bdi=bdi_ if natureza == "venda" else 0, padronizada=padronizar or na_lista)
     # no somar a `ordem` é a posição no contrato somado (o item novo entra no fim da etapa dele)
     await _gravar_itens(arm, u, obra_id, id_, linhas, por_posicao=somar)
 
@@ -1005,6 +1174,9 @@ async def reordenar_etapas(arm, u: UsuarioAtual, obra_id: str, ordem: list[str],
         raise Conflito("O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem.")
     if vigente.get("aditivos", 0) > 0:
         raise Conflito("Há aditivo valendo sobre este orçamento; desfaça o aditivo antes de mudar a ordem.")
+    if vigente.get("padronizada"):
+        # renumerar 1..N tiraria as etapas da lista padrão (a chave "alvenaria" é o que deixa comparar obras)
+        raise ErroNegocio("O orçamento está nas etapas padrão: a ordem é a da lista e não muda.")
     existentes = await itens_das_versoes(arm, u.tenant_id, obra_id, [vigente])
     linhas = [ItemPrevia.model_validate(x) for x in existentes]
     atual = _ordem_das_etapas(linhas)
@@ -1131,17 +1303,32 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
     descricoes: dict[str, str] = {}
     somas: dict[str, list[int]] = {}
     por_topico: dict[str, dict[str | None, list[int]]] = {}
+    estimado: dict[str, int] = {}
+    venda: dict[str, int] = {}
     for x in itens:
         if x["tipo"] == "etapa" and x["nivel"] == 1:
             # a descrição do contrato manda; a do aditivo só para etapa que nasceu nele
             if x["versao_id"] in contrato_ids or x["etapa"] not in descricoes:
                 descricoes[x["etapa"]] = x["descricao"]
             somas.setdefault(x["etapa"], [0, 0])
+        elif x["tipo"] == "item" and x.get("fonte") == FONTE_ESTIMATIVA:
+            # o que a previsão da obra estimou não é orçado: fica à parte (o cronograma soma os dois)
+            somas.setdefault(x["etapa"], [0, 0])
+            estimado[x["etapa"]] = estimado.get(x["etapa"], 0) + x["total"]
         elif x["tipo"] == "item":
             lado = 0 if x["versao_id"] in contrato_ids else 1
             somas.setdefault(x["etapa"], [0, 0])[lado] += x["total"]
             t = por_topico.setdefault(x["etapa"], {}).setdefault(topico_do_item.get(x["id"]), [0, 0])
             t[lado] += x["total"]
+            if x.get("total_venda") is not None:
+                venda[x["etapa"]] = venda.get(x["etapa"], 0) + x["total_venda"]
+    # na ordem do orçamento (`lista_etapas` das versões, contrato primeiro): os itens vêm pela `ordem` de cada versão,
+    # e a etapa que só aparece num item que a previsão criou no fim (a fase estimada) cairia fora do lugar
+    posicao: dict[str, int] = {}
+    for v in ativas:
+        for e in v.get("lista_etapas") or []:
+            posicao.setdefault(e["etapa"], len(posicao))
+    somas = dict(sorted(somas.items(), key=lambda kv: posicao.get(kv[0], len(posicao))))
     pedidos = await pedidos_da_obra(arm, tenant_id, obra_id)
     gasto = andamento_dos_pedidos(pedidos)
     gasto_topico = andamento_dos_pedidos(pedidos, por_topico=True)
@@ -1155,6 +1342,7 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
     for e, (c, a) in somas.items():
         etapa = _etapa(e, descricoes.get(e, "Sem etapa" if not e else f"Etapa {e}"), c, a, gasto.pop(e, {}),
                        avulsos.por_etapa.get(e, 0))
+        etapa.estimado, etapa.venda = estimado.get(e, 0), venda.get(e)
         etapa.topicos = _topicos_da_etapa(e, [t for t in lista_topicos if t["etapa"] == e], por_topico.get(e, {}),
                                           gasto_topico.get(e, {}), avulsos.por_topico.get(e, {}), nomes_topicos)
         etapas.append(etapa)
@@ -1176,7 +1364,8 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
                                saldo=contratado + aditivos - andamento["comprometido"],
                                aditivos_pct=pct(aditivos, contratado) if contratado else None,
                                n_itens=sum(x["tipo"] == "item" for x in itens),
-                               n_etapas=len(descricoes), sem_etapa=sem,
+                               n_etapas=len(descricoes), sem_etapa=sem, estimado=sum(estimado.values()),
+                               venda=sum(venda.values()) if venda else None,
                                gastos=GastosNoOrcamentoSaida(total=avulsos.total, nas_etapas=avulsos.nas_etapas,
                                                              fora_do_orcamento=avulsos.fora_do_orcamento,
                                                              na_lista_padrao=avulsos.na_lista_padrao,
@@ -1692,6 +1881,10 @@ async def organizar_em_fases(arm, u: UsuarioAtual, obra_id: str) -> dict:
     if not versoes:
         raise ErroNegocio("Importe o orçamento antes de organizar em fases.")
     contrato = next((v for v in versoes if v["tipo"] == TipoVersao.CONTRATO), versoes[0])
+    if not contrato.get("padronizada") and any(v["tipo"] == TipoVersao.ADITIVO for v in versoes):
+        # só o contrato muda de etapa: o aditivo ficaria nas etapas da planilha, com chaves que viram outras fases
+        raise ErroNegocio("O orçamento tem aditivo: encaixe nas etapas padrão antes de lançar aditivos (desfaça o "
+                          "aditivo, encaixe e lance de novo).")
     linhas = await itens_das_versoes(arm, u.tenant_id, obra_id, [contrato])
     item_ids = [x["id"] for x in linhas if x["tipo"] == "item" and x["obra_id"] == obra_id]
     titulo_ids = [x["id"] for x in sorted((x for x in linhas if x["tipo"] == "etapa" and x["obra_id"] == obra_id),
@@ -1699,9 +1892,10 @@ async def organizar_em_fases(arm, u: UsuarioAtual, obra_id: str) -> dict:
     if not item_ids:
         raise ErroNegocio("O orçamento não tem serviços para organizar.")
     manuais = await topicos_manuais(arm, u.tenant_id, obra_id)
+    em_uso = await etapas_em_uso(arm, u.tenant_id, obra_id)
 
     async def tx_corpo(tx):
-        op = await _preparar_organizar_fases(tx, u, obra_id, contrato["id"], item_ids, titulo_ids, manuais)
+        op = await _preparar_organizar_fases(tx, u, obra_id, contrato["id"], item_ids, titulo_ids, manuais, em_uso)
         r, entrada = executar_e_registrar(tx, u, op)
         return {**r, "registro_id": entrada["id"]}
 
@@ -1710,7 +1904,7 @@ async def organizar_em_fases(arm, u: UsuarioAtual, obra_id: str) -> dict:
 
 async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id: str,
                                     item_ids: list[str], titulo_ids: list[str],
-                                    manuais: dict[tuple[str, str], str]) -> Operacao:
+                                    manuais: dict[tuple[str, str], str], em_uso: set[str] = frozenset()) -> Operacao:
     o = await obra_do_tenant(tx, u.tenant_id, obra_id)
     recusar_se_desfazendo(o)
     v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id)
@@ -1721,18 +1915,38 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
              if x and x["obra_id"] == obra_id and x["tipo"] == "item"]
     titulos = [x for x in [await tx.obter("itens_orcamento", u.tenant_id, i) for i in titulo_ids]
                if x and x["obra_id"] == obra_id and x["tipo"] == "etapa"]
-    nova_fase = {x["id"]: fase(x["descricao"], x.get("codigo", ""), x.get("unidade", "")) for x in itens}
-    # valor real já orçado por fase, para estimar o porte da obra e as fases que ainda faltam
+    # a etapa da planilha de cada item: a que ele guardou ao ser encaixado (`grupo`), ou o título de nível 1 da etapa
+    # em que ele está (orçamento ainda como veio). É ela que decide a etapa da linha genérica ("Mão de obra").
+    titulo_de = {t["etapa"]: t["descricao"] for t in titulos if t.get("nivel", 1) == 1}
+    da_planilha = {x["id"]: x.get("grupo") or titulo_de.get(x["etapa"], "") for x in itens}
+    reais = [x for x in itens if x.get("fonte") != FONTE_ESTIMATIVA]
+    # já na lista padrão, o item fica onde está: pode ser a escolha da pessoa na prévia, que a palavra não desfaz
+    ja = bool(v.get("padronizada"))
+    nova = {x["id"]: x["etapa"] if ja and x["etapa"] in CHAVES_FIXAS
+            else etapa_no_contexto(x["descricao"], da_planilha[x["id"]]) for x in reais}
+    # o estimado de uma previsão anterior fica onde foi estimado (a de antes das etapas padrão, pela fase do título)
+    nova.update({x["id"]: x["etapa"] if x["etapa"] in CHAVES_FIXAS
+                 else etapa_da_estimativa(titulo_de.get(x["etapa"], ""), x["descricao"])
+                 for x in itens if x.get("fonte") == FONTE_ESTIMATIVA})
+    # valor real já orçado por fase de obra, para estimar o porte da obra e as fases que ainda faltam
     valor_por_fase: dict[str, int] = {}
-    for x in itens:
-        f = nova_fase[x["id"]]
-        valor_por_fase[f] = valor_por_fase.get(f, 0) + (x.get("total") or 0)
+    for x in reais:
+        if f := fase_da_etapa(nova[x["id"]]):
+            valor_por_fase[f] = valor_por_fase.get(f, 0) + (x.get("total") or 0)
     estimadas = estimar_fases_faltantes(valor_por_fase)  # fases padrão que faltam, com quantidade e valor estimados
-    todas = sorted(set(nova_fase.values()) | {e.fase for e in estimadas}, key=ordem_da_fase)
-    chave = {f: str(i + 1) for i, f in enumerate(todas)}  # chave numérica, na ordem de obra ("1 Fundação"...)
-    # o tópico vem junto com o item para a fase nova, pelo nome da linha de nível 2 (só os títulos de nível 1 viram os
-    # das fases)
-    movidos = [{**x, "etapa": chave[nova_fase[x["id"]]]} for x in itens]
+    etapa_estimada = [etapa_da_estimativa(e.fase, e.descricao) for e in estimadas]
+    todas = sorted(set(nova.values()) | set(etapa_estimada), key=ordem_da_etapa)
+    # gasto ou pedido lançado numa etapa que mudaria de sentido ("7" deixa de ser PAREDES)
+    antes = {e["etapa"]: e["descricao"] for e in v.get("lista_etapas") or []}
+    mudam = sorted((k for k in em_uso if k in antes and (k not in todas or nome_da_etapa(k) != antes[k])),
+                   key=lambda k: (len(k), k))
+    if mudam:
+        raise Conflito(f"Há gasto ou pedido lançado nas etapas {', '.join(mudam)}, que mudariam de sentido ao "
+                       "encaixar nas etapas padrão. Reclassifique esses lançamentos antes.")
+    # o tópico do item na etapa padrão: a etapa da planilha de onde ele veio (`grupo`), ou, quando ela já tem o nome
+    # da etapa padrão, a linha de nível 2, como antes (só os títulos de nível 1 viram os das etapas)
+    grupo_novo = {x["id"]: _grupo(da_planilha[x["id"]], nova[x["id"]]) for x in itens}
+    movidos = [{**x, "etapa": nova[x["id"]], "grupo": grupo_novo[x["id"]]} for x in itens]
 
     def na_ordem(linhas: list[dict]) -> list[dict]:
         return sorted(titulos + linhas, key=lambda x: x.get("ordem", 0))
@@ -1747,20 +1961,22 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
         ordem_antes = na_ordem(itens)
         lista_antes, ts, _ = _topicos_das_linhas(u.tenant_id, obra_id, ordem_antes, manuais)
         topico_antes = {x["id"]: t for x, t in zip(ordem_antes, ts, strict=True) if x["tipo"] == "item"}
-    itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": chave[nova_fase[x["id"]]],
-                  "topico_antes": topico_antes[x["id"]], "topico_depois": topico_novo[x["id"]]}
-                 for x in itens if x["etapa"] != chave[nova_fase[x["id"]]]
-                 or topico_antes[x["id"]] != topico_novo[x["id"]]]
+    itens_mud = [{"id": x["id"], "antes": x["etapa"], "depois": nova[x["id"]],
+                  "topico_antes": topico_antes[x["id"]], "topico_depois": topico_novo[x["id"]],
+                  "grupo_antes": x.get("grupo", ""), "grupo_depois": grupo_novo[x["id"]]}
+                 for x in itens if x["etapa"] != nova[x["id"]]
+                 or topico_antes[x["id"]] != topico_novo[x["id"]] or x.get("grupo", "") != grupo_novo[x["id"]]]
     titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
                      for t in titulos]
-    # reaproveita os títulos existentes para as fases; cria os que faltarem (ids determinísticos, idempotente)
+    # reaproveita os títulos existentes para as etapas; cria os que faltarem (ids determinísticos, idempotente)
     das_fases = {(e["etapa"], e["descricao"]) for e in v.get("lista_etapas") or []}
     principais = [t for t in titulos if t.get("nivel", 1) == 1 or (t["etapa"], t["descricao"]) in das_fases]
     de_fase = {t["id"] for t in principais}
-    reusar = [{"id": principais[i]["id"], "etapa": chave[todas[i]], "descricao": todas[i], "ordem": i}
+    reusar = [{"id": principais[i]["id"], "etapa": todas[i], "descricao": nome_da_etapa(todas[i]), "ordem": i,
+               "numero": str(ordem_da_etapa(todas[i]) + 1)}
               for i in range(min(len(principais), len(todas)))]
-    criar_tit = [(id_derivado(u.tenant_id, "etapa-fase", versao_id, f), chave[f], f, i)
-                 for i, f in enumerate(todas) if i >= len(principais)]
+    criar_tit = [(id_derivado(u.tenant_id, "etapa-padrao", versao_id, k), k, nome_da_etapa(k), i)
+                 for i, k in enumerate(todas) if i >= len(principais)]
     grupos = []
     for k, t in enumerate(nova_ordem):
         if t["tipo"] == "etapa" and t["id"] not in de_fase:
@@ -1772,28 +1988,29 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
     for n, e in enumerate(estimadas):
         iid = id_derivado(u.tenant_id, "item-estimado", versao_id, f"{e.fase}:{n}:{e.descricao}")
         criar_item.append((iid, e, n, await tx.obter("itens_orcamento", u.tenant_id, iid) is not None))
-    novos_estimados = sum(e.valor_centavos for (iid, e, n, existe) in criar_item if not existe)
     if (not itens_mud and not criar_tit and not grupos and not any(not existe for (_, _, _, existe) in criar_item)
-            and all(t["descricao"] == f and t["etapa"] == chave[f]
-                    for t, f in zip(principais, todas, strict=False))):
-        raise ErroNegocio("O orçamento já está organizado em fases.")
+            and all(t["descricao"] == nome_da_etapa(k) and t["etapa"] == k
+                    for t, k in zip(principais, todas, strict=False))):
+        raise ErroNegocio("O orçamento já está nas etapas padrão, e a obra já está prevista inteira.")
 
     def aplicar() -> dict:
         for m in itens_mud:
             tx.atualizar("itens_orcamento", u.tenant_id, m["id"], {"etapa": m["depois"],
-                                                                    "topico_id": m["topico_depois"]})
+                                                                    "topico_id": m["topico_depois"],
+                                                                    "grupo": m["grupo_depois"]})
         for r in reusar:
             tx.atualizar("itens_orcamento", u.tenant_id, r["id"],
-                         {"etapa": r["etapa"], "descricao": r["descricao"], "ordem": r["ordem"]})
+                         {"etapa": r["etapa"], "descricao": r["descricao"], "ordem": r["ordem"],
+                          "numero": r["numero"]})
         for g in grupos:
             tx.atualizar("itens_orcamento", u.tenant_id, g["id"], {"etapa": g["etapa"]})
-        for tid, k, f, i in criar_tit:
+        for tid, k, nome, i in criar_tit:
             tx.criar("itens_orcamento", doc(ItemOrcamento(
-                id=tid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,
-                ordem=i, tipo="etapa", nivel=1, etapa=k, descricao=f)))
-        for iid, e, n, existe in criar_item:
+                id=tid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id, numero=str(ordem_da_etapa(k) + 1),
+                ordem=i, tipo="etapa", nivel=1, etapa=k, descricao=nome)))
+        for (iid, e, n, existe), k in zip(criar_item, etapa_estimada, strict=True):
             vu = round(e.valor_centavos * 1000 / e.quantidade_milesimos) if e.quantidade_milesimos else 0
-            campos = {"etapa": chave[e.fase], "descricao": e.descricao, "codigo": e.codigo, "fonte": "estimativa",
+            campos = {"etapa": k, "descricao": e.descricao, "codigo": e.codigo, "fonte": FONTE_ESTIMATIVA,
                       "unidade": e.unidade, "quantidade": e.quantidade_milesimos, "valor_unitario": vu,
                       "total": e.valor_centavos}
             if existe:
@@ -1802,24 +2019,25 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
                 tx.criar("itens_orcamento", doc(ItemOrcamento(
                     id=iid, tenant_id=u.tenant_id, obra_id=obra_id, versao_id=versao_id,
                     ordem=100 + ordem_da_fase(e.fase) * 20 + n, tipo="item", nivel=2, **campos)))
-        # cache de etapas da versão (Compras/apropriação leem dele) e total (cresce com as fases estimadas)
+        # cache de etapas da versão (Compras/apropriação leem dele). O total não muda: o estimado fica fora do orçado.
         tx.atualizar("versoes_orcamento", u.tenant_id, versao_id,
-                     {"lista_etapas": [{"etapa": chave[f], "descricao": f} for f in todas],
-                      "lista_topicos": nova_lista,
-                      "total": (v.get("total") or 0) + novos_estimados})
+                     {"lista_etapas": [{"etapa": k, "descricao": nome_da_etapa(k)} for k in todas],
+                      "lista_topicos": nova_lista, "padronizada": True})
+        nomes = [nome_da_etapa(k) for k in todas]
         evento(tx, u.tenant_id, "orcamento.organizado_fases", obra_id,
-                {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": todas})
-        return {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": todas}
+               {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": nomes})
+        return {"itens": len(itens_mud), "estimadas": len(estimadas), "fases": nomes}
 
     # Desfazer: volta a etapa dos itens reais, o nome dos títulos, o cache e o total; zera os itens estimados criados.
     receita = {"op": "restaurar_etapas", "obra_id": obra_id, "versao_id": versao_id,
-               "itens": [{"id": m["id"], "etapa": m["antes"], "topico_id": m["topico_antes"]} for m in itens_mud],
+               "itens": [{"id": m["id"], "etapa": m["antes"], "topico_id": m["topico_antes"],
+                          "grupo": m["grupo_antes"]} for m in itens_mud],
                "titulos": titulos_antes, "lista_etapas": v.get("lista_etapas"), "lista_topicos": lista_antes,
-               "total": v.get("total"),
+               "total": v.get("total"), "padronizada": bool(v.get("padronizada")),
                "zerar": [iid for (iid, e, n, existe) in criar_item if not existe]}
     ne = len(estimadas)
     return Operacao(obra_id=obra_id, aplicar=aplicar,
-                    texto=lambda d: (f"Previu a obra completa: {len(todas)} fases"
+                    texto=lambda d: (f"Previu a obra completa: {len(todas)} etapas"
                                      f"{f', {ne} estimadas' if ne else ''}"),
                     desfazer=lambda d: receita)
 
@@ -1835,13 +2053,14 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
     lista_atual = v.get("lista_etapas") if v else None  # a de agora, para o Refazer
     topicos_atual = v.get("lista_topicos") if v else None
     total_atual = v.get("total") if v else None
+    padronizada_atual = bool(v.get("padronizada")) if v else None
     zerar = [z for z in receita.get("zerar", []) if await tx.obter("itens_orcamento", u.tenant_id, z)]
 
     def aplicar() -> dict:
         for m in itens:
             # receita de antes dos tópicos do orçamento não tem `topico_id`: só a etapa volta
             tx.atualizar("itens_orcamento", u.tenant_id, m["id"],
-                         {"etapa": m["etapa"], **({"topico_id": m["topico_id"]} if "topico_id" in m else {})})
+                         {"etapa": m["etapa"], **{k: m[k] for k in ("topico_id", "grupo") if k in m}})
         for t in titulos:
             campos_t = {"etapa": t["etapa"], "descricao": t["descricao"]}
             if "ordem" in t:
@@ -1857,13 +2076,16 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
                 campos["lista_topicos"] = receita["lista_topicos"]
             if receita.get("total") is not None:
                 campos["total"] = receita["total"]
+            if receita.get("padronizada") is not None:
+                campos["padronizada"] = receita["padronizada"]
             if campos:
                 tx.atualizar("versoes_orcamento", u.tenant_id, versao_id, campos)
         return {"itens": len(itens)}
 
     inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": versao_id,
-               "itens": [{k: m[k] for k in ("id", "etapa", "topico_id") if k in m} for m in itens],
+               "itens": [{k: m[k] for k in ("id", "etapa", "topico_id", "grupo") if k in m} for m in itens],
                "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos],
-               "lista_etapas": lista_atual, "lista_topicos": topicos_atual, "total": total_atual}
+               "lista_etapas": lista_atual, "lista_topicos": topicos_atual, "total": total_atual,
+               "padronizada": padronizada_atual}
     return Operacao(obra_id=receita["obra_id"], aplicar=aplicar,
                     texto=lambda d: "Desfez a organização do orçamento em fases", desfazer=lambda d: inversa)

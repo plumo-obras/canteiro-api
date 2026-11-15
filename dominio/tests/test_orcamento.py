@@ -4,7 +4,13 @@ import pytest
 from canteiro_dominio.etapas import ativar_topico, montar_arvore
 from canteiro_dominio.gastos import gastos_no_orcamento
 from canteiro_dominio.modelos import StatusPedido
-from canteiro_dominio.orcamento import andamento_da_linha, numero_do_topico, recebido_da_linha, topicos_dos_itens
+from canteiro_dominio.orcamento import (
+    andamento_da_linha,
+    custo_da_venda,
+    numero_do_topico,
+    recebido_da_linha,
+    topicos_dos_itens,
+)
 from canteiro_dominio.regras import RegraViolada
 
 
@@ -126,3 +132,31 @@ def test_aditivo_sem_a_linha_de_nivel_2_cai_no_topico_herdado():
     assert {i: (t.etapa, t.nome) for i, t in r.do_item.items()} == {
         0: ("7", "Cerâmica tijolo"), 2: ("7", "Mão de obra extra")}
     assert topicos_dos_itens(aditivo).do_item.keys() == {2}
+
+
+def test_item_encaixado_numa_fase_cai_no_topico_da_etapa_da_planilha():
+    # "Mão de Obra" de duas etapas da planilha que caem na mesma fase: um tópico por etapa da planilha, não um só
+    itens = [
+        {"tipo": "etapa", "numero": "8", "nivel": 1, "etapa": "8", "descricao": "Esquadrias"},
+        {"tipo": "item", "numero": "11.1", "nivel": 2, "etapa": "8", "descricao": "Portas",
+         "grupo": "ESQUADRIA MADEIRA"},
+        {"tipo": "item", "numero": "11.6", "nivel": 2, "etapa": "8", "descricao": "Mão de Obra",
+         "grupo": "ESQUADRIA MADEIRA"},
+        {"tipo": "item", "numero": "12.5", "nivel": 2, "etapa": "8", "descricao": "Mão de Obra",
+         "grupo": "ESQUADRIA  METÁLICA"},
+        # sem grupo (a etapa da planilha já tinha o nome da fase): o tópico sai da numeração, como antes
+        {"tipo": "etapa", "numero": "4", "nivel": 1, "etapa": "4", "descricao": "Alvenaria"},
+        {"tipo": "item", "numero": "4.1", "nivel": 2, "etapa": "4", "descricao": "Bloco cerâmico"},
+    ]
+    r = topicos_dos_itens(itens)
+    assert [(t.etapa, t.nome) for t in r.topicos] == [
+        ("8", "ESQUADRIA MADEIRA"), ("8", "ESQUADRIA METÁLICA"), ("4", "Bloco cerâmico")]
+    assert [r.do_item[i].nome for i in (1, 2, 3)] == ["ESQUADRIA MADEIRA", "ESQUADRIA MADEIRA", "ESQUADRIA METÁLICA"]
+
+
+def test_custo_da_venda_tira_o_bdi():
+    assert custo_da_venda(122_91, 2291) == 100_00
+    assert custo_da_venda(100_00, 2500) == 80_00
+    assert custo_da_venda(-122_91, 2291) == -100_00      # supressão do aditivo: o mesmo número, com o sinal
+    assert custo_da_venda(100_00, 0) == 100_00           # sem BDI informado, o preço já é o custo
+    assert custo_da_venda(1, 2291) == 1                  # 0,81 centavo arredonda para 1

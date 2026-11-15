@@ -7,7 +7,7 @@ Regras de portabilidade (Mongo agora, Firestore depois):
 """
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -104,6 +104,11 @@ class VersaoOrcamento(Documento):
     lista_topicos: list[dict[str, str]] = Field(default_factory=list)
     edicoes: int = 0                       # linhas editadas à mão: aprovar confere que nada mudou no meio dela
     gerou_compras: bool = False            # aditivo que entrou com a obra aprovada e já mexeu em Compras
+    # "venda" = a planilha veio com o preço do cliente (com BDI): os itens guardam o custo (preço ÷ (1 + bdi)) e o
+    # preço de venda à parte. "custo" = a planilha já é custo (a de quem orça à mão, ou a do próprio software).
+    natureza: Literal["custo", "venda"] = "custo"
+    bdi: int = 0                           # o BDI usado para tirar o custo da venda (centésimos de %, 2291 = 22,91%)
+    padronizada: bool = False              # nas etapas da lista padrão (a importação encaixou cada linha)
 
 
 class ItemOrcamento(Documento):
@@ -125,6 +130,12 @@ class ItemOrcamento(Documento):
     total: Centavos = 0                    # o total da linha na planilha, quando ela tem: é o número do contrato
     linha: int = 0
     topico_id: str | None = None           # o tópico do orçamento em que o item conta (de `lista_topicos`)
+    # a etapa da planilha de onde o item veio ("ESQUADRIA MADEIRA"), quando ele foi encaixado numa etapa padrão de
+    # outro nome: é ela que vira o tópico dentro da etapa, para "Mão de obra" de etapas diferentes não se juntar
+    grupo: str = ""
+    # só na planilha de venda: o preço do cliente da linha; `valor_unitario`/`total` ficam com o custo
+    valor_unitario_venda: Centavos | None = None
+    total_venda: Centavos | None = None
 
 
 class CurvaABC(StrEnum):

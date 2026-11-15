@@ -51,10 +51,12 @@ def _fmt_pct(c: int) -> str:
 
 
 async def _etapas_orcadas(arm, tenant_id: str, obra_id: str, o=None) -> dict[str, tuple[str, int]]:
-    """{etapa: (descrição, orçado atual)} das versões vigentes; é a base dos pesos do cronograma e da medição. `o` = o
-    orçamento já lido por quem chama (a projeção de desembolso lê os dois e não precisa ler o orçamento duas vezes)."""
+    """{etapa: (descrição, orçado atual + estimado)} das versões vigentes; é a base dos pesos do cronograma e da
+    medição. O estimado (a fase que a previsão da obra completou) entra: o cronograma vê a obra inteira, mesmo onde a
+    pessoa ainda não orçou. `o` = o orçamento já lido por quem chama (a projeção de desembolso lê os dois e não precisa
+    ler o orçamento duas vezes)."""
     o = o or await orcamento_da_obra(arm, tenant_id, obra_id)
-    return {e.etapa: (e.descricao, e.atual) for e in o.etapas if e.etapa}
+    return {e.etapa: (e.descricao, e.atual + e.estimado) for e in o.etapas if e.etapa}
 
 
 def validar_cronograma(corpo: CronogramaCorpo, orcadas: dict) -> list[dict]:

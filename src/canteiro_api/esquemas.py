@@ -592,6 +592,12 @@ class ItemPrevia(BaseModel):
     etapa_origem: Literal["planilha", "nome", "codigo", "escolhida"] = "planilha"
     etapa_planilha: str = ""
     repetido_de: RepetidoDe | None = None
+    grupo: str = Field("", description=(
+        "na importação padronizada: a etapa da planilha de onde o item veio, quando ela não tem o nome da etapa "
+        "padrão; é o tópico do item dentro dela"))
+    valor_unitario_venda: int | None = Field(None, description="na planilha de venda: o preço do cliente (centavos); "
+                                                               "`valor_unitario` fica com o custo")
+    total_venda: int | None = Field(None, description="na planilha de venda: o total do cliente (centavos)")
 
 
 class Aviso(BaseModel):
@@ -603,6 +609,25 @@ class TotalEtapa(BaseModel):
     etapa: str
     descricao: str
     total: int
+
+
+class DestinoDoEncaixe(BaseModel):
+    etapa: str = Field(description="a chave da etapa padrão (\"alvenaria\")")
+    nome: str
+    total: int = Field(description="centavos dos itens desta etapa da planilha que foram para ela")
+    itens: int
+
+
+class EncaixeEtapa(BaseModel):
+    """Uma etapa da planilha e as etapas padrão para onde os itens dela foram, na importação padronizada."""
+    etapa_planilha: str = Field(description="a chave da etapa na planilha (\"7\"); é ela que vai em `destinos`")
+    descricao: str
+    destino: str = Field(description="a etapa padrão da maior parte do valor (a que a tela mostra para trocar)")
+    destino_nome: str
+    escolhida: bool = Field(False, description="a pessoa escolheu o destino da etapa inteira (em `destinos`)")
+    total: int
+    etapas: list[DestinoDoEncaixe] = Field(description="a etapa da planilha aberta pelas etapas padrão dos itens; "
+                                                       "mais de uma na etapa mista (\"ACABAMENTOS\")")
 
 
 class TopicoPrevia(BaseModel):
@@ -636,6 +661,14 @@ class PreviaVersao(BaseModel):
     numeracao: dict[str, str] = Field(default_factory=dict, description=(
         "no somar que reordena: {chave de etapa da prévia: número com que ela é gravada}, só das que mudam. A prévia "
         "segue com as chaves de antes (são elas que valem em `etapas_itens`); a tela mostra o número daqui."))
+    padronizada: bool = Field(False, description="as linhas foram encaixadas na lista padrão de etapas (`encaixe`)")
+    encaixe: list[EncaixeEtapa] = Field(default_factory=list, description=(
+        "na importação padronizada: cada etapa da planilha e as etapas padrão para onde os itens foram"))
+    etapas_disponiveis: list[EtapaRef] = Field(default_factory=list, description=(
+        "na importação padronizada: a lista padrão, para a pessoa trocar o destino"))
+    natureza: Literal["custo", "venda"] = "custo"
+    bdi: int = Field(0, description="na venda: o BDI usado para tirar o custo (centésimos de %)")
+    total_venda: int | None = Field(None, description="na venda: o total do cliente; `total` é o custo")
     versao_id: str | None = None
     registro_id: str | None = None
 
@@ -673,6 +706,10 @@ class TopicoOrcamento(_OrcadoRealizado):
 class EtapaOrcamento(_OrcadoRealizado):
     etapa: str
     descricao: str
+    estimado: int = Field(0, description=(
+        "serviços que a previsão da obra estimou (fonte \"estimativa\"), fora do orçado: o cronograma vê a obra "
+        "inteira, o orçado × realizado só o que a pessoa orçou"))
+    venda: int | None = Field(None, description="preço de venda da etapa, quando o orçamento veio da planilha de venda")
     topicos: list[TopicoOrcamento] = Field(default_factory=list, description=(
         "a etapa aberta por tópico: os do orçamento (mesmo sem nada lançado), os manuais que têm lançamento e \"Sem "
         "tópico\"; somados dão a etapa. Vazio quando a etapa não tem tópico nenhum"))
@@ -702,6 +739,8 @@ class TotaisOrcamento(_Andamento):
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
     n_itens: int
     n_etapas: int
+    estimado: int = Field(0, description="soma do `estimado` das etapas: fora do orçado")
+    venda: int | None = Field(None, description="preço de venda da obra (planilha de venda); null sem ela")
 
 
 class VersaoComRegistro(VersaoOrcamento):
