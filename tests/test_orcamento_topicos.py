@@ -172,8 +172,15 @@ async def test_organizar_em_fases_leva_os_topicos_junto_e_o_desfazer_volta(vila)
     obra = (await nova_obra(vila))["id"]
     await _importar(vila, obra)
     antes = await _arvore(vila, obra)
+
+    async def titulos():
+        return {x["id"]: (x["numero"], x["etapa"], x["descricao"])
+                for x in (await orcamento(vila, obra))["itens"] if x["tipo"] == "etapa"}
+
+    titulos_antes = await titulos()
     r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
     assert r.status_code == 200, r.text
+    assert await titulos() != titulos_antes
     a = await _arvore(vila, obra)
     validos = {t["id"]: chave for chave, e in a.items() for t in e["topicos"]}
     assert validos and all(t.startswith("orc-") for t in validos)
@@ -183,6 +190,8 @@ async def test_organizar_em_fases_leva_os_topicos_junto_e_o_desfazer_volta(vila)
             assert validos[x["topico_id"]] == x["etapa"], x
     await _desfazer(vila, r.json()["registro_id"])
     assert await _arvore(vila, obra) == antes
+    # o título volta com o número da planilha, não com o da etapa padrão
+    assert {k: t for k, t in (await titulos()).items() if k in titulos_antes} == titulos_antes
 
 
 # --- tópico na linha do pedido ---

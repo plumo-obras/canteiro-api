@@ -1966,8 +1966,8 @@ async def _preparar_organizar_fases(tx, u: UsuarioAtual, obra_id: str, versao_id
                   "grupo_antes": x.get("grupo", ""), "grupo_depois": grupo_novo[x["id"]]}
                  for x in itens if x["etapa"] != nova[x["id"]]
                  or topico_antes[x["id"]] != topico_novo[x["id"]] or x.get("grupo", "") != grupo_novo[x["id"]]]
-    titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0)}
-                     for t in titulos]
+    titulos_antes = [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"], "ordem": t.get("ordem", 0),
+                      "numero": t.get("numero", "")} for t in titulos]
     # reaproveita os títulos existentes para as etapas; cria os que faltarem (ids determinísticos, idempotente)
     das_fases = {(e["etapa"], e["descricao"]) for e in v.get("lista_etapas") or []}
     principais = [t for t in titulos if t.get("nivel", 1) == 1 or (t["etapa"], t["descricao"]) in das_fases]
@@ -2047,7 +2047,12 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
     o = await obra_do_tenant(tx, u.tenant_id, receita["obra_id"])
     recusar_se_desfazendo(o)
     itens = [m for m in receita.get("itens", []) if await tx.obter("itens_orcamento", u.tenant_id, m["id"])]
-    titulos = [t for t in receita.get("titulos", []) if await tx.obter("itens_orcamento", u.tenant_id, t["id"])]
+    titulos, titulos_agora = [], []
+    for t in receita.get("titulos", []):
+        if atual := await tx.obter("itens_orcamento", u.tenant_id, t["id"]):
+            titulos.append(t)
+            titulos_agora.append({"id": t["id"], "etapa": atual["etapa"], "descricao": atual["descricao"],
+                                  "ordem": atual.get("ordem", 0), "numero": atual.get("numero", "")})
     versao_id = receita.get("versao_id")
     v = await tx.obter("versoes_orcamento", u.tenant_id, versao_id) if versao_id else None
     lista_atual = v.get("lista_etapas") if v else None  # a de agora, para o Refazer
@@ -2063,8 +2068,7 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
                          {"etapa": m["etapa"], **{k: m[k] for k in ("topico_id", "grupo") if k in m}})
         for t in titulos:
             campos_t = {"etapa": t["etapa"], "descricao": t["descricao"]}
-            if "ordem" in t:
-                campos_t["ordem"] = t["ordem"]
+            campos_t.update({k: t[k] for k in ("ordem", "numero") if k in t})
             tx.atualizar("itens_orcamento", u.tenant_id, t["id"], campos_t)
         for z in zerar:  # os itens estimados que criamos somem (quantidade/valor zerados)
             tx.atualizar("itens_orcamento", u.tenant_id, z, {"quantidade": 0, "valor_unitario": 0, "total": 0})
@@ -2084,7 +2088,7 @@ async def preparar_restaurar_etapas(tx, u: UsuarioAtual, receita: dict) -> Opera
 
     inversa = {"op": "restaurar_etapas", "obra_id": receita["obra_id"], "versao_id": versao_id,
                "itens": [{k: m[k] for k in ("id", "etapa", "topico_id", "grupo") if k in m} for m in itens],
-               "titulos": [{"id": t["id"], "etapa": t["etapa"], "descricao": t["descricao"]} for t in titulos],
+               "titulos": titulos_agora,
                "lista_etapas": lista_atual, "lista_topicos": topicos_atual, "total": total_atual,
                "padronizada": padronizada_atual}
     return Operacao(obra_id=receita["obra_id"], aplicar=aplicar,
