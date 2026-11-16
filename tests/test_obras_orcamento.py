@@ -165,6 +165,18 @@ async def test_ler_xlsx_pula_a_capa_e_vai_para_a_aba_do_orcamento(vila):
     assert capa["planilha"] == "Capa" and capa["sugestao"]["nome"] is None
 
 
+async def test_preco_solto_ao_lado_do_total_e_o_unitario(vila):
+    # Cabeçalho das planilhas SINAPI de licitação: "PREÇO(R$)" é o unitário, porque o total tem coluna própria.
+    csv = ("ITEM;CÓDIGO;DESCRIÇÃO;UNIDADE;QUANT.;PREÇO(R$);PREÇO TOTAL (R$)\n"
+           "1.1.1;;Mestre de obras;H;1056,00;35,10;37065,60\n").encode()
+    s = (await ler(vila, csv, nome="sinapi.csv")).json()["sugestao"]
+    campos = ("item", "codigo", "nome", "unidade", "quantidade", "valor_unitario", "valor_total")
+    assert [s[c] for c in campos] == [0, 1, 2, 3, 4, 5, 6]
+    # Sem total ao lado, "Preço" pode ser qualquer um dos dois: fica sem palpite.
+    so_preco = (await ler(vila, "Descrição;Unidade;Quantidade;Preço\nCal;sc;30;18,50\n".encode(), nome="p.csv")).json()
+    assert so_preco["sugestao"]["valor_unitario"] is None
+
+
 async def test_ler_csv_com_titulo_e_formatos_recusados(vila):
     csv = ("Orçamento da obra\n\nDescrição;Unidade;Quantidade;Valor unitário;Estoque;Curva ABC\n"
            "Cal hidratada;sc;30;18,50;4;C\n").encode("cp1252")
