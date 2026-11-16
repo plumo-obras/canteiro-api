@@ -215,3 +215,24 @@ async def test_somar_nao_poe_a_linha_solta_da_planilha_no_grupo_do_contrato(vila
     orc = await orcamento(vila, o["id"])
     e1 = next(e for e in orc["etapas"] if e["etapa"] == "1")
     assert [(t["nome"], t["contratado"]) for t in e1["topicos"]] == [("Estacas", 110000), ("Sem tópico", 3000)]
+
+
+def test_data_base_e_banco_pelo_topo():
+    from canteiro_api.servicos.orcamento import _referencia_do_topo
+
+    topo = ["", "IFB", "Orçamento Sintético Global", "Sinapi não desonerado - Data referência técnica: 18/05/2023",
+            "OBRA: FECHAMENTO E MODERNIZAÇÃO DA QUADRA", "LOCAL : Avenida Monjolo, Chácara 22, Q. 300 - DF"]
+    assert _referencia_do_topo(topo) == ("2023-05", "SINAPI não desonerado")
+    assert _referencia_do_topo(["SICRO desonerado", "Mês de referência: março/2024"]) == ("2024-03", "SICRO desonerado")
+    # sem falar de referência, número com cara de mês não vira data-base
+    assert _referencia_do_topo(["Outros 12", "Rua das Flores 05/2023"]) == (None, None)
+
+
+async def test_ler_traz_a_referencia_do_topo(vila):
+    o = await nova_obra(vila)
+    csv = ("IFB\nSinapi não desonerado - Data referência técnica: 18/05/2023\n\n"
+           "ITEM;CÓDIGO;DESCRIÇÃO;UNIDADE;QUANT.;PREÇO TOTAL (R$)\n1.1.1;;Mestre de obras;H;1056,00;37065,60\n")
+    r = await vila.http.post(f"/obras/{o['id']}/orcamento/ler", headers=vila.h,
+                             files={"arquivo": ("sinapi.csv", csv.encode(), "text/csv")})
+    assert r.status_code == 200, r.text
+    assert (r.json()["data_base"], r.json()["banco"]) == ("2023-05", "SINAPI não desonerado")

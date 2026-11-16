@@ -216,6 +216,36 @@ def _data_base(titulos: list[str]) -> str | None:
     return None
 
 
+# Bancos de preço escritos no topo das planilhas ("Sinapi não desonerado - Data referência: 18/05/2023").
+_BANCOS = ("sinapi", "sicro", "seinfra", "orse", "setop", "emop", "sudecap", "cpos", "fde", "agetop", "sbc")
+# Linha do topo só vale se fala de preço de referência: "Avenida Monjolo, Chácara 22" não pode virar data-base, e
+# "outros 12" casaria com out/12.
+_FALA_DE_REFERENCIA = re.compile(r"\b(data|refer|base|tabela|preco|precos|mes)\w*|\b(" + "|".join(_BANCOS) + r")\b")
+
+
+def _topo(grade: list[list], i: int) -> list[str]:
+    """As linhas acima do cabeçalho, cada uma como um texto só (título, obra, local, "SINAPI 05/2023")."""
+    return [" ".join(t for t in (_texto(c) for c in row) if t) for row in grade[:i]]
+
+
+def _referencia_do_topo(linhas: list[str]) -> tuple[str | None, str | None]:
+    """(data-base "AAAA-MM", banco "SINAPI não desonerado") lidos do topo da planilha, onde as tabelas oficiais
+    escrevem de quando são os preços. Só linhas que falam de referência; a primeira data e o primeiro banco valem."""
+    data_base = banco = None
+    for linha in linhas:
+        n = unicodedata.normalize("NFD", linha).encode("ascii", "ignore").decode().lower()
+        if not _FALA_DE_REFERENCIA.search(n):
+            continue
+        data_base = data_base or _data_base([linha])
+        if banco is None and (m := re.search(r"\b(" + "|".join(_BANCOS) + r")\b", n)):
+            banco = m.group(1).upper()
+            if "nao desonerad" in n or "sem desonera" in n:
+                banco += " não desonerado"
+            elif "desonerad" in n:
+                banco += " desonerado"
+    return data_base, banco
+
+
 def _letra(j: int) -> str:
     """Índice 0-based → letra da coluna como o Excel mostra (0 → A, 26 → AA)."""
     t = ""
@@ -274,9 +304,12 @@ async def ler(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo:
                if titulos[j] or j in com_dado]
     sugestao = _sugerir(cabecalho)
     _sugerir_sem_titulo(sugestao, sem_titulo, amostra)
+    data_topo, banco = _referencia_do_topo(_topo(grade, i))
     return LeituraPlanilha(
         planilhas=nomes, planilha=aba, linha_cabecalho=i + 1, colunas=colunas, amostra=amostra,
-        sugestao=Mapeamento(planilha=aba, linha_cabecalho=i + 1, **sugestao), data_base=_data_base(titulos))
+        sugestao=Mapeamento(planilha=aba, linha_cabecalho=i + 1, **sugestao),
+        # o mês no título da coluna ("ORÇADO SET/23") é o mais perto do valor; senão, o que o topo da planilha diz
+        data_base=_data_base(titulos) or data_topo, banco=banco)
 
 
 # --- importação ---

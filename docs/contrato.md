@@ -165,7 +165,11 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
     de item ("7", "7.1"; na amostra o número aparece "7,1"), com algum ponto ou vírgula; `nome` = a de mais texto (pelo
     menos 12 letras na amostra). A pessoa confere na tela.
   - `data_base` = `"AAAA-MM"` achado num título de coluna ("ORÇADO SET/23" → `"2023-09"`, "preço 09/2023" →
-    `"2023-09"`), ou `null`. Só sugestão para a data-base da obra (`PATCH /obras/{id}`); nada é gravado na leitura.
+    `"2023-09"`) ou, sem isso, nas linhas acima do cabeçalho que falam de referência ("Sinapi não desonerado - Data
+    referência técnica: 18/05/2023" → `"2023-05"`), ou `null`. Só sugestão para a data-base da obra
+    (`PATCH /obras/{id}`); nada é gravado na leitura.
+  - `banco` = o banco de preços dito nessas linhas do topo, em maiúsculas, com a desoneração quando escrita
+    (`"SINAPI não desonerado"`, `"SICRO"`), ou `null`. Só para mostrar.
 - `Mapeamento` = `{planilha, linha_cabecalho, item, codigo, fonte, nome, unidade, quantidade, valor_unitario,
   valor_total, saldo, curva, complemento}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do
   item, "3.2.1") · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço ·
