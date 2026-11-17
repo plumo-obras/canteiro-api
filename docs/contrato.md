@@ -554,7 +554,8 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
   recebido_em ("AAAA-MM-DD" da última entrega, null se nada chegou), criado_em,
   linhas: [{insumo_id, nome, unidade, tipo, etapa, topico_id, quantidade, valor_unitario, total, recebida,
   falta_entregar}]}`. `topico_id` = o tópico da `etapa` na árvore da obra (`null` = só a etapa; pedido gravado antes
-  do campo também sai `null`). Nome, unidade e tipo são cópia do insumo no momento do pedido. `valor` = soma dos `total`;
+  do campo também sai `null`). Nome, unidade e tipo são cópia do insumo no momento do pedido; o pedido gravado antes
+  das linhas (um insumo só) não tem a cópia, e a leitura completa pelo insumo. `valor` = soma dos `total`;
   `recebida` soma as entregas; `recebimentos` = quantas entregas valem. `falta_entregar` (milésimos, calculado pela
   API com `regras.falta_na_linha`) = `quantidade − recebida`, nunca negativo, e 0 em pedido `conferido` (encerrado)
   ou `cancelado`; vem no `GET …/pedidos` e nas respostas de criar, avançar e editar. Pedido gravado antes das linhas
