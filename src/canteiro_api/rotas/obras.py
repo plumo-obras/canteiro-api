@@ -362,8 +362,9 @@ async def listar_pedidos(obra_id: str, status_: list[StatusPedido] | None = Quer
         filtros.append(Filtro("status", "==", sts[0]))
     elif sts:
         filtros.append(Filtro("status", "in", sts))
-    return await listar_pagina(arm, Consulta("pedidos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
-                               "criado_em", antes_de)
+    pagina = await listar_pagina(arm, Consulta("pedidos", u.tenant_id, filtros, [("criado_em", "desc")], limite=limite),
+                                 "criado_em", antes_de)
+    return await pedidos.com_nome_nas_linhas(arm, u.tenant_id, pagina)
 
 
 @r.post("/obras/{obra_id}/pedidos", response_model=PedidoSaida, status_code=status.HTTP_201_CREATED,
@@ -413,7 +414,7 @@ async def avancar(pedido_id: str, corpo: AvancarCorpo, u: UsuarioAtual = Depends
         pedido, entrada = executar_e_registrar(tx, u, op)
         return {**pedido, "registro_id": entrada["id"]}
 
-    return await arm.em_transacao(tx_corpo)
+    return (await pedidos.com_nome_nas_linhas(arm, u.tenant_id, [await arm.em_transacao(tx_corpo)]))[0]
 
 
 @r.patch("/pedidos/{pedido_id}", response_model=PedidoSaida, tags=["pedidos"])
@@ -429,7 +430,7 @@ async def editar_pedido(pedido_id: str, corpo: PedidoEdicao, u: UsuarioAtual = D
         pedido, entrada = executar_e_registrar(tx, u, op)
         return {**pedido, "registro_id": entrada["id"]}
 
-    return await arm.em_transacao(tx_corpo)
+    return (await pedidos.com_nome_nas_linhas(arm, u.tenant_id, [await arm.em_transacao(tx_corpo)]))[0]
 
 
 @r.post("/pedidos/{pedido_id}/recebimentos", response_model=RecebimentoSaida, status_code=status.HTTP_201_CREATED,
