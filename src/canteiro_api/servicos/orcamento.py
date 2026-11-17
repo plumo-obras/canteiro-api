@@ -118,23 +118,25 @@ def _grade_xlsx(conteudo: bytes, planilha: str | None) -> tuple[list[str], str, 
         nomes = list(wb.sheetnames)
         if planilha is not None and planilha not in nomes:
             raise ErroNegocio(f"A planilha não tem a aba '{planilha}'.")
-        candidatas = [planilha] if planilha is not None else nomes
-        reserva = None
-        for nome in candidatas:
-            linhas = []
-            for i, row in enumerate(wb[nome].iter_rows(values_only=True)):
-                if i >= MAX_LINHAS_LIDAS:
-                    break
-                linhas.append(list(row))
-            if planilha is not None:
-                return nomes, nome, linhas
-            # A 1ª aba costuma ser capa ou resumo: vale a 1ª em que se acha um cabeçalho de orçamento; sem nenhuma,
-            # a 1ª com conteúdo, e a pessoa troca a aba na tela.
-            if _cabecalho_conhecido(linhas) is not None:
-                return nomes, nome, linhas
-            if reserva is None and any(any(_texto(c) for c in r) for r in linhas):
-                reserva = (nome, linhas)
-        return (nomes, *reserva) if reserva else (nomes, nomes[0], [])
+
+        def linhas_de(nome: str, limite: int) -> list[list]:
+            return [list(row) for row in wb[nome].iter_rows(max_row=limite, values_only=True)]
+
+        if planilha is not None:
+            return nomes, planilha, linhas_de(planilha, MAX_LINHAS_LIDAS)
+        # Planilha de licitação traz várias abas com cabeçalho (capa, encargos, orçamento, composições): vale a de
+        # cabeçalho mais completo, não a 1ª que tem um. Os encargos têm só CÓDIGO e DESCRIÇÃO e vinham antes do
+        # orçamento. Empate fica com a 1ª. Sem cabeçalho em nenhuma, a 1ª com conteúdo, e a pessoa troca a aba na tela.
+        melhor, forca_melhor, reserva = None, 0, None
+        for nome in nomes:
+            topo = linhas_de(nome, LINHAS_CABECALHO)
+            forca = _forca_do_cabecalho(topo)
+            if forca > forca_melhor:
+                melhor, forca_melhor = nome, forca
+            if reserva is None and any(any(_texto(c) for c in r) for r in topo):
+                reserva = nome
+        escolhida = melhor or reserva
+        return (nomes, escolhida, linhas_de(escolhida, MAX_LINHAS_LIDAS)) if escolhida else (nomes, nomes[0], [])
     finally:
         wb.close()
 
@@ -170,6 +172,14 @@ def _cabecalho_conhecido(grade: list[list]) -> int | None:
         if len({c for t in textos for c in _categoria(t)[:1]}) >= 2:
             return i
     return None
+
+
+def _forca_do_cabecalho(grade: list[list]) -> int:
+    """Quantos tipos de coluna o cabeçalho conhecido reconhece (código, descrição, quantidade…); 0 sem cabeçalho."""
+    i = _cabecalho_conhecido(grade)
+    if i is None:
+        return 0
+    return len({c for t in (_texto(x) for x in grade[i]) for c in _categoria(t)[:1]})
 
 
 def _achar_cabecalho(grade: list[list]) -> int:

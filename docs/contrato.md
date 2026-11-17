@@ -158,6 +158,9 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   O cabeçalho é a 1ª das 30 primeiras linhas com pelo menos dois títulos conhecidos (pula título e dados da obra);
   `linha_cabecalho` é 1-based e os índices de coluna são 0-based. `amostra` = até 8 linhas de dados como texto
   (`37,9`, datas `dd/mm/aaaa`). CSV tem uma aba só, `"CSV"`.
+  Sem `planilha`, a aba é a de cabeçalho mais completo (mais tipos de coluna reconhecidos: item, código, descrição,
+  quantidade…); empate fica com a 1ª, e sem cabeçalho em nenhuma, a 1ª com conteúdo. A planilha de licitação traz
+  encargos e composições com cabeçalho também, e a aba do orçamento é a que reconhece mais colunas.
   - **Coluna sem título com dado** (nas 300 linhas abaixo do cabeçalho) também vem em `colunas`, com `titulo`
     `"Coluna C"` (a letra do Excel); coluna sem título e vazia não vem. As linhas de dados podem ser mais largas que o
     cabeçalho, e `amostra` acompanha. É a planilha de custo feita à mão, em que só os valores têm título.

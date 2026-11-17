@@ -165,6 +165,29 @@ async def test_ler_xlsx_pula_a_capa_e_vai_para_a_aba_do_orcamento(vila):
     assert capa["planilha"] == "Capa" and capa["sugestao"]["nome"] is None
 
 
+async def test_ler_xlsx_escolhe_a_aba_com_o_cabecalho_mais_completo(vila):
+    # Planilha de licitação: antes do orçamento vem a tabela de encargos (CÓDIGO e DESCRIÇÃO bastavam para ela
+    # ganhar), e depois vêm as composições (CPU), com quase o mesmo cabeçalho do orçamento.
+    wb = Workbook()
+    wb.active.title = "Capa"
+    wb.active["A1"] = "Construtora Exemplo"
+    encargos = wb.create_sheet("Encargos sociais")
+    for linha in (["Encargos sociais"], ["CÓDIGO", "DESCRIÇÃO", "SEM DESONERAÇÃO"], ["A1", "INSS", 0.2]):
+        encargos.append(linha)
+    orcamento = wb.create_sheet("Sintético")
+    for linha in (["Orçamento sintético"], [], CABECALHO, ["1.1", "Cimento", "sc", 10, 39, 390]):
+        orcamento.append(linha)
+    cpu = wb.create_sheet("CPU")
+    for linha in (["Composições"], ["Código", "Descrição", "Unid.", "Coef.", "Total"],
+                  ["88309", "Pedreiro", "h", 1, 30]):
+        cpu.append(linha)
+    b = io.BytesIO()
+    wb.save(b)
+    lp = (await ler(vila, b.getvalue())).json()
+    assert (lp["planilha"], lp["linha_cabecalho"]) == ("Sintético", 3)
+    assert lp["sugestao"]["quantidade"] == 3
+
+
 async def test_preco_solto_ao_lado_do_total_e_o_unitario(vila):
     # Cabeçalho das planilhas SINAPI de licitação: "PREÇO(R$)" é o unitário, porque o total tem coluna própria.
     csv = ("ITEM;CÓDIGO;DESCRIÇÃO;UNIDADE;QUANT.;PREÇO(R$);PREÇO TOTAL (R$)\n"
