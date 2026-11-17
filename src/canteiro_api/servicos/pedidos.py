@@ -344,3 +344,23 @@ async def preparar_desfazer_edicao(tx, u: UsuarioAtual, receita: dict) -> Operac
                     texto=lambda d: f"{verbo_desfazer(receita)}: {p['numero']} voltou à edição "
                                     f"{'desfeita' if receita.get('refazer') else 'anterior'}",
                     desfazer=lambda d: receita_inversa(receita))
+
+
+async def com_nome_nas_linhas(leitor, tenant_id: str, pedidos: list[dict]) -> list[dict]:
+    """O pedido gravado antes das linhas (um insumo só, como os do seed) não guarda a cópia do nome e da unidade do
+    insumo: na leitura eles vêm do insumo, como a entrega e o resumo já fazem. Sem isso a tela mostrava "· 3.200" sem
+    dizer o que é. Pedido com as linhas completas sai como está; nada é gravado."""
+    faltam = {x["insumo_id"] for p in pedidos for x in linhas_de(p) if not x.get("nome")}
+    if not faltam:
+        return pedidos
+    insumos = {i: (await leitor.obter("insumos", tenant_id, i)) or {} for i in faltam}
+
+    def completo(x: dict) -> dict:
+        if x.get("nome"):
+            return x
+        ins = insumos[x["insumo_id"]]
+        return {**x, "nome": ins.get("nome", ""), "unidade": x.get("unidade") or ins.get("unidade", ""),
+                "tipo": ins.get("tipo", x.get("tipo", TipoInsumo.MATERIAL.value))}
+
+    return [p if all(x.get("nome") for x in linhas_de(p)) else {**p, "linhas": [completo(x) for x in linhas_de(p)]}
+            for p in pedidos]

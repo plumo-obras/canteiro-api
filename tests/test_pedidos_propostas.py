@@ -35,6 +35,15 @@ async def test_listar_pedidos_por_status(vila):
     assert len((await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()) == 4
 
 
+async def test_pedido_de_antes_das_linhas_sai_com_nome_e_unidade_do_insumo(vila):
+    # O pedido gravado antes das linhas (um insumo só, como os do seed) não tem a cópia do nome: a listagem completa
+    # pelo insumo, senão a tela mostra "· 3.200" sem dizer o que é.
+    ps = {p["numero"]: p for p in (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()}
+    linha = ps["PED-0158"]["linhas"][0]
+    assert (linha["nome"], linha["unidade"]) == ("Aço CA-50 10 mm", "kg")
+    assert all(x["nome"] for p in ps.values() for x in p["linhas"])
+
+
 async def test_transicao_invalida_e_recusada(vila):
     r = await vila.http.post(f"/pedidos/{vila.pedido['PED-0167']}/avancar", headers=vila.h, json={"para": "conferido"})
     assert r.status_code == 422
