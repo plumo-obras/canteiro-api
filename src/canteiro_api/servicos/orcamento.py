@@ -115,7 +115,10 @@ def _grade_xlsx(conteudo: bytes, planilha: str | None) -> tuple[list[str], str, 
     except Exception:
         raise ErroNegocio("Não consegui abrir a planilha. Confira se o arquivo é um .xlsx válido.") from None
     try:
-        nomes = list(wb.sheetnames)
+        # Só abas de células: a de gráfico (a curva S, por exemplo) não tem linhas para ler, nem entra na lista da tela.
+        nomes = [ws.title for ws in wb.worksheets]
+        if not nomes:
+            raise ErroNegocio("A planilha não tem nenhuma aba com células, só gráficos.")
         if planilha is not None and planilha not in nomes:
             raise ErroNegocio(f"A planilha não tem a aba '{planilha}'.")
 

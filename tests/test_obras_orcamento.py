@@ -188,6 +188,38 @@ async def test_ler_xlsx_escolhe_a_aba_com_o_cabecalho_mais_completo(vila):
     assert lp["sugestao"]["quantidade"] == 3
 
 
+async def test_ler_xlsx_ignora_aba_de_grafico(vila):
+    # Aba de gráfico (a curva S, por exemplo) não tem células: ler todas as abas quebrava com 500. Ela não entra nem
+    # na escolha nem na lista de abas da tela, antes ou depois do orçamento.
+    from openpyxl.chart import BarChart, Reference
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Orçamento"
+    for linha in ([], CABECALHO, ["1.1", "Cimento", "sc", 10, 39, 390]):
+        ws.append(linha)
+    for nome, posicao in (("Curva S", None), ("Gráfico", 0)):
+        g = BarChart()
+        g.add_data(Reference(ws, min_col=6, min_row=2, max_row=3), titles_from_data=True)
+        wb.create_chartsheet(nome, posicao).add_chart(g)
+    b = io.BytesIO()
+    wb.save(b)
+    r = await ler(vila, b.getvalue())
+    assert r.status_code == 200, r.text
+    assert (r.json()["planilhas"], r.json()["planilha"], r.json()["linha_cabecalho"]) == (["Orçamento"], "Orçamento", 2)
+    assert (await ler(vila, b.getvalue(), planilha="Curva S")).status_code == 422
+
+    so_grafico = Workbook()
+    g = BarChart()
+    g.add_data(Reference(so_grafico.active, min_col=1, min_row=1, max_row=1))
+    so_grafico.create_chartsheet("Curva S").add_chart(g)
+    so_grafico.remove(so_grafico.active)
+    b = io.BytesIO()
+    so_grafico.save(b)
+    r = await ler(vila, b.getvalue())
+    assert r.status_code == 422 and "só gráficos" in r.json()["detail"]
+
+
 async def test_preco_solto_ao_lado_do_total_e_o_unitario(vila):
     # Cabeçalho das planilhas SINAPI de licitação: "PREÇO(R$)" é o unitário, porque o total tem coluna própria.
     csv = ("ITEM;CÓDIGO;DESCRIÇÃO;UNIDADE;QUANT.;PREÇO(R$);PREÇO TOTAL (R$)\n"
