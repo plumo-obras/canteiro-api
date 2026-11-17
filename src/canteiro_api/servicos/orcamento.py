@@ -180,6 +180,17 @@ def _achar_cabecalho(grade: list[list]) -> int:
     return next((j for j, row in enumerate(grade[:LINHAS_CABECALHO]) if any(_texto(c) for c in row)), 0)
 
 
+# Preço sem dizer se é unitário ou total ("PREÇO (R$)", "VALOR", "P.U."), depois de tirar a moeda. As planilhas
+# SINAPI de licitação trazem "PREÇO(R$)" ao lado de "PREÇO TOTAL (R$)": com o total em outra coluna, o preço solto só
+# pode ser o unitário. Sem total ao lado ele fica sem palpite, porque pode ser qualquer um dos dois.
+PRECO_SOLTO = {"preco", "valor", "custo", "pu", "p u", "vl", "vlr"}
+MOEDA = {"r", "rs", "brl", "reais"}
+
+
+def _preco_solto(titulo: str) -> bool:
+    return " ".join(p for p in _normal(titulo).split() if p not in MOEDA) in PRECO_SOLTO
+
+
 def _sugerir(cabecalho: list) -> dict[str, int | None]:
     sugestao: dict[str, int | None] = {c: None for c, _ in SINONIMOS}
     usadas: set[int] = set()
@@ -189,6 +200,9 @@ def _sugerir(cabecalho: list) -> dict[str, int | None]:
                 sugestao[categoria] = i
                 usadas.add(i)
                 break
+    if sugestao["valor_unitario"] is None and sugestao["valor_total"] is not None:
+        sugestao["valor_unitario"] = next(
+            (i for i, t in enumerate(cabecalho) if i not in usadas and _preco_solto(_texto(t))), None)
     return sugestao
 
 

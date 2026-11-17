@@ -173,9 +173,9 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 - `Mapeamento` = `{planilha, linha_cabecalho, item, codigo, fonte, nome, unidade, quantidade, valor_unitario,
   valor_total, saldo, curva, complemento}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do
   item, "3.2.1") · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço ·
-  un/und/unid/unidade · quant/qtd/qtde · "unit" (preço unitário) · total/orçado · saldo/estoque · curva/abc ·
-  complemento. `item`, `codigo`, `fonte` e `complemento` só valem no orçamento (EAP); `saldo` e `curva`, só na lista
-  de materiais.
+  un/und/unid/unidade · quant/qtd/qtde · "unit" (preço unitário; também o preço solto, "preço (R$)"/valor/custo/P.U.,
+  quando há outra coluna de total) · total/orçado · saldo/estoque · curva/abc · complemento. `item`, `codigo`, `fonte`
+  e `complemento` só valem no orçamento (EAP); `saldo` e `curva`, só na lista de materiais.
 - A planilha é uma de duas coisas, e a tela pergunta antes de importar: o **orçamento da obra** (serviços por etapa,
   `POST …/orcamento/versoes`, abaixo) ou uma **lista de materiais** (insumos para comprar e estocar, `…/importar`).
 
