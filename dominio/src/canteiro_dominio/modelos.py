@@ -7,7 +7,7 @@ Regras de portabilidade (Mongo agora, Firestore depois):
 """
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -99,8 +99,16 @@ class VersaoOrcamento(Documento):
     assinatura: str = ""                   # hash do arquivo + tipo: a mesma chave com outro arquivo é conflito
     # [{etapa, descricao}] das etapas desta versão: os selects de apropriação leem só as versões, sem os 500 itens
     lista_etapas: list[dict[str, str]] = Field(default_factory=list)
+    # [{etapa, id, nome}] dos tópicos que saem da numeração (nível 2): a árvore lê daqui, sem os itens. Documento
+    # gravado antes do campo não tem a chave, e a leitura monta pelos itens.
+    lista_topicos: list[dict[str, str]] = Field(default_factory=list)
     edicoes: int = 0                       # linhas editadas à mão: aprovar confere que nada mudou no meio dela
     gerou_compras: bool = False            # aditivo que entrou com a obra aprovada e já mexeu em Compras
+    # "venda" = a planilha veio com o preço do cliente (com BDI): os itens guardam o custo (preço ÷ (1 + bdi)) e o
+    # preço de venda à parte. "custo" = a planilha já é custo (a de quem orça à mão, ou a do próprio software).
+    natureza: Literal["custo", "venda"] = "custo"
+    bdi: int = 0                           # o BDI usado para tirar o custo da venda (centésimos de %, 2291 = 22,91%)
+    padronizada: bool = False              # nas etapas da lista padrão (a importação encaixou cada linha)
 
 
 class ItemOrcamento(Documento):
@@ -115,11 +123,19 @@ class ItemOrcamento(Documento):
     codigo: str = ""
     fonte: str = ""
     descricao: str
+    complemento: str = ""                  # medida, marca ou detalhe da linha ("0,60 x 2,10"), quando a planilha tem
     unidade: str = ""
     quantidade: Milesimos = 0              # negativa só em aditivo (supressão)
     valor_unitario: Centavos = 0
     total: Centavos = 0                    # o total da linha na planilha, quando ela tem: é o número do contrato
     linha: int = 0
+    topico_id: str | None = None           # o tópico do orçamento em que o item conta (de `lista_topicos`)
+    # a etapa da planilha de onde o item veio ("ESQUADRIA MADEIRA"), quando ele foi encaixado numa etapa padrão de
+    # outro nome: é ela que vira o tópico dentro da etapa, para "Mão de obra" de etapas diferentes não se juntar
+    grupo: str = ""
+    # só na planilha de venda: o preço do cliente da linha; `valor_unitario`/`total` ficam com o custo
+    valor_unitario_venda: Centavos | None = None
+    total_venda: Centavos | None = None
 
 
 class CurvaABC(StrEnum):
@@ -210,6 +226,7 @@ class LinhaPedido(BaseModel):
     unidade: str = ""
     tipo: TipoInsumo = TipoInsumo.MATERIAL
     etapa: str | None = None               # apropriação: etapa do orçamento que paga esta linha
+    topico_id: str | None = None           # tópico daquela etapa na árvore da obra (do orçamento ou manual), opcional
     quantidade: Milesimos
     valor_unitario: Centavos = 0
     total: Centavos = 0

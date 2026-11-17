@@ -116,11 +116,14 @@ def _chave_sem_numero(descricao: str) -> str:
 
 def nome_etapa_orcamento(etapa: str, descricao: str) -> str:
     """"18 INSTALAÇÃO ELÉTRICA - 220V": com o código na frente, como na planilha da construtora. Etapa sem número tem
-    o próprio nome como chave, e repetir não ajuda."""
+    o próprio nome como chave, e repetir não ajuda; a chave da lista padrão ("alvenaria", no orçamento padronizado)
+    também não é código de nada."""
     descricao = " ".join(descricao.split())
     if not descricao:
         return f"Etapa {etapa}"
-    return descricao if _chave_sem_numero(descricao) == etapa else f"{etapa} {descricao}"
+    if _chave_sem_numero(descricao) == etapa or etapa in CHAVES_FIXAS:
+        return descricao
+    return f"{etapa} {descricao}"
 
 
 def origem_da_etapa(chave: str | None, etapas_orcamento: Collection[str]) -> Origem:
@@ -148,10 +151,16 @@ def nome_da_etapa(chave: str | None, *, orcamento: dict[str, str], extras: dict[
     return _NOMES_FIXOS.get(chave) or f"Etapa {chave}"
 
 
+# Tópico da árvore: do orçamento (sai da numeração da planilha, nível 2; muda pela reimportação) ou manual (criado
+# na tela; renomeia e arquiva por `PATCH /topicos/{id}`).
+OrigemTopico = Literal["orcamento", "manual"]
+
+
 @dataclass(frozen=True)
 class TopicoNaArvore:
     id: str
     nome: str
+    origem: OrigemTopico = "manual"
 
 
 @dataclass(frozen=True)
@@ -165,12 +174,16 @@ class EtapaNaArvore:
 
 
 def montar_arvore(extras: Iterable[dict], topicos: Iterable[dict],
-                  orcamento: Sequence[tuple[str, str]] = ()) -> list[EtapaNaArvore]:
+                  orcamento: Sequence[tuple[str, str]] = (),
+                  topicos_orcamento: Iterable[dict] = ()) -> list[EtapaNaArvore]:
     """A árvore que a tela oferece e o leitor pode sugerir. `orcamento` = as etapas do orçamento vigente, na ordem
-    dele, como (código, descrição); vazio = obra sem orçamento.
+    dele, como (código, descrição); vazio = obra sem orçamento. `topicos_orcamento` = os tópicos que saem da numeração
+    do orçamento vigente, `{etapa, id, nome}` na ordem dele.
 
     Com orçamento: as etapas dele e depois as extras (pela criação). Sem: a lista padrão, com as extras antes de
-    "Outros". Os tópicos de cada etapa pela criação, presos à chave da etapa (no orçamento, o código).
+    "Outros". Em cada etapa, os tópicos do orçamento primeiro (na ordem da planilha) e depois os manuais (pela
+    criação), presos à chave da etapa (no orçamento, o código). Tópico manual que o orçamento reaproveitou (mesmo nome
+    na mesma etapa, mesmo ID) aparece uma vez só, como do orçamento.
 
     Arquivados ficam de fora. Gasto antigo que aponta para algo arquivado (ou para a lista padrão, numa obra que depois
     importou orçamento) continua valendo nas contas; só não recebe gasto novo.
@@ -180,8 +193,16 @@ def montar_arvore(extras: Iterable[dict], topicos: Iterable[dict],
         criado = d.get("criado_em")
         return (criado is not None, criado, d["id"])
 
+    base = [(c, d) for c, d in orcamento if c]
     por_etapa: dict[str, list[TopicoNaArvore]] = {}
-    for t in sorted((t for t in topicos if not t.get("arquivado")), key=ordem):
+    vistos: set[str] = set()
+    if base:
+        chaves = {c for c, _ in base}
+        for t in topicos_orcamento:
+            if t["etapa"] in chaves and t["id"] not in vistos:
+                vistos.add(t["id"])
+                por_etapa.setdefault(t["etapa"], []).append(TopicoNaArvore(t["id"], t["nome"], "orcamento"))
+    for t in sorted((t for t in topicos if not t.get("arquivado") and t["id"] not in vistos), key=ordem):
         por_etapa.setdefault(t["etapa"], []).append(TopicoNaArvore(t["id"], t["nome"]))
 
     def etapa(chave: str, nome: str, inclui: str, fixa: bool, origem: Origem) -> EtapaNaArvore:
@@ -189,7 +210,6 @@ def montar_arvore(extras: Iterable[dict], topicos: Iterable[dict],
 
     da_obra = [etapa(chave_extra(x["id"]), x["nome"], "", False, "extra")
                for x in sorted((x for x in extras if not x.get("arquivado")), key=ordem)]
-    base = [(c, d) for c, d in orcamento if c]
     if base:
         vistas: set[str] = set()
         arvore = []
@@ -233,12 +253,16 @@ def nomes_da_base(orcamento: Sequence[tuple[str, str]]) -> list[str]:
 
 
 def ativar_topico(extras: dict[str, str], topicos: dict[str, dict], *, id_: str | None, etapa: str,
-                  nome: str, chaves_base: Collection[str] | None = CHAVES_FIXAS) -> str:
-    """O mesmo para tópico: etapa ativa da obra (só para criar ou reativar), até 30 por etapa, nome único nela.
+                  nome: str, chaves_base: Collection[str] | None = CHAVES_FIXAS,
+                  topicos_orcamento: Iterable[dict] = ()) -> str:
+    """O mesmo para tópico manual: etapa ativa da obra (só para criar ou reativar), até 30 por etapa, nome único nela.
 
     `chaves_base` = as chaves da base da árvore (as do orçamento, ou a lista padrão). None = não confere a base, só
     as extras: é o caso do Desfazer, que roda dentro da transação e não pode consultar o orçamento (regra da porta);
-    reativar um tópico de etapa que saiu da árvore não faz mal, ele só não aparece."""
+    reativar um tópico de etapa que saiu da árvore não faz mal, ele só não aparece. `topicos_orcamento` = os tópicos
+    do orçamento vigente (`{etapa, id, nome}`, lidos fora da transação, como a base): contam no limite e no nome."""
+    do_orcamento = {t["id"]: t for t in topicos_orcamento if t["etapa"] == etapa and t["id"] != id_}
+    topicos = {**{i: t for i, t in topicos.items() if i not in do_orcamento}, **do_orcamento}
     ja_ativo = id_ in topicos
     if not ja_ativo:
         if etapa.startswith(PREFIXO_EXTRA):

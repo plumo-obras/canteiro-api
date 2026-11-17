@@ -49,7 +49,7 @@ async def test_com_orcamento_a_arvore_sao_as_etapas_dele_mais_as_extras(vila):
     t = await vila.http.post(f"/obras/{obra}/topicos", headers=vila.h, json={"etapa": "2", "nome": "Estacas"})
     assert t.status_code == 201, t.text
     a = (await vila.http.get(f"/obras/{obra}/arvore", headers=vila.h)).json()
-    assert a[1]["topicos"] == [{"id": t.json()["id"], "nome": "Estacas"}]
+    assert a[1]["topicos"] == [{"id": t.json()["id"], "nome": "Estacas", "origem": "manual"}]
     r = await vila.http.post(f"/obras/{obra}/topicos", headers=vila.h, json={"etapa": "eletrica", "nome": "Quadro"})
     assert r.status_code == 422
     # extra não repete o nome de etapa do orçamento (com ou sem o código); o da lista padrão aqui é livre
@@ -62,7 +62,7 @@ async def test_com_orcamento_a_arvore_sao_as_etapas_dele_mais_as_extras(vila):
     desfeito = await _desfazer(vila, t.json()["registro_id"])
     await _desfazer(vila, desfeito["id"])
     a = (await vila.http.get(f"/obras/{obra}/arvore", headers=vila.h)).json()
-    assert a[1]["topicos"] == [{"id": t.json()["id"], "nome": "Estacas"}]
+    assert a[1]["topicos"] == [{"id": t.json()["id"], "nome": "Estacas", "origem": "manual"}]
 
 
 async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
