@@ -306,3 +306,21 @@ async def test_situacao_com_varias_reordenacoes_e_dois_desfazer(vila):
     assert sit[p["versao_id"]] == sit[s.json()["versao_id"]] == "substituida"
     assert [sit[r["versao_id"]] for r in feitas] == [
         "desfeita", "substituida", "substituida", "substituida", "vigente", "desfeita"]
+
+
+async def test_somar_que_renumera_mostra_na_previa_os_ids_dos_topicos_gravados(vila):
+    o = await nova_obra(vila)
+    await _pranchas(vila, o["id"])
+    m = mapa(linha_cabecalho=1)
+    previa = (await versao(vila, o["id"], PLANILHA, m, somar="true")).json()
+    assert previa["numeracao"] == {"1": "3", "2": "1", "3": "2"}
+    # nas chaves de etapa da prévia...
+    assert [(t["etapa"], t["nome"]) for t in previa["topicos"]] == [
+        ("2", "Locação da obra"), ("2", "Tapume"), ("3", "Escavação manual")]
+    assert (await versao(vila, o["id"], PLANILHA, m, aplicar=True, somar="true")).status_code == 201
+    # ... e com os IDs com que os tópicos ficam na árvore, onde as etapas já são a 1 e a 2
+    arvore = (await vila.http.get(f"/obras/{o['id']}/arvore", headers=vila.h)).json()
+    gravados = {(e["chave"], t["nome"]): t["id"] for e in arvore for t in e["topicos"]}
+    esperados = [gravados[("1", "Locação da obra")], gravados[("1", "Tapume")], gravados[("2", "Escavação manual")]]
+    assert [t["id"] for t in previa["topicos"]] == esperados
+    assert [x["topico_id"] for x in previa["itens"] if x["tipo"] == "item"] == esperados

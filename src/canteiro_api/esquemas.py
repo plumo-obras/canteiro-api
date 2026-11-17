@@ -132,6 +132,8 @@ class LinhaPedidoCorpo(Entrada):
     total: int | None = Field(None, ge=0, description="centavos; padrão = quantidade × unitário. Informe quando o "
                                                       "total combinado não fecha com o unitário arredondado")
     etapa: str | None = Field(None, max_length=60)
+    topico_id: str | None = Field(None, max_length=80, description="tópico da `etapa` na árvore da obra (do orçamento "
+                                                                   "ou manual); opcional, e só com a etapa")
 
 
 class PedidoDados(Entrada):
@@ -150,7 +152,8 @@ class PedidoDados(Entrada):
         if isinstance(d, dict) and "linhas" not in d and "insumo_id" in d:
             d = dict(d)
             d["linhas"] = [{"insumo_id": d.pop("insumo_id"), "quantidade": d.pop("quantidade", 0),
-                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None)}]
+                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None),
+                            "topico_id": d.pop("topico_id", None)}]
         return d
 
     @field_validator("linhas")
@@ -452,6 +455,8 @@ class Mapeamento(Entrada):
     valor_total: int | None = Field(None, ge=0, le=500)
     saldo: int | None = Field(None, ge=0, le=500)
     curva: int | None = Field(None, ge=0, le=500)
+    # só no orçamento da obra (EAP): medida, marca ou detalhe da linha ("0,60 x 2,10", "Tigre")
+    complemento: int | None = Field(None, ge=0, le=500)
 
 
 class LeituraPlanilha(BaseModel):
@@ -461,6 +466,10 @@ class LeituraPlanilha(BaseModel):
     colunas: list[ColunaPlanilha]
     amostra: list[list[str]]
     sugestao: Mapeamento
+    data_base: str | None = Field(None, description='"AAAA-MM" achado num título de coluna ("ORÇADO SET/23") ou no '
+                                                    "topo da planilha; só sugestão para a data-base da obra")
+    banco: str | None = Field(None, description='banco de preços dito no topo da planilha ("SINAPI não desonerado"); '
+                                                "só para mostrar")
 
 
 class LinhaOrcamento(BaseModel):
@@ -577,12 +586,20 @@ class ItemPrevia(BaseModel):
     valor_unitario: int
     total: int
     linha: int
+    complemento: str = ""
+    topico_id: str | None = Field(None, description="o tópico do orçamento em que o item conta (`topicos` da prévia)")
     # no aditivo e no somar: de onde veio a etapa do item. "planilha" = como veio (ou etapa nova, com o número
     # trocado se ele já era de outra); "nome" = etapa de mesmo nome no orçamento; "codigo" = o mesmo código está nesta
     # etapa do contrato; "escolhida" = a pessoa apontou na prévia. `etapa_planilha` guarda a da planilha (para voltar).
     etapa_origem: Literal["planilha", "nome", "codigo", "escolhida"] = "planilha"
     etapa_planilha: str = ""
     repetido_de: RepetidoDe | None = None
+    grupo: str = Field("", description=(
+        "na importação padronizada: a etapa da planilha de onde o item veio, quando ela não tem o nome da etapa "
+        "padrão; é o tópico do item dentro dela"))
+    valor_unitario_venda: int | None = Field(None, description="na planilha de venda: o preço do cliente (centavos); "
+                                                               "`valor_unitario` fica com o custo")
+    total_venda: int | None = Field(None, description="na planilha de venda: o total do cliente (centavos)")
 
 
 class Aviso(BaseModel):
@@ -594,6 +611,32 @@ class TotalEtapa(BaseModel):
     etapa: str
     descricao: str
     total: int
+
+
+class DestinoDoEncaixe(BaseModel):
+    etapa: str = Field(description="a chave da etapa padrão (\"alvenaria\")")
+    nome: str
+    total: int = Field(description="centavos dos itens desta etapa da planilha que foram para ela")
+    itens: int
+
+
+class EncaixeEtapa(BaseModel):
+    """Uma etapa da planilha e as etapas padrão para onde os itens dela foram, na importação padronizada."""
+    etapa_planilha: str = Field(description="a chave da etapa na planilha (\"7\"); é ela que vai em `destinos`")
+    descricao: str
+    destino: str = Field(description="a etapa padrão da maior parte do valor (a que a tela mostra para trocar)")
+    destino_nome: str
+    escolhida: bool = Field(False, description="a pessoa escolheu o destino da etapa inteira (em `destinos`)")
+    total: int
+    etapas: list[DestinoDoEncaixe] = Field(description="a etapa da planilha aberta pelas etapas padrão dos itens; "
+                                                       "mais de uma na etapa mista (\"ACABAMENTOS\")")
+
+
+class TopicoPrevia(BaseModel):
+    etapa: str
+    id: str = Field(description="o ID com que o tópico fica na árvore (o de um tópico manual de mesmo nome, se há)")
+    nome: str
+    total: int = Field(description="soma dos itens do tópico (centavos)")
 
 
 class Substituida(BaseModel):
@@ -613,11 +656,21 @@ class PreviaVersao(BaseModel):
     n_itens: int
     n_etapas: int
     etapas: list[TotalEtapa]
+    topicos: list[TopicoPrevia] = Field(default_factory=list, description=(
+        "os tópicos que saem da numeração (nível 2), na ordem da planilha; com as chaves de etapa da prévia"))
     substitui: Substituida | None = None
     total_apos: int | None = Field(None, description="no somar: o orçamento depois de somar (o vigente + `total`)")
     numeracao: dict[str, str] = Field(default_factory=dict, description=(
         "no somar que reordena: {chave de etapa da prévia: número com que ela é gravada}, só das que mudam. A prévia "
         "segue com as chaves de antes (são elas que valem em `etapas_itens`); a tela mostra o número daqui."))
+    padronizada: bool = Field(False, description="as linhas foram encaixadas na lista padrão de etapas (`encaixe`)")
+    encaixe: list[EncaixeEtapa] = Field(default_factory=list, description=(
+        "na importação padronizada: cada etapa da planilha e as etapas padrão para onde os itens foram"))
+    etapas_disponiveis: list[EtapaRef] = Field(default_factory=list, description=(
+        "na importação padronizada: a lista padrão, para a pessoa trocar o destino"))
+    natureza: Literal["custo", "venda"] = "custo"
+    bdi: int = Field(0, description="na venda: o BDI usado para tirar o custo (centésimos de %)")
+    total_venda: int | None = Field(None, description="na venda: o total do cliente; `total` é o custo")
     versao_id: str | None = None
     registro_id: str | None = None
 
@@ -635,9 +688,7 @@ class _Andamento(BaseModel):
     realizado: int = 0
 
 
-class EtapaOrcamento(_Andamento):
-    etapa: str
-    descricao: str
+class _OrcadoRealizado(_Andamento):
     contratado: int
     aditivos: int
     atual: int
@@ -646,6 +697,24 @@ class EtapaOrcamento(_Andamento):
     estourou: bool = Field(False, description="comprometido passou do orçado atual")
     gastos_avulsos: int = Field(0, description="gastos confirmados por comprovante, sem pedido, nesta etapa; já "
                                                "somados no comprometido e no realizado")
+
+
+class TopicoOrcamento(_OrcadoRealizado):
+    topico_id: str | None = Field(description="null = o que entrou só na etapa, sem tópico (\"Sem tópico\")")
+    nome: str
+    origem: Literal["orcamento", "manual"] | None = Field(description="null no \"Sem tópico\"")
+
+
+class EtapaOrcamento(_OrcadoRealizado):
+    etapa: str
+    descricao: str
+    estimado: int = Field(0, description=(
+        "serviços que a previsão da obra estimou (fonte \"estimativa\"), fora do orçado: o cronograma vê a obra "
+        "inteira, o orçado × realizado só o que a pessoa orçou"))
+    venda: int | None = Field(None, description="preço de venda da etapa, quando o orçamento veio da planilha de venda")
+    topicos: list[TopicoOrcamento] = Field(default_factory=list, description=(
+        "a etapa aberta por tópico: os do orçamento (mesmo sem nada lançado), os manuais que têm lançamento e \"Sem "
+        "tópico\"; somados dão a etapa. Vazio quando a etapa não tem tópico nenhum"))
 
 
 class GastosNoOrcamentoSaida(BaseModel):
@@ -672,6 +741,8 @@ class TotaisOrcamento(_Andamento):
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
     n_itens: int
     n_etapas: int
+    estimado: int = Field(0, description="soma do `estimado` das etapas: fora do orçado")
+    venda: int | None = Field(None, description="preço de venda da obra (planilha de venda); null sem ela")
 
 
 class VersaoComRegistro(VersaoOrcamento):
@@ -1274,6 +1345,10 @@ class MedicaoSaida(BaseModel):
 class TopicoNaArvoreSaida(BaseModel):
     id: str
     nome: str
+    origem: Literal["orcamento", "manual"] = Field(
+        "manual", description="'orcamento' = a linha de nível 2 da planilha, ou a etapa da planilha no orçamento "
+                              "padronizado (não se renomeia nem se arquiva: muda com a reimportação); 'manual' = "
+                              "criado na tela")
 
 
 class EtapaNaArvoreSaida(BaseModel):

@@ -51,12 +51,14 @@ LINHAS_POR_TRANSACAO = 100
 # Sinônimos por "contém", sobre o título sem acento e sem pontuação. A ordem importa: unidade e quantidade primeiro,
 # e o preço unitário antes do total ("preço unitário total" não existe, mas "valor total" contém "valor").
 SINONIMOS: list[tuple[str, tuple[str, ...]]] = [
+    ("complemento", ("complemento",)),
     ("codigo", ("codigo", "cod")),
     ("fonte", ("fonte", "banco", "referencia")),
     ("unidade", ("unid", "und", "unidade")),
     ("quantidade", ("quant", "qtd", "qtde")),
     ("valor_unitario", ("unit",)),
-    ("valor_total", ("total",)),
+    # "ORÇADO SET/23": na planilha de custo feita à mão, o título do valor é o mês dos preços
+    ("valor_total", ("total", "orcado")),
     ("saldo", ("saldo", "estoque")),
     ("curva", ("curva", "abc")),
     ("nome", ("descricao", "discriminacao", "insumo", "material", "servico", "nome", "especificacao")),
@@ -204,6 +206,89 @@ def _sugerir(cabecalho: list) -> dict[str, int | None]:
     return sugestao
 
 
+_MESES = {m: i for i, m in enumerate(("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov",
+                                      "dez"), start=1)}
+_MES_ANO = re.compile(r"\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\s*(\d{4}|\d{2})\b")
+_MES_NUM = re.compile(r"\b(0?[1-9]|1[0-2])\s*/\s*(\d{4})\b")
+# na amostra a célula numérica 7.1 aparece como o brasileiro lê, "7,1"
+_NUMERO_ITEM = re.compile(r"^\d+([.,]\d+)*\.?$")
+# quantas linhas abaixo do cabeçalho se olham para achar coluna sem título com dado (a medida das portas pode
+# aparecer só lá embaixo)
+LINHAS_SEM_TITULO = 300
+
+
+def _data_base(titulos: list[str]) -> str | None:
+    """"ORÇADO SET/23" → "2023-09": na planilha de custo, o mês dos preços costuma estar no título da coluna do
+    valor. Só sugere; quem grava a data-base da obra é a pessoa."""
+    for t in titulos:
+        n = unicodedata.normalize("NFD", t).encode("ascii", "ignore").decode().lower()
+        if m := _MES_ANO.search(re.sub(r"[/.\-]", " ", n)):
+            ano = int(m.group(2)) + (2000 if len(m.group(2)) == 2 else 0)
+            return f"{ano:04d}-{_MESES[m.group(1)]:02d}"
+        if m := _MES_NUM.search(n):
+            return f"{int(m.group(2)):04d}-{int(m.group(1)):02d}"
+    return None
+
+
+# Bancos de preço escritos no topo das planilhas ("Sinapi não desonerado - Data referência: 18/05/2023").
+_BANCOS = ("sinapi", "sicro", "seinfra", "orse", "setop", "emop", "sudecap", "cpos", "fde", "agetop", "sbc")
+# Linha do topo só vale se fala de preço de referência: "Avenida Monjolo, Chácara 22" não pode virar data-base, e
+# "outros 12" casaria com out/12.
+_FALA_DE_REFERENCIA = re.compile(r"\b(data|refer|base|tabela|preco|precos|mes)\w*|\b(" + "|".join(_BANCOS) + r")\b")
+
+
+def _topo(grade: list[list], i: int) -> list[str]:
+    """As linhas acima do cabeçalho, cada uma como um texto só (título, obra, local, "SINAPI 05/2023")."""
+    return [" ".join(t for t in (_texto(c) for c in row) if t) for row in grade[:i]]
+
+
+def _referencia_do_topo(linhas: list[str]) -> tuple[str | None, str | None]:
+    """(data-base "AAAA-MM", banco "SINAPI não desonerado") lidos do topo da planilha, onde as tabelas oficiais
+    escrevem de quando são os preços. Só linhas que falam de referência; a primeira data e o primeiro banco valem."""
+    data_base = banco = None
+    for linha in linhas:
+        n = unicodedata.normalize("NFD", linha).encode("ascii", "ignore").decode().lower()
+        if not _FALA_DE_REFERENCIA.search(n):
+            continue
+        data_base = data_base or _data_base([linha])
+        if banco is None and (m := re.search(r"\b(" + "|".join(_BANCOS) + r")\b", n)):
+            banco = m.group(1).upper()
+            if "nao desonerad" in n or "sem desonera" in n:
+                banco += " não desonerado"
+            elif "desonerad" in n:
+                banco += " desonerado"
+    return data_base, banco
+
+
+def _letra(j: int) -> str:
+    """Índice 0-based → letra da coluna como o Excel mostra (0 → A, 26 → AA)."""
+    t = ""
+    j += 1
+    while j:
+        j, r = divmod(j - 1, 26)
+        t = chr(65 + r) + t
+    return t
+
+
+def _sugerir_sem_titulo(sugestao: dict[str, int | None], sem_titulo: list[int], amostra: list[list[str]]) -> None:
+    """Planilha feita à mão costuma ter o número e a descrição sem título nenhum (só os valores têm). Coluna só com
+    "7", "7.1" é o item; a de mais texto é a descrição. A pessoa confere na tela de qualquer jeito."""
+    def valores(j):
+        return [r[j] for r in amostra if j < len(r) and r[j]]
+    if sugestao.get("item") is None:
+        for j in sem_titulo:
+            v = valores(j)
+            if v and all(_NUMERO_ITEM.match(x) for x in v) and any("." in x or "," in x for x in v):
+                sugestao["item"] = j
+                break
+    if sugestao.get("nome") is None:
+        texto = {j: sum(len(x) for x in valores(j) if any(c.isalpha() for c in x))
+                 for j in sem_titulo if j != sugestao.get("item")}
+        melhor = max(texto, key=texto.get, default=None)
+        if melhor is not None and texto[melhor] >= 12:
+            sugestao["nome"] = melhor
+
+
 async def ler(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo: str,
               planilha: str | None) -> LeituraPlanilha:
     await obra_do_tenant(arm, u.tenant_id, obra_id)
@@ -212,7 +297,13 @@ async def ler(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo:
         raise ErroNegocio("A planilha está vazia.")
     i = _achar_cabecalho(grade)
     cabecalho = grade[i]
-    largura = len(cabecalho)
+    abaixo = grade[i + 1:i + 1 + LINHAS_SEM_TITULO]
+    # a linha de dados pode ser mais larga que o cabeçalho (coluna sem título à direita): só conta a coluna que tem
+    # dado, senão a célula vazia que o Excel guarda no fim da linha viraria coluna
+    com_dado = {j for row in abaixo for j, c in enumerate(row) if _texto(c)}
+    titulos_ = [_texto(c) for c in cabecalho]
+    largura = max([j + 1 for j, t in enumerate(titulos_) if t] + [j + 1 for j in com_dado] + [len(cabecalho)])
+    titulos = [titulos_[j] if j < len(titulos_) else "" for j in range(largura)]
     amostra = []
     for row in grade[i + 1:]:
         textos = [_texto(c) for c in row[:largura]] + [""] * max(0, largura - len(row))
@@ -220,10 +311,19 @@ async def ler(arm, u: UsuarioAtual, obra_id: str, conteudo: bytes, nome_arquivo:
             amostra.append(textos)
         if len(amostra) == 8:
             break
+    # coluna sem título mas com dado também aparece ("Coluna C"): senão a pessoa não consegue apontar o número e a
+    # descrição numa planilha em que só os valores têm cabeçalho
+    sem_titulo = [j for j in range(largura) if not titulos[j] and j in com_dado]
+    colunas = [ColunaPlanilha(indice=j, titulo=titulos[j] or f"Coluna {_letra(j)}") for j in range(largura)
+               if titulos[j] or j in com_dado]
+    sugestao = _sugerir(cabecalho)
+    _sugerir_sem_titulo(sugestao, sem_titulo, amostra)
+    data_topo, banco = _referencia_do_topo(_topo(grade, i))
     return LeituraPlanilha(
-        planilhas=nomes, planilha=aba, linha_cabecalho=i + 1,
-        colunas=[ColunaPlanilha(indice=j, titulo=_texto(t)) for j, t in enumerate(cabecalho) if _texto(t)],
-        amostra=amostra, sugestao=Mapeamento(planilha=aba, linha_cabecalho=i + 1, **_sugerir(cabecalho)))
+        planilhas=nomes, planilha=aba, linha_cabecalho=i + 1, colunas=colunas, amostra=amostra,
+        sugestao=Mapeamento(planilha=aba, linha_cabecalho=i + 1, **sugestao),
+        # o mês no título da coluna ("ORÇADO SET/23") é o mais perto do valor; senão, o que o topo da planilha diz
+        data_base=_data_base(titulos) or data_topo, banco=banco)
 
 
 # --- importação ---

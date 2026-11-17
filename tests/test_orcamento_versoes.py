@@ -106,8 +106,15 @@ async def test_erros_e_avisos(vila):
     p = (await versao(vila, o["id"], dupla, mapa(linha_cabecalho=1))).json()
     assert p["avisos"] == [{"linha": 3, "mensagem": "O código 92915 aparece em kg (linha 2) e em m² (linha 3): "
                                                     "uma das duas unidades está errada."}]
-    sem_col = await versao(vila, o["id"], CONTRATO, mapa(unidade=None))
-    assert sem_col.status_code == 422
+    sem_col = await versao(vila, o["id"], CONTRATO, mapa(nome=None))
+    assert sem_col.status_code == 422 and "descrição" in sem_col.json()["detail"]
+    sem_valor = await versao(vila, o["id"], CONTRATO, mapa(quantidade=None, valor_total=None))
+    assert sem_valor.status_code == 422 and "quantidade ou o valor total" in sem_valor.json()["detail"]
+    # sem a unidade a planilha ainda é lida (a de custo feita à mão não tem): as linhas com valor viram verba
+    sem_un = (await versao(vila, o["id"], CONTRATO, mapa(unidade=None))).json()
+    assert sem_un["avisos"][0]["linha"] == 0 and "verba" in sem_un["avisos"][0]["mensagem"]
+    assert {x["unidade"] for x in sem_un["itens"] if x["tipo"] == "item"} == {"vb"}
+    assert sem_un["total"] == 2107596
 
 
 async def test_contrato_aditivo_e_desfazer(vila):

@@ -25,7 +25,9 @@ def _plano(u: UsuarioAtual, obra_id: str, itens: list[dict], vigentes: list[dict
     # item que veio das pranchas é material; planilha de orçamento é de serviços
     material = {chave_do_nome(x["descricao"]) for x in itens if x["tipo"] == "item" and x["versao_id"] in do_projeto}
     existentes = {chave_do_nome(i["nome"]): i for i in insumos}
-    compras = [c for c in itens_para_compras(itens) if c.quantidade > 0]
+    # o serviço que a previsão da obra estimou não se compra: é chute até a pessoa orçar a fase
+    compras = [c for c in itens_para_compras([x for x in itens if x.get("fonte") != versoes.FONTE_ESTIMATIVA])
+               if c.quantidade > 0]
     divergentes = []
     for c in compras:
         atual = existentes.get(chave_do_nome(c.nome))

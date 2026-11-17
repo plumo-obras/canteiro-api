@@ -76,7 +76,8 @@ async def test_etapa_extra_e_topico_entram_na_arvore_com_desfazer(vila):
 
     a = (await vila.http.get(f"/obras/{obra}/arvore", headers=h)).json()
     assert [e["chave"] for e in a][-2:] == [extra["chave"], "outros"]
-    assert next(e for e in a if e["chave"] == "eletrica")["topicos"] == [{"id": topico["id"], "nome": "Quadro geral"}]
+    assert next(e for e in a if e["chave"] == "eletrica")["topicos"] == [{"id": topico["id"], "nome": "Quadro geral",
+                                                                               "origem": "manual"}]
 
     # nome repetido (sem diferenciar acento e maiúscula) e etapa que não existe
     assert (await vila.http.post(f"/obras/{obra}/etapas-extras", headers=h,

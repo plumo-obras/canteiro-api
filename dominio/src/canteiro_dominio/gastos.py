@@ -67,6 +67,8 @@ class GastosNoOrcamento:
     Nos totais da obra entram todos: é tudo dinheiro que saiu.
     """
     por_etapa: dict[str, int] = field(default_factory=dict)
+    # os mesmos de `por_etapa`, abertos por tópico: {etapa: {topico_id (None = sem tópico): valor}}
+    por_topico: dict[str, dict[str | None, int]] = field(default_factory=dict)
     fora_do_orcamento: int = 0
     na_lista_padrao: int = 0
     sem_etapa_do_orcamento: int = 0
@@ -96,6 +98,8 @@ def gastos_no_orcamento(gastos: Iterable[dict], etapas_orcamento: Collection[str
         origem = origem_da_etapa(g["etapa"], etapas_orcamento)
         if origem == "orcamento":
             r.por_etapa[g["etapa"]] = r.por_etapa.get(g["etapa"], 0) + g["valor"]
+            t = r.por_topico.setdefault(g["etapa"], {})
+            t[g.get("topico_id")] = t.get(g.get("topico_id"), 0) + g["valor"]
         elif origem == "extra":
             r.fora_do_orcamento += g["valor"]
         elif origem == "padrao":
