@@ -466,8 +466,10 @@ class LeituraPlanilha(BaseModel):
     colunas: list[ColunaPlanilha]
     amostra: list[list[str]]
     sugestao: Mapeamento
-    data_base: str | None = Field(None, description='"AAAA-MM" achado num título de coluna ("ORÇADO SET/23"); só '
-                                                    "sugestão para a data-base da obra")
+    data_base: str | None = Field(None, description='"AAAA-MM" achado num título de coluna ("ORÇADO SET/23") ou no '
+                                                    "topo da planilha; só sugestão para a data-base da obra")
+    banco: str | None = Field(None, description='banco de preços dito no topo da planilha ("SINAPI não desonerado"); '
+                                                "só para mostrar")
 
 
 class LinhaOrcamento(BaseModel):
