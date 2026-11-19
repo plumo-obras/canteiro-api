@@ -2,13 +2,13 @@
 
 É a planilha que o engenheiro manda ao dono na reta final ("previsões até o fim da obra"). Por etapa:
 
-- **O que falta** = orçado atual − realizado, nunca negativo. A projeção não inventa economia nem estouro por
+- **O que falta** = orçado atual − gasto, nunca negativo. A projeção não inventa economia nem estouro por
   tendência: etapa que já gastou mais que o orçado mostra o estouro que já houve, e o resto custa o orçamento. Material
   comprado antes de executar (o aço do mês que vem) é comum em obra, e a conta de "custo real + restante pelo
   orçamento" o leria como estouro.
-- **Quando sai:** com medição, o executado e ainda não pago (orçado × % medido − realizado) é dívida de agora e cai no
+- **Quando sai:** com medição, o executado e ainda não pago (orçado × % medido − gasto) é dívida de agora e cai no
   mês corrente; o resto segue a parte do cronograma que a medição ainda não consumiu, empurrada pelo atraso medido (o
-  mesmo do prazo projetado), e nada antes do mês corrente. Sem medição, o realizado faz o papel do avanço (o que se
+  mesmo do prazo projetado), e nada antes do mês corrente. Sem medição, o gasto faz o papel do avanço (o que se
   gastou conta como feito), e o que o cronograma previa para meses que já passaram cai no mês corrente.
 - Etapa fora do cronograma: o que falta dela fica em `sem_mes` (sabe-se quanto, não quando).
 
@@ -23,7 +23,7 @@ No teste com uma obra pública real (creche FNDE, pagamentos do TCE-RS, 4 pontos
 meses de 2 a 15 vezes o que saiu; o segundo errou bem menos (o mais perto: 545 mil previstos, 510 mil reais), e o
 término real ficou entre os dois em 3 dos 4 pontos (no 4º, 2 meses depois do "no ritmo").
 
-**Pago** = os gastos confirmados pelo mês do pagamento: é dinheiro que saiu da conta, e é o mesmo número do realizado.
+**Pago** = os gastos confirmados pelo mês do pagamento: é dinheiro que saiu da conta, e é o mesmo número do gasto.
 """
 import math
 from dataclasses import dataclass, field
@@ -41,7 +41,7 @@ class EtapaBase:
     etapa: str
     descricao: str
     atual: int                              # orçado atual (contrato + aditivos), centavos
-    realizado: int
+    gasto: int
     percentuais: list[int] = field(default_factory=list)   # o plano vigente; vazio = fora do cronograma
     executado: int | None = None            # % medido acumulado (centésimos); None = obra sem medição
 
@@ -106,7 +106,7 @@ def _no_calendario(valores: dict[int, int], intervalos: dict[int, tuple[Fraction
 
 
 def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_atual: str,
-             pago_por_mes: dict[str, int], previsto_por_mes: dict[str, int], realizado_total: int,
+             pago_por_mes: dict[str, int], previsto_por_mes: dict[str, int], gasto_total: int,
              mes_referencia: str | None = None, ritmo: int = CEM) -> DesembolsoObra:
     """A conta inteira, sem banco: entra o que a API já sabe (orçamento, cronograma, medição, gastos), sai a série.
     `ritmo` = % medido ÷ % previsto na última medição (centésimos; 10000 = no ritmo do plano)."""
@@ -121,13 +121,13 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
     restos = []
     cheio: dict[int, int] = {}                          # o que o plano previa por mês (centavos × CEM), obra toda
     for e in etapas:
-        falta = max(0, e.atual - e.realizado)
+        falta = max(0, e.atual - e.gasto)
         # sem medição, o gasto é o avanço; piso, para "quase tudo gasto" não arredondar para 100% e perder o mês
-        executado = e.executado if com_medicao else (min(CEM, e.realizado * CEM // e.atual) if e.atual else CEM)
+        executado = e.executado if com_medicao else (min(CEM, e.gasto * CEM // e.atual) if e.atual else CEM)
         executado = executado or 0
         devido = 0
         if com_medicao:
-            devido = min(falta, max(0, (e.atual * executado + CEM // 2) // CEM - e.realizado))
+            devido = min(falta, max(0, (e.atual * executado + CEM // 2) // CEM - e.gasto))
         resto = falta - devido
         devido_total += devido
         plano: dict[int, int] = {}
@@ -148,8 +148,7 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
             sem_mes += resto
         elif resto:
             restos.append((resto, plano))
-        linhas.append(EtapaDesembolso(etapa=e.etapa, descricao=e.descricao, atual=e.atual, gasto=e.realizado,
-                                      realizado=e.realizado,
+        linhas.append(EtapaDesembolso(etapa=e.etapa, descricao=e.descricao, atual=e.atual, gasto=e.gasto,
                                       executado_pct=executado, falta=falta, devido_agora=devido,
                                       sem_cronograma=fora))
     pelo_plano, no_ritmo = cenarios
@@ -188,13 +187,13 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
                            projetado_no_ritmo=no_ritmo.get(k, 0))
              for k in range(primeiro, ultimo + 1)]
     orcado = sum(e.atual for e in etapas)
-    custo_final = realizado_total + sum(x.falta for x in linhas)
+    custo_final = gasto_total + sum(x.falta for x in linhas)
     base = "medicao" if com_medicao else ("gastos" if ini is not None else "sem_cronograma")
     return DesembolsoObra(
         mes_atual=mes_atual, base=base, mes_referencia=mes_referencia, atraso_meses=desloca, ritmo_pct=ritmo,
         termino_projetado=cron._mes(fins[0]) if fins[0] is not None else None,
         termino_no_ritmo=cron._mes(fins[1]) if fins[1] is not None else None, meses=meses, etapas=linhas,
-        totais=TotaisDesembolso(orcado=orcado, gasto=realizado_total, realizado=realizado_total, pago=pago_total,
+        totais=TotaisDesembolso(orcado=orcado, gasto=gasto_total, pago=pago_total,
                                 falta=sum(pelo_plano.values()) + sem_mes, custo_final=custo_final,
                                 desvio=custo_final - orcado, sem_mes=sem_mes))
 
@@ -202,9 +201,9 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
 async def desembolso_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> DesembolsoObra:
     o = await versoes.orcamento_da_obra(arm, tenant_id, obra_id)
     c = await cron.cronograma_da_obra(arm, tenant_id, obra_id, orcamento=o)
-    realizado = {e.etapa: e.realizado for e in o.etapas if e.etapa}
+    gasto = {e.etapa: e.gasto for e in o.etapas if e.etapa}
     ref = c.prazo.mes_referencia
-    etapas = [EtapaBase(etapa=e.etapa, descricao=e.descricao, atual=e.atual, realizado=realizado.get(e.etapa, 0),
+    etapas = [EtapaBase(etapa=e.etapa, descricao=e.descricao, atual=e.atual, gasto=gasto.get(e.etapa, 0),
                         percentuais=e.percentuais if any(e.percentuais) else [],
                         executado=e.medido_acumulado if ref else None)
               for e in c.etapas]
@@ -215,4 +214,4 @@ async def desembolso_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> D
     ritmo = pct(p.pct_medido, p.pct_previsto_na_medicao) if ref and p.pct_previsto_na_medicao else CEM
     return projetar(etapas, inicio=c.inicio, atraso=p.atraso_meses or 0, mes_atual=hoje.isoformat()[:7],
                     pago_por_mes=pago, previsto_por_mes={m.mes: m.previsto for m in c.mensal},
-                    realizado_total=o.totais.realizado, mes_referencia=ref, ritmo=ritmo)
+                    gasto_total=o.totais.gasto, mes_referencia=ref, ritmo=ritmo)

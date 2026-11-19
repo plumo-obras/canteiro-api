@@ -1,5 +1,5 @@
 """Gastos × orçamento: com orçamento, a árvore de gasto são as etapas dele (+ extras) e o gasto avulso soma no
-realizado da etapa; gasto antigo da lista padrão vira "sem etapa do orçamento"
+gasto da etapa; gasto antigo da lista padrão vira "sem etapa do orçamento"
 e se reclassifica com Desfazer."""
 import secrets
 
@@ -62,7 +62,7 @@ async def test_com_orcamento_a_arvore_sao_as_etapas_dele_mais_as_extras(vila):
     assert a[1]["topicos"] == [{"id": t.json()["id"], "nome": "Estacas", "origem": "manual"}]
 
 
-async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
+async def test_gasto_soma_na_etapa_e_mexe_no_saldo(vila):
     obra = (await nova_obra(vila))["id"]
     await _contrato(vila, obra)
     antes = await orcamento(vila, obra)
@@ -71,26 +71,26 @@ async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
     g = await _gasto(vila, obra, etapa="2", valor=fund["atual"] + 100)
     depois = await orcamento(vila, obra)
     e = _etapa(depois, "2")
-    assert (e["realizado"], e["comprometido"], e["gastos_avulsos"]) == (fund["atual"] + 100,) * 3
+    assert e["gasto"] == fund["atual"] + 100 and not {"realizado", "comprometido", "cotando", "gastos_avulsos"} & set(e)
     assert (e["saldo"], e["estourou"]) == (-100, True)
-    assert _etapa(depois, "1")["realizado"] == 0
+    assert _etapa(depois, "1")["gasto"] == 0
     t = depois["totais"]
-    assert t["realizado"] == antes["totais"]["realizado"] + fund["atual"] + 100
+    assert t["gasto"] == antes["totais"]["gasto"] + fund["atual"] + 100
     assert t["saldo"] == antes["totais"]["saldo"] - fund["atual"] - 100
     assert t["gastos"] == {"total": fund["atual"] + 100, "nas_etapas": fund["atual"] + 100, "fora_do_orcamento": 0,
                            "na_lista_padrao": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0}
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
-    assert fin["realizado"] == t["realizado"] and fin["gastos"] == t["gastos"]
-    # placar: gasto + falta gastar fecham no orçado (o saldo não serve: desconta também o comprometido)
-    assert fin["realizado"] + fin["falta_gastar"] == t["atual"]
-    assert fin["realizado_pct"] == t["realizado"] * 10000 // t["atual"]
+    assert fin["gasto"] == t["gasto"] and fin["gastos"] == t["gastos"]
+    # placar: gasto + falta gastar fecham no orçado
+    assert fin["gasto"] + fin["falta_gastar"] == t["atual"]
+    assert fin["realizado_pct"] == t["gasto"] * 10000 // t["atual"]
     assert [x["etapa"] for x in fin["etapas_estouradas"]] == ["2"]
     r = await _resumo(vila, obra)
     assert (r["total"], r["tem_orcamento"], r["etapas"][0]["nome"], r["etapas"][0]["origem"]) == (
         fund["atual"] + 100, True, "2 FUNDAÇÕES", "orcamento")
-    # estornado sai do realizado
+    # estornado sai do gasto
     await _desfazer(vila, g["registro_id"])
-    assert _etapa(await orcamento(vila, obra), "2")["realizado"] == 0
+    assert _etapa(await orcamento(vila, obra), "2")["gasto"] == 0
 
 
 async def test_gasto_em_etapa_extra_fica_fora_do_orcamento(vila):
@@ -101,7 +101,7 @@ async def test_gasto_em_etapa_extra_fica_fora_do_orcamento(vila):
     await _gasto(vila, obra, etapa=extra["chave"], valor=5000)
     depois = await orcamento(vila, obra)
     assert depois["etapas"] == antes["etapas"]            # não engorda etapa nenhuma
-    assert depois["totais"]["realizado"] == antes["totais"]["realizado"] + 5000
+    assert depois["totais"]["gasto"] == antes["totais"]["gasto"] + 5000
     assert depois["totais"]["gastos"]["fora_do_orcamento"] == 5000
     r = await _resumo(vila, obra)
     assert (r["fora_do_orcamento"], r["etapas"][0]["origem"]) == (5000, "extra")
@@ -112,7 +112,7 @@ async def test_gasto_da_lista_padrao_vira_sem_etapa_do_orcamento_e_reclassifica_
     eletrica = await _gasto(vila, obra, etapa="eletrica", valor=35000)
     fundacao = await _gasto(vila, obra, etapa="fundacao", valor=12000)
     o = await orcamento(vila, obra)
-    assert o["totais"]["gastos"]["na_lista_padrao"] == 47000 and o["totais"]["realizado"] == 47000
+    assert o["totais"]["gastos"]["na_lista_padrao"] == 47000 and o["totais"]["gasto"] == 47000
     assert (await _resumo(vila, obra))["sem_etapa_do_orcamento"] == 0
 
     await _contrato(vila, obra)
@@ -124,8 +124,8 @@ async def test_gasto_da_lista_padrao_vira_sem_etapa_do_orcamento_e_reclassifica_
     lancados = (await vila.http.get(f"/obras/{obra}/gastos", headers=vila.h)).json()
     assert {g["etapa_origem"] for g in lancados} == {"sem_etapa_do_orcamento"}
     o = await orcamento(vila, obra)
-    assert o["totais"]["gastos"]["sem_etapa_do_orcamento"] == 47000 and o["totais"]["realizado"] == 47000
-    assert _etapa(o, "2")["realizado"] == 0
+    assert o["totais"]["gastos"]["sem_etapa_do_orcamento"] == 47000 and o["totais"]["gasto"] == 47000
+    assert _etapa(o, "2")["gasto"] == 0
 
     gid = fundacao["gasto"]["id"]
     r = await vila.http.patch(f"/gastos/{gid}", headers=vila.h, json={"etapa": "2"})
@@ -135,15 +135,15 @@ async def test_gasto_da_lista_padrao_vira_sem_etapa_do_orcamento_e_reclassifica_
     assert (await registro(vila, novo["registro_id"]))["texto"] == (
         "Mudou o gasto de R$ 120,00 (mão de obra do eletricista) de Fundação para 2 FUNDAÇÕES")
     o = await orcamento(vila, obra)
-    assert _etapa(o, "2")["realizado"] == 12000 and o["totais"]["gastos"]["sem_etapa_do_orcamento"] == 35000
-    assert o["totais"]["realizado"] == 47000
+    assert _etapa(o, "2")["gasto"] == 12000 and o["totais"]["gastos"]["sem_etapa_do_orcamento"] == 35000
+    assert o["totais"]["gasto"] == 47000
 
     # Desfazer volta para a etapa antiga (mesmo fora da árvore); Refazer leva de novo
     desfeito = await _desfazer(vila, novo["registro_id"])
     assert desfeito["texto"] == "Desfeito: o gasto de R$ 120,00 (mão de obra do eletricista) voltou para Fundação"
-    assert _etapa(await orcamento(vila, obra), "2")["realizado"] == 0
+    assert _etapa(await orcamento(vila, obra), "2")["gasto"] == 0
     await _desfazer(vila, desfeito["id"])
-    assert _etapa(await orcamento(vila, obra), "2")["realizado"] == 12000
+    assert _etapa(await orcamento(vila, obra), "2")["gasto"] == 12000
 
     # erros: fora da árvore, nada mudou, viewer, inexistente, gasto estornado
     url = f"/gastos/{eletrica['gasto']['id']}"
@@ -205,10 +205,9 @@ async def test_gasto_sem_etapa_conta_na_obra_e_se_define_depois(vila):
         (None, "Sem etapa", "a_definir", 70000)]
 
     t = (await orcamento(vila, obra))["totais"]
-    assert t["realizado"] - antes["realizado"] == 70000
-    assert t["comprometido"] - antes["comprometido"] == 70000
+    assert t["gasto"] - antes["gasto"] == 70000
     assert t["gastos"]["a_definir"] == 70000 and t["gastos"]["nas_etapas"] == 0
-    assert all(e["realizado"] == 0 for e in (await orcamento(vila, obra))["etapas"])
+    assert all(e["gasto"] == 0 for e in (await orcamento(vila, obra))["etapas"])
 
     # definir depois, com Desfazer que devolve o "sem etapa"
     d = await vila.http.patch(f"/gastos/{gasto_id}", headers=vila.h, json={"etapa": "2"})
@@ -252,10 +251,10 @@ async def test_gasto_ate_hoje_e_o_que_foi_pago_no_resumo_no_desembolso_e_na_aba(
     await _gasto(vila, obra, etapa="2", valor=5000)
     await _gasto(vila, obra, etapa="1", valor=35000)
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
-    assert (fin["pago"], fin["realizado"], fin["comprometido"], fin["cotando"]) == (40000, 40000, 40000, 0)
+    assert (fin["pago"], fin["gasto"]) == (40000, 40000) and "realizado" not in fin
     assert "entregue_a_pagar" not in fin
     des = (await vila.http.get(f"/obras/{obra}/desembolso", headers=vila.h)).json()["totais"]
-    assert (des["pago"], des["realizado"]) == (40000, 40000) and "entregue_sem_pagamento" not in des
+    assert (des["pago"], des["gasto"]) == (40000, 40000) and "entregue_sem_pagamento" not in des
     r = await _resumo(vila, obra)
     assert r["total"] == 40000 and "entregue_a_pagar" not in r
     assert {e["etapa"]: e["total"] for e in r["etapas"]} == {"1": 35000, "2": 5000}

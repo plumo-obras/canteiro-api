@@ -50,7 +50,7 @@ async def test_saldo_estouro_e_aditivo_vem_prontos_da_api(vila):
     por = {e["etapa"]: e for e in o["etapas"]}
     assert (por["1"]["atual"], por["1"]["saldo"], por["1"]["estourou"]) == (2352617, 2352617 - 2500000, True)
     assert (por["2"]["atual"], por["2"]["saldo"], por["2"]["estourou"]) == (1666661, 1666661 - 325000, False)
-    assert (por["2"]["cotando"], por["2"]["comprometido"], por["2"]["realizado"]) == (0, 325000, 325000)
+    assert por["2"]["gasto"] == 325000
     t = o["totais"]
     assert (t["saldo"], t["aditivos_pct"]) == (t["atual"] - 2825000, 9070)     # 90,70% do contrato
 
@@ -61,19 +61,20 @@ async def test_orcamento_vazio_nao_tem_percentual_de_aditivo(vila):
     assert (t["saldo"], t["aditivos_pct"]) == (0, None)
 
 
-async def test_gasto_sai_com_o_nome_novo_ao_lado_dos_antigos(vila):
-    """`gasto` é o nome que fica; `comprometido` e `realizado` (o mesmo número) e `cotando` (0) saem depois."""
+async def test_gasto_e_o_unico_nome_do_dinheiro_que_saiu(vila):
+    """Os nomes de quando havia compras (`cotando`, `comprometido`, `realizado`, `gastos_avulsos`) saíram."""
     obra = await _obra_com_orcamento(vila)
     await _gasto(vila, obra, valor=100000, etapa="1")
     await _gasto(vila, obra, valor=7000, etapa=None)
     o = (await vila.http.get(f"/obras/{obra}/orcamento", headers=vila.h)).json()
     e1 = next(e for e in o["etapas"] if e["etapa"] == "1")
-    assert (e1["gasto"], e1["comprometido"], e1["realizado"], e1["cotando"]) == (100000, 100000, 100000, 0)
-    assert all(t["gasto"] == t["realizado"] for t in e1["topicos"])
+    velhos = {"cotando", "comprometido", "realizado", "gastos_avulsos"}
+    assert e1["gasto"] == 100000 and not velhos & set(e1)
+    assert all(not velhos & set(t) for t in e1["topicos"])
     t = o["totais"]
-    assert (t["gasto"], t["realizado"], t["sem_etapa"]["gasto"]) == (107000, 107000, 7000)
+    assert (t["gasto"], t["sem_etapa"]) == (107000, {"gasto": 7000}) and not velhos & set(t)
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
     assert (fin["gasto"], fin["falta_gastar"], fin["pago"]) == (107000, t["atual"] - 107000, 107000)
     des = (await vila.http.get(f"/obras/{obra}/desembolso", headers=vila.h)).json()
-    assert des["totais"]["gasto"] == des["totais"]["realizado"] == 107000
+    assert des["totais"]["gasto"] == 107000 and "realizado" not in des["totais"]
     assert next(e for e in des["etapas"] if e["etapa"] == "1")["gasto"] == 100000

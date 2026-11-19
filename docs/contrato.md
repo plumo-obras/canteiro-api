@@ -288,7 +288,7 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   preço ÷ (1 + `bdi`) linha a linha (`canteiro_dominio.orcamento.custo_da_venda`, arredondado ao centavo). `bdi` vem do
   campo ou, sem ele, do BDI da obra; venda sem nenhum dos dois → 422 "Diga o BDI da planilha de venda…". A prévia traz
   `natureza`, `bdi` e `total_venda` (`total` é o custo); `natureza`/`bdi` entram na assinatura de idempotência. O
-  orçado × realizado é sempre custo contra custo.
+  orçado × gasto é sempre custo contra custo.
 - **Somar ao orçamento** (`somar=true`, antes de aprovar): completa o orçamento com outra planilha (o caso de quem
   levou as pranchas e agora traz a planilha), **sem aditivo**. Só com `tipo=contrato`, a obra em orçamento e um contrato
   vigente; senão 422 ("Somar vale para o orçamento, não para o aditivo." / "O orçamento já foi aprovado: para
@@ -364,8 +364,7 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   no orçamento nem na planilha → 422; vale a chave da prévia ou a original da planilha). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
   sem item some da versão.
 - **Orçado × gasto**: cada etapa, cada tópico e os totais trazem `gasto` (centavos) = os gastos confirmados. Os nomes
-  de quando havia compras vêm juntos, com o mesmo número, até os clientes lerem `gasto`: `comprometido` = `realizado`
-  = `gasto`, e `cotando` = 0. `totais.sem_etapa` = o gasto que conta na obra sem estar numa etapa do orçamento
+  de quando havia compras (`cotando`, `comprometido`, `realizado`, `gastos_avulsos`) saíram. `totais.sem_etapa` = o gasto que conta na obra sem estar numa etapa do orçamento
   (extra, a definir, lista padrão, etapa de versão desfeita; já somado nos totais). `atual` é o orçado da planilha como
   veio: na de **venda** (`natureza: "venda"`) já é o custo, e o preço do cliente vem à parte em `venda` (por etapa e em
   `totais`; `null` sem planilha de venda); na planilha de engenheiro importada como `custo` ele ainda é preço de
@@ -373,8 +372,8 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   (`fonte: "estimativa"`), **fora** de `contratado`/`atual`/`saldo`; a etapa só estimada aparece com `atual` 0. As
   etapas saem na ordem de `lista_etapas` das versões vigentes (contrato primeiro).
 - **Gastos no orçamento** (regra em `canteiro_dominio.gastos.gastos_no_orcamento`): todo gasto confirmado e não
-  estornado é dinheiro que saiu e soma, pelo `valor`, na etapa dele, mexendo no `saldo` e no `estourou`; cada etapa
-  traz `gastos_avulsos` (o mesmo número, nome de quando havia pedido). O gasto que era pagamento de pedido (`pedido_id`
+  estornado é dinheiro que saiu e soma, pelo `valor`, no `gasto` da etapa dele, mexendo no `saldo` e no `estourou`. O
+  gasto que era pagamento de pedido (`pedido_id`
   gravado antes de Compras sair) conta como qualquer outro. `totais.gastos` = `{total, nas_etapas, fora_do_orcamento,
   na_lista_padrao, sem_etapa_do_orcamento, a_definir}`, todos já somados nos totais: `fora_do_orcamento` = gastos nas
   **etapas extras** (não engordam etapa do orçamento); `sem_etapa_do_orcamento` = gastos numa chave que não é etapa
@@ -387,7 +386,7 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   que foi somado antes de aprovar (pranchas + planilha), não só a primeira importação. Sem aditivo de verdade, 0. É
   número neutro (não há limite legal: obra privada).
 - **Por tópico** (`etapas[].topicos`): cada etapa aberta em `[{topico_id, nome, origem, contratado, aditivos, atual,
-  gasto, cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
+  gasto, saldo, estourou}]`, com as mesmas contas da etapa. Entram, nesta
   ordem: os tópicos do orçamento da etapa (mesmo sem nada lançado; `contratado`/`aditivos` = a soma dos itens dele),
   os tópicos manuais que têm gasto na etapa (`origem: "manual"`, orçado 0), os de versão desligada
   que têm (`origem: "orcamento"`, orçado 0: continuam sem renomear nem arquivar) e
@@ -496,7 +495,7 @@ atual de cada etapa (contrato + aditivos vigentes).
   desembolso: o que já saiu por mês e o que ainda vai sair até o fim. Só leitura; a conta e o porquê de cada regra em
   `servicos/desembolso.py`.
   - `{mes_atual, base, mes_referencia, atraso_meses, ritmo_pct, termino_projetado, termino_no_ritmo, meses, etapas,
-    totais}`. `base` ∈ `medicao` (avanço = última medição) | `gastos` (sem medição: realizado ÷ orçado faz o papel do
+    totais}`. `base` ∈ `medicao` (avanço = última medição) | `gastos` (sem medição: gasto ÷ orçado faz o papel do
     avanço) | `sem_cronograma` (tudo em `totais.sem_mes`).
   - `meses`: `[{mes, pago, previsto, projetado, projetado_no_ritmo}]`, do primeiro mês com pagamento ou do início do
     cronograma até o último mês projetado. `pago` = gastos confirmados pelo mês do
@@ -504,12 +503,10 @@ atual de cada etapa (contrato + aditivos vigentes).
     (o resto do plano empurrado por `atraso_meses`, nada antes do mês corrente); `projetado_no_ritmo` = o mesmo
     esticado pelo ritmo medido (`ritmo_pct` = % medido ÷ % previsto na última medição, entre 1000 e 10000; 10000 sem
     medição, e aí os dois cenários são iguais). Os dois somam `totais.falta − totais.sem_mes`.
-  - `etapas`: `[{etapa, descricao, atual, gasto, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`
-    (`realizado` = `gasto`, até os clientes lerem `gasto`). `falta` =
-    orçado atual − realizado (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
-    executado pela medição e ainda não realizado, no mês corrente.
-  - `totais`: `{orcado, gasto, realizado, pago, falta, custo_final, desvio, sem_mes}`; `gasto` = `realizado` = `pago`
-    (os gastos confirmados); `custo_final` = realizado + Σ falta das etapas; `desvio` = custo_final − orçado (o estouro que já
+  - `etapas`: `[{etapa, descricao, atual, gasto, executado_pct, falta, devido_agora, sem_cronograma}]`. `falta` =
+    orçado atual − gasto (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
+    executado pela medição e ainda não gasto, no mês corrente.
+  - `totais`: `{orcado, gasto, pago, falta, custo_final, desvio, sem_mes}`; `gasto` = `pago` (os gastos confirmados); `custo_final` = gasto + Σ falta das etapas; `desvio` = custo_final − orçado (o estouro que já
     houve, e gasto fora do orçamento).
 
 ## Resumo de uma obra ("como está a obra?")
@@ -529,13 +526,12 @@ atual de cada etapa (contrato + aditivos vigentes).
     ou com situação diferente de `nao_comecou`, nunca "começa"); `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
-  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, gasto, cotando, comprometido,
-    realizado, saldo, falta_gastar, realizado_pct, pago, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os
+  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, gasto, saldo, falta_gastar,
+    realizado_pct, pago, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os
     totais de `GET …/orcamento`, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra: `falta_gastar` = orçado
     atual − gasto (nunca negativo; gasto + falta fecham no orçado) e `realizado_pct` = gasto ÷ orçado em centésimos
     de ponto (`null` sem orçado). `pago` = todo gasto confirmado e não estornado, o mesmo `totais.pago` do desembolso e
-    o mesmo número do `gasto`. `cotando` (0), `comprometido` e `realizado` (= `gasto`) ficam até os clientes lerem
-    `gasto`.
+    o mesmo número do `gasto`.
   - `pendencias`: `{propostas, titulos}` (até 5 títulos, as mais novas primeiro).
 
 ## Gastos da obra: comprovantes, leitura por IA e revisão
@@ -549,7 +545,7 @@ Só a confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e n�
 gasto são as **etapas do orçamento** (as mesmas de `GET …/etapas`, na ordem dele; chave = o código da etapa, como
 `"18"`, a mesma chave de `GET …/orcamento` e do cronograma) mais as **etapas extras** da
 obra. Obra **sem orçamento**: a **lista padrão** de 24 etapas (chave estável como `fundacao`, `eletrica`, `pessoal`)
-mais as extras antes de "Outros". O gasto soma no `realizado` da etapa do orçamento (ver "Gastos no orçamento"); o das extras fica "fora do orçamento". Gasto lançado na lista padrão antes de a obra importar o
+mais as extras antes de "Outros". O gasto soma no `gasto` da etapa do orçamento (ver "Gastos no orçamento"); o das extras fica "fora do orçamento". Gasto lançado na lista padrão antes de a obra importar o
 orçamento **continua contando** (nos totais) e aparece como **"sem etapa do orçamento"** até alguém reclassificar.
 
 `origem` (em `/arvore`, no resumo e nos lançados) diz de onde vem a etapa: `orcamento` · `padrao` (lista padrão, só em
@@ -623,7 +619,7 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
     `a_pagar`/`incerto` → aviso de que o documento não comprova pagamento. Leitura que falhou → o erro vem em `avisos`.
 - `POST /comprovantes/{id}/confirmar` (admin) `{valor, data_pagamento, favorecido, descricao, etapa, topico_id?,
   fornecedor_id?}` → `{gasto, comprovante, registro_id}` (201). Campo a mais (como o antigo `pedido_id`) → 422. `etapa: null` (obrigatório mandar o campo) é
-  o "ver depois": sem tópico, conta no realizado e no comprometido da obra e em nenhuma etapa (`a_definir` em
+  o "ver depois": sem tópico, conta no gasto da obra e em nenhuma etapa (`a_definir` em
   `totais.gastos` e em `GET …/gastos/resumo`, com uma linha `etapa: null`); escolhe-se a etapa depois com
   `PATCH /gastos/{id}`. Valor > 0 em centavos; data `AAAA-MM-DD`
   até hoje (fuso de São Paulo); favorecido e descrição obrigatórios; etapa da árvore de hoje (com orçamento, um código
@@ -650,7 +646,7 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   arquivados; as `sem_etapa_do_orcamento` vêm por último.
 - `PATCH /gastos/{gasto_id}` `{etapa, topico_id?}` (admin) → `Gasto + {etapa_nome, etapa_origem, registro_id}`. Muda a
   etapa (e o tópico; sem `topico_id` = sem tópico) de um gasto confirmado: é como o "sem etapa do orçamento" vai para
-  uma etapa do orçamento e passa a somar no realizado dela. Destino tem de estar na árvore de hoje e o tópico naquela
+  uma etapa do orçamento e passa a somar no gasto dela. Destino tem de estar na árvore de hoje e o tópico naquela
   etapa → 422; mesma etapa e tópico → 422 "Nada mudou."; gasto estornado → 409; não existe → 404; viewer → 403.
   Registro "Mudou o gasto de R$ 120,00 (descrição) de
   Fundação para 2 FUNDAÇÕES", desfazer `reclassificar_gasto`: volta para a etapa de antes (mesmo que ela não esteja

@@ -42,7 +42,7 @@ async def test_resumo_da_obra_com_cronograma(vila):
     assert antes["proximo_mes"] == "2026-01"
     assert [(e["etapa"], e["comeca"]) for e in antes["etapas_do_proximo_mes"]] == [("1", False)]
     f = s["financeiro"]
-    assert (f["tem_orcamento"], f["orcado_atual"], f["comprometido"]) == (True, 2107596, 0)
+    assert (f["tem_orcamento"], f["orcado_atual"], f["gasto"]) == (True, 2107596, 0)
 
 
 async def test_resumo_da_obra_sem_cronograma_nem_orcamento(vila):

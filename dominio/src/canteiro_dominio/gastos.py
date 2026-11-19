@@ -53,7 +53,7 @@ def gasto_conta(gasto: dict) -> bool:
 class GastosNoOrcamento:
     """Os gastos de uma obra, do jeito que entram no orçamento (centavos).
 
-    - `por_etapa`: os que estão numa etapa do orçamento vigente; somam no comprometido e no realizado dela (e mexem
+    - `por_etapa`: os que estão numa etapa do orçamento vigente; somam no gasto dela (e mexem
       no saldo e no estouro dela).
     - `fora_do_orcamento`: os das etapas extras da obra; dinheiro que saiu numa coisa que o orçamento não prevê. Não
       engordam etapa nenhuma, mas contam nos totais da obra.

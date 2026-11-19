@@ -122,7 +122,7 @@ def _etapas_estouradas(d: Dados) -> PontoHoje | None:
     if len(estouradas) == 1:
         e = estouradas[0]
         titulo = f"{e.descricao} passou do orçado em {fmt_reais(excesso)}."
-        detalhe = f"Gasto {fmt_reais(e.realizado)} de {fmt_reais(e.atual)} orçados."
+        detalhe = f"Gasto {fmt_reais(e.gasto)} de {fmt_reais(e.atual)} orçados."
     else:
         titulo = f"{len(estouradas)} etapas passaram do orçado."
         detalhe = f"{_lista([e.descricao for e in estouradas])}: {fmt_reais(excesso)} acima do orçado."
