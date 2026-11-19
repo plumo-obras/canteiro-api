@@ -24,8 +24,8 @@ documento**. Transação: leia tudo antes de escrever, ≤ 500 escritas. **Todo 
 documento. Quantidade em milésimos e dinheiro em centavos (inteiros); IDs UUIDv7 gerados por nós. Um mesmo conjunto de
 testes de contrato roda contra o adaptador em memória e o do Mongo (e, depois, o do Firestore).
 
-**Toda conta no domínio, nunca no modelo de IA.** Falta, saldo, transições: `canteiro_dominio.regras`. O agente cita a
-`Conta` devolvida pela API.
+**Toda conta no domínio, nunca no modelo de IA.** Gasto, saldo, situação da etapa: `canteiro_dominio`. O agente cita o
+número devolvido pela API.
 
 **O agente só propõe.** Escrita do agente = `POST /propostas`. Só a aprovação de uma pessoa executa, e toda execução gera
 `EntradaRegistro` com `desfazer`. Não crie caminho de escrita do agente que pule isso.

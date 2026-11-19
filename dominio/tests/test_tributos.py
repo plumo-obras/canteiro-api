@@ -18,7 +18,7 @@ GASTOS = [
     {"valor": 500_000, "natureza_fiscal": "mao_de_obra_nf", "data_pagamento": "2026-10-05"},   # sem o CNO: não abate
     {"valor": 1_000_000, "natureza_fiscal": "concreto_usinado", "data_pagamento": "2026-09-01"},
     {"valor": 1_000_000, "natureza_fiscal": "mao_de_obra_sem_nf", "data_pagamento": "2026-09-01"},
-    {"valor": 3_000_000, "pedido_id": "p1", "data_pagamento": "2026-09-01"},                    # material do pedido
+    {"valor": 3_000_000, "natureza_fiscal": "material", "data_pagamento": "2026-09-01"},
     {"valor": 9_000_000, "natureza_fiscal": "folha", "estornado": True, "data_pagamento": "2026-09-01"},
     {"valor": 700_000, "data_pagamento": "2026-09-01"},                                        # a classificar
 ]
@@ -180,8 +180,7 @@ def test_fator_social_vale_para_toda_obra_de_pf():
 
 
 def test_natureza_padrao():
-    assert natureza_padrao({"pedido_id": "x"}) == "material"
-    assert natureza_padrao({"natureza_fiscal": "folha", "pedido_id": "x"}) == "folha"
+    assert natureza_padrao({"natureza_fiscal": "folha"}) == "folha"
     assert natureza_padrao({}) is None
     assert {"mao_de_obra_nf", "gps", "autonomo_mei"} <= set(NATUREZAS)
 

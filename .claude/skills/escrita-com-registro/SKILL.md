@@ -20,7 +20,7 @@ para desfazer. O agente nunca grava: ele cria proposta, e só a aprovação de u
 ## Formato de uma operação
 
 1. Fora da transação: valide o corpo, faça as **consultas** (a transação só lê por ID) e confira a obra com
-   `obra_do_tenant` / `insumo_da_obra`.
+   `obra_do_tenant`.
 2. Dentro de `arm.em_transacao(corpo_tx)`: `preparar_*` **só lê** (`tx.obter`) e devolve `Operacao`; `aplicar()` **só
    grava**. Nada de ler depois de escrever (`EscritaAntesDaLeitura`).
 3. `executar_e_registrar(tx, u, op, origem=..., proposta_id=..., registro_id=...)` grava o resultado e o registro.
@@ -33,13 +33,13 @@ para desfazer. O agente nunca grava: ele cria proposta, e só a aprovação de u
 - Escreva `preparar_<inversa>(tx, u, receita) -> Operacao` e registre em `_DESFAZER` (`servicos/propostas.py`).
 - A inversa **confere que nada mudou depois** (ex.: `fornecedores.preparar_desfazer_edicao` compara `depois` e dá
   `Conflito`) e devolve, ela também, uma receita (`receita_inversa`) — assim Refazer funciona.
-- Estoque e dinheiro são livro-razão: desfazer é **estorno** (movimento/gasto inverso), não apagar documento.
+- Dinheiro é livro-razão: desfazer é **estorno** (o gasto fica, `estornado`), não apagar documento.
 - Sem desfazer só com motivo escrito no código (ex.: troca de senha e chave da Anthropic: `desfazer=None`, comentado).
 
 ## Idempotência
 
 - Escrita repetível recebe `chave_idempotencia` e vira **ID derivado** (`id_derivado(tenant_id, "<tipo>", chave)` em
-  `servicos/estoque.py`); repetir cai em `ConflitoDeId` ou no documento existente, e devolve o mesmo resultado.
+  `nucleo.py`); repetir cai em `ConflitoDeId` ou no documento existente, e devolve o mesmo resultado.
 - Propostas: mesma chave = mesma proposta (200, `ja_existia: true`); chave igual com dados diferentes = 409; proposta
   igual pendente travada por `propostas_pendentes/{id_trava(...)}`. O agente manda `"{sessao_id}:{tool_use_id}"`.
 

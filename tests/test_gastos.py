@@ -306,17 +306,14 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
     assert conf["gasto"]["favorecido"] == "João da Silva" and conf["comprovante"]["status"] == "confirmado"
 
     resumo = (await vila.http.get(f"/obras/{obra}/gastos/resumo", headers=h)).json()
-    assert resumo == {"total": 35000, "pagamentos_de_pedidos": 0, "a_revisar": 0, "tem_orcamento": False,
-                      "fora_do_orcamento": 0, "fora_do_orcado": 0, "sem_etapa_do_orcamento": 0, "a_definir": 0,
-                      "entregue_a_pagar": 0, "etapas": [
+    assert resumo == {"total": 35000, "a_revisar": 0, "tem_orcamento": False, "fora_do_orcamento": 0,
+                      "sem_etapa_do_orcamento": 0, "a_definir": 0, "etapas": [
         {"etapa": "eletrica", "nome": "Instalações elétricas", "origem": "padrao", "total": 35000,
-         "entregue_a_pagar": 0, "fora_do_orcado": 0,
          "topicos": [{"topico_id": t["id"], "nome": "Quadro", "total": 35000}]}]}
     gastos = (await vila.http.get(f"/obras/{obra}/gastos?etapa=eletrica", headers=h)).json()
-    # sem orçamento não há o que ficar de fora dele
-    assert [(g["id"], g["etapa_nome"], g["etapa_origem"], g["fora_do_orcado"]) for g in gastos] == [
-        (conf["gasto"]["id"], "Instalações elétricas", "padrao", False)]
-    assert conf["gasto"]["fora_do_orcado"] is False
+    assert [(g["id"], g["etapa_nome"], g["etapa_origem"]) for g in gastos] == [
+        (conf["gasto"]["id"], "Instalações elétricas", "padrao")]
+    assert "fora_do_orcado" not in conf["gasto"] and "pedido_id" not in conf["gasto"]
     entrada = next(e for e in (await vila.http.get(f"/registro?obra_id={obra}", headers=h)).json()
                    if e["id"] == conf["registro_id"])
     assert entrada["texto"] == ("Gasto de R$ 350,00 em Instalações elétricas › Quadro: mão de obra do eletricista "
@@ -335,60 +332,12 @@ async def test_confirmar_cria_gasto_que_soma_na_etapa_e_desfazer_volta_para_a_fi
     assert r.status_code == 201, r.text
 
 
-async def _pago(vila, pedido_id):
-    pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()
-    return next(p for p in pedidos if p["id"] == pedido_id)
-
-
-async def test_gasto_de_pedido_nao_soma_no_realizado_e_marca_o_pedido(vila):
-    h = vila.h
-    pedido_id = vila.pedido["PED-0158"]       # aço em trânsito (semeado)
-    c = (await _enviar(vila)).json()
-    r = await vila.http.post(f"/comprovantes/{c['id']}/confirmar", headers=h,
-                             json=_confirmacao(etapa="estrutura", pedido_id=pedido_id))
-    assert r.status_code == 201, r.text
-    resumo = (await vila.http.get(f"/obras/{vila.obra}/gastos/resumo", headers=h)).json()
-    assert (resumo["total"], resumo["pagamentos_de_pedidos"]) == (0, 35000)
-    assert (await _pago(vila, pedido_id))["pago"] == 35000
-
-    # segundo pagamento do mesmo pedido; o estorno do primeiro devolve só o valor dele
-    c2 = (await _enviar(vila)).json()
-    r2 = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=h,
-                              json=_confirmacao(valor=12000, etapa="estrutura", pedido_id=pedido_id))
-    assert r2.status_code == 201, r2.text
-    assert (await _pago(vila, pedido_id))["pago"] == 47000
-    await _desfazer(vila, r.json()["registro_id"])
-    assert (await _pago(vila, pedido_id))["pago"] == 12000
-    await _desfazer(vila, r2.json()["registro_id"])
-    assert (await _pago(vila, pedido_id))["pago"] == 0
-
-
-async def test_pago_nao_passa_do_valor_do_pedido(vila):
-    pedido = await _pago(vila, vila.pedido["PED-0158"])
-    c = (await _enviar(vila)).json()
-    url = f"/comprovantes/{c['id']}/confirmar"
-    r = await vila.http.post(url, headers=vila.h,
-                             json=_confirmacao(valor=pedido["valor"] + 1, etapa="estrutura", pedido_id=pedido["id"]))
-    assert r.status_code == 409 and "passaria do valor do pedido" in r.json()["detail"], r.text
-    assert (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["status"] == "a_revisar"
-    # o valor exato fecha o pedido; mais um centavo, em outro comprovante, não entra
-    r = await vila.http.post(url, headers=vila.h,
-                             json=_confirmacao(valor=pedido["valor"], etapa="estrutura", pedido_id=pedido["id"]))
-    assert r.status_code == 201, r.text
-    c2 = (await _enviar(vila)).json()
-    r = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=vila.h,
-                             json=_confirmacao(valor=1, etapa="estrutura", pedido_id=pedido["id"]))
-    assert r.status_code == 409
-    # sem o pedido, o mesmo gasto entra como avulso
-    r = await vila.http.post(f"/comprovantes/{c2['id']}/confirmar", headers=vila.h, json=_confirmacao(valor=1))
-    assert r.status_code == 201, r.text
-
-
-async def test_pedido_em_cotacao_nao_recebe_pagamento(vila):
+async def test_confirmar_nao_aceita_mais_pedido(vila):
     c = (await _enviar(vila)).json()
     r = await vila.http.post(f"/comprovantes/{c['id']}/confirmar", headers=vila.h,
-                             json=_confirmacao(pedido_id=vila.pedido["PED-0167"]))
-    assert r.status_code == 422 and "em cotação" in r.json()["detail"]
+                             json=_confirmacao(pedido_id="p1"))
+    assert r.status_code == 422, r.text
+    assert (await vila.http.get(f"/comprovantes/{c['id']}", headers=vila.h)).json()["status"] == "a_revisar"
 
 
 async def test_confirmacao_invalida_deixa_na_fila(vila):

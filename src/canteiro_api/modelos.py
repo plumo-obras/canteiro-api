@@ -110,7 +110,7 @@ RETENCAO_OUTBOX = timedelta(days=7)
 
 class EventoOutbox(Documento):
     """Gravado na mesma transação da mudança; o relay publica no Pub/Sub depois."""
-    tipo: str                                 # pedido.criado, estoque.movimento…
+    tipo: str                                 # gasto.confirmado, proposta.aprovada…
     obra_id: str | None = None
     chave_ordenacao: str                      # obra (ordem por obra no Pub/Sub)
     dados: dict[str, Any] = {}

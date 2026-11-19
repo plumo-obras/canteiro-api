@@ -19,7 +19,7 @@ from .cofre import criar_cofre
 from .config import Config
 from .limite_corpo import LimiteCorpo
 from .nucleo import ErroNegocio
-from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, sessoes
+from .rotas import auth, fornecedores, gastos, lista_espera, obras, propostas, retiradas, sessoes
 from .servicos.chave_anthropic import conferir_chave
 
 
@@ -108,6 +108,7 @@ def create_app(config: Config | None = None, arm=None) -> FastAPI:
         return {"ok": True}
 
     app.include_router(auth.r)
+    app.include_router(retiradas.r)
     app.include_router(obras.r)
     app.include_router(fornecedores.r)
     app.include_router(propostas.r)

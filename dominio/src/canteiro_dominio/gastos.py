@@ -43,16 +43,15 @@ def validar_gasto(*, valor: int, data_pagamento: str, favorecido: str, descricao
     return GastoValidado(favorecido=fav, descricao=desc)
 
 
-def soma_nos_gastos_avulsos(gasto: dict) -> bool:
-    """Se o gasto entra no total da árvore de gastos e no realizado do orçamento. Gasto de um pedido não: o custo do
-    pedido já conta pela entrega (`realizado` do pedido), e o gasto só registra que ele foi pago (`Pedido.pago`);
-    somar de novo contaria duas vezes. Estornado não conta em nada."""
-    return not gasto.get("estornado") and not gasto.get("pedido_id")
+def gasto_conta(gasto: dict) -> bool:
+    """Se o gasto entra no total da árvore de gastos e no gasto do orçamento. Estornado não conta em nada. O que foi
+    pagamento de pedido (`pedido_id`, de antes de Compras sair) conta como qualquer outro: é dinheiro que saiu."""
+    return not gasto.get("estornado")
 
 
 @dataclass
 class GastosNoOrcamento:
-    """Os gastos avulsos de uma obra, do jeito que entram no orçamento (centavos).
+    """Os gastos de uma obra, do jeito que entram no orçamento (centavos).
 
     - `por_etapa`: os que estão numa etapa do orçamento vigente; somam no comprometido e no realizado dela (e mexem
       no saldo e no estouro dela).
@@ -90,10 +89,10 @@ class GastosNoOrcamento:
 
 def gastos_no_orcamento(gastos: Iterable[dict], etapas_orcamento: Collection[str]) -> GastosNoOrcamento:
     """Reparte os gastos da obra pela origem da etapa (`etapas_orcamento` = as chaves vigentes; vazio = obra sem
-    orçamento). Só gasto avulso confirmado (`soma_nos_gastos_avulsos`)."""
+    orçamento). Só gasto confirmado que conta (`gasto_conta`)."""
     r = GastosNoOrcamento()
     for g in gastos:
-        if not soma_nos_gastos_avulsos(g):
+        if not gasto_conta(g):
             continue
         origem = origem_da_etapa(g["etapa"], etapas_orcamento)
         if origem == "orcamento":

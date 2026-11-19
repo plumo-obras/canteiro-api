@@ -28,17 +28,9 @@ _OPS = {"==": "$eq", "in": "$in", "<": "$lt", "<=": "$lte", ">": "$gt", ">=": "$
 # clientes. O teste `test_indices.py` confere com explain() que nenhuma consulta da API cai em COLLSCAN ou SORT.
 INDICES: dict[str, list[list[str]]] = {
     "obras": [["tenant_id", "nome", "_id"]],
-    "insumos": [["tenant_id", "obra_id", "nome", "_id"], ["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
-    "saldos": [["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
     "versoes_orcamento": [["tenant_id", "obra_id", "_id"], ["tenant_id", "_id"]],
     "itens_orcamento": [["tenant_id", "versao_id", "_id"]],
-    "recebimentos": [["tenant_id", "pedido_id", "_id"]],
     "medicoes": [["tenant_id", "obra_id", "_id"]],
-    "movimentos": [["tenant_id", "obra_id", "insumo_id", "criado_em", "_id"],
-                   ["tenant_id", "obra_id", "criado_em", "_id"]],
-    "pedidos": [["tenant_id", "obra_id", "status", "criado_em", "_id"], ["tenant_id", "obra_id", "criado_em", "_id"],
-                ["tenant_id", "obra_id", "status", "_id"], ["tenant_id", "obra_id", "_id"],
-                ["tenant_id", "status", "_id"]],
     "propostas": [["tenant_id", "status", "obra_id", "criado_em", "_id"], ["tenant_id", "status", "criado_em", "_id"],
                   ["tenant_id", "obra_id", "criado_em", "_id"], ["tenant_id", "criado_em", "_id"],
                   ["tenant_id", "status", "_id"]],

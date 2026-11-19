@@ -1,5 +1,4 @@
 """Tópicos do orçamento: o nível 2 da numeração da planilha entra na árvore da obra, junto com os tópicos manuais."""
-import hashlib
 import uuid
 
 from test_gastos import _confirmacao
@@ -7,9 +6,6 @@ from test_gastos_orcamento import _gasto, _resumo
 from test_obras_orcamento import nova_obra, xlsx
 from test_orcamento_planilha_custo import MAPA, PLANILHA
 from test_orcamento_versoes import CABECALHO, CONTRATO, mapa, orcamento, versao
-
-from canteiro_api.esquemas import PedidoCorpo
-from canteiro_api.servicos.pedidos import assinatura_do_pedido
 
 
 async def _arvore(vila, obra):
@@ -194,69 +190,6 @@ async def test_organizar_em_fases_leva_os_topicos_junto_e_o_desfazer_volta(vila)
     assert {k: t for k, t in (await titulos()).items() if k in titulos_antes} == titulos_antes
 
 
-# --- tópico na linha do pedido ---
-
-async def _insumo(vila, obra, nome="Porta 0,60"):
-    r = await vila.http.post(f"/obras/{obra}/insumos", headers=vila.h,
-                             json={"nome": nome, "unidade": "un"})
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-async def _pedido(vila, obra, *linhas, chave=None):
-    return await vila.http.post(f"/obras/{obra}/pedidos", headers=vila.h,
-                                json={"fornecedor": "Madeireira", "linhas": list(linhas),
-                                      "chave_idempotencia": chave or uuid.uuid4().hex})
-
-
-async def test_linha_do_pedido_com_topico_da_arvore(vila):
-    obra = (await nova_obra(vila))["id"]
-    await _importar(vila, obra)
-    a = await _arvore(vila, obra)
-    portas, mao_7 = a["11"]["topicos"][0]["id"], a["7"]["topicos"][1]["id"]
-    insumo = await _insumo(vila, obra)
-    linha = {"insumo_id": insumo, "quantidade": 2000, "valor_unitario": 49866, "etapa": "11"}
-
-    r = await _pedido(vila, obra, {**linha, "topico_id": portas})
-    assert r.status_code == 201, r.text
-    assert r.json()["linhas"][0]["topico_id"] == portas
-    for errada, msg in (({**linha, "topico_id": mao_7}, "não está na etapa"),
-                        ({**linha, "topico_id": "orc-inventado"}, "não está na etapa"),
-                        ({**linha, "etapa": None, "topico_id": portas}, "Diga de qual etapa")):
-        r = await _pedido(vila, obra, errada)
-        assert r.status_code == 422 and msg in r.json()["detail"], r.text
-
-    # a proposta do agente confere do mesmo jeito, antes de guardar o cartão (nela a etapa é opcional, o tópico não
-    # vem sem ela)
-    for errada, msg in (({**linha, "topico_id": mao_7}, "não está na etapa"),
-                        ({**linha, "etapa": None, "topico_id": portas}, "etapa do tópico")):
-        r = await vila.http.post("/propostas", headers=vila.h, json={
-            "obra_id": obra, "tipo": "criar_pedido", "chave_idempotencia": uuid.uuid4().hex, "titulo": "Portas",
-            "dados": {"fornecedor": "Madeireira", "linhas": [errada]}})
-        assert r.status_code == 422 and msg in r.json()["detail"], r.text
-
-
-async def test_pedido_sem_topico_assina_como_antes_do_campo(vila):
-    corpo = PedidoCorpo(fornecedor="X", linhas=[{"insumo_id": "i", "quantidade": 1000, "etapa": "1"}],
-                        chave_idempotencia="abcdefgh12")
-    # o corpo como era assinado antes de `topico_id` existir: a repetição de uma chave antiga continua 200
-    antes = ('{"fornecedor":"X","fornecedor_id":null,"linhas":[{"insumo_id":"i","quantidade":1000,'
-             '"valor_unitario":0,"total":null,"etapa":"1"}],"previsao":null,"observacao":"","aprovado":false}')
-    assert assinatura_do_pedido(corpo) == hashlib.sha256(antes.encode()).hexdigest()
-    com = corpo.model_copy(update={"linhas": [corpo.linhas[0].model_copy(update={"topico_id": "orc-x"})]})
-    assert assinatura_do_pedido(com) != assinatura_do_pedido(corpo)
-
-    obra = (await nova_obra(vila))["id"]
-    await _importar(vila, obra)
-    insumo = await _insumo(vila, obra)
-    chave = uuid.uuid4().hex
-    linha = {"insumo_id": insumo, "quantidade": 1000, "valor_unitario": 100, "etapa": "11"}
-    assert (await _pedido(vila, obra, linha, chave=chave)).status_code == 201
-    assert (await _pedido(vila, obra, linha, chave=chave)).status_code == 200
-    portas = (await _arvore(vila, obra))["11"]["topicos"][0]["id"]
-    assert (await _pedido(vila, obra, {**linha, "topico_id": portas}, chave=chave)).status_code == 409
-
-
 # --- orçado × realizado por tópico ---
 
 def _abertura(orc, etapa):
@@ -269,13 +202,10 @@ async def test_orcado_e_realizado_por_topico(vila):
     await _importar(vila, obra)
     a = await _arvore(vila, obra)
     portas, mao_11 = (t["id"] for t in a["11"]["topicos"])
-    insumo, outro = await _insumo(vila, obra), await _insumo(vila, obra, "Dobradiça")
-    r = await vila.http.post(f"/obras/{obra}/pedidos", headers=vila.h, json={
-        "fornecedor": "Madeireira", "aprovado": True, "chave_idempotencia": uuid.uuid4().hex, "linhas": [
-            {"insumo_id": insumo, "quantidade": 34000, "valor_unitario": 50000, "etapa": "11", "topico_id": portas},
-            {"insumo_id": outro, "quantidade": 10000, "valor_unitario": 1000, "etapa": "11"}]})
-    assert r.status_code == 201, r.text
-    # gasto avulso no tópico do orçamento, e num tópico manual criado na tela (que só aparece por ter lançamento)
+    # gasto no tópico do orçamento, na etapa sem tópico, e num tópico manual criado na tela (que só aparece por ter
+    # lançamento)
+    await _gasto(vila, obra, etapa="11", topico_id=portas, valor=1_700_000)
+    await _gasto(vila, obra, etapa="11", valor=10000)
     await _gasto(vila, obra, etapa="11", topico_id=mao_11, valor=1_000_000)
     telhado = (await vila.http.post(f"/obras/{obra}/topicos", headers=vila.h,
                                     json={"etapa": "7", "nome": "Andaime"})).json()["id"]
@@ -312,34 +242,6 @@ async def test_etapa_sem_topico_nao_abre(vila):
     assert e2["topicos"] == []
     _, t1 = _abertura(orc, "1")
     assert [t["origem"] for t in t1.values()] == ["orcamento", "orcamento"]
-
-
-async def test_proposta_de_pedido_aprovada_leva_o_topico(vila):
-    obra = (await nova_obra(vila))["id"]
-    await _importar(vila, obra)
-    portas = (await _arvore(vila, obra))["11"]["topicos"][0]["id"]
-    insumo, outro = await _insumo(vila, obra), await _insumo(vila, obra, "Dobradiça")
-    linha = {"insumo_id": insumo, "quantidade": 2000, "valor_unitario": 49866, "etapa": "11"}
-
-    async def propor(*linhas):
-        r = await vila.http.post("/propostas", headers=vila.h, json={
-            "obra_id": obra, "tipo": "criar_pedido", "chave_idempotencia": uuid.uuid4().hex, "titulo": "Portas",
-            "dados": {"fornecedor": "Madeireira", "linhas": list(linhas)}})
-        assert r.status_code == 201, r.text
-        return r.json()
-
-    # a proposta de uma linha (o formato do agente) guarda o tópico, e o pedido aprovado nasce com ele
-    p = await propor({**linha, "topico_id": portas})
-    assert p["dados"]["topico_id"] == portas
-    r = await vila.http.post(f"/propostas/{p['id']}/aprovar", headers=vila.h)
-    assert r.status_code == 200, r.text
-    pedidos = (await vila.http.get(f"/obras/{obra}/pedidos", headers=vila.h)).json()
-    assert [x["topico_id"] for p in pedidos for x in p["linhas"]] == [portas]
-
-    # sem tópico, a proposta grava como antes do campo (a trava e a repetição da chave antiga continuam as mesmas)
-    assert "topico_id" not in (await propor(linha))["dados"]
-    varias = await propor(linha, {**linha, "insumo_id": outro})
-    assert all("topico_id" not in x for x in varias["dados"]["linhas"])
 
 
 async def test_desfazer_nao_arquiva_o_manual_que_o_orcamento_reaproveitou(vila):

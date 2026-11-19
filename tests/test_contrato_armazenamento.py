@@ -10,7 +10,7 @@ import pytest
 
 from canteiro_api.armazenamento import DocumentoAusente, EscritaAntesDaLeitura
 from canteiro_dominio.armazenamento import ConflitoDeId, Consulta, Filtro
-from canteiro_dominio.modelos import TipoMovimento
+from canteiro_dominio.modelos import StatusProposta
 from canteiro_dominio.tipos import novo_id
 
 
@@ -31,11 +31,11 @@ async def semear(arm, tenant, n=5):
 
 async def test_criar_e_obter_devolve_o_mesmo_documento(arm, tenant):
     d = doc(tenant, nome="bloco", qtd=2_760_000, quando=datetime(2026, 10, 30, 12, 0, 0, 123456, tzinfo=UTC),
-            tipo=TipoMovimento.ENTRADA, sub={"a": [1, 2]})
+            tipo=StatusProposta.PENDENTE, sub={"a": [1, 2]})
     await arm.criar("coisas", d)
     lido = await arm.obter("coisas", tenant, d["id"])
     # data com precisão de milissegundo e enum como texto: o denominador comum dos bancos
-    assert lido == {**d, "quando": datetime(2026, 10, 30, 12, 0, 0, 123000, tzinfo=UTC), "tipo": "entrada"}
+    assert lido == {**d, "quando": datetime(2026, 10, 30, 12, 0, 0, 123000, tzinfo=UTC), "tipo": "pendente"}
     assert lido["quando"].tzinfo is not None
 
 

@@ -3,10 +3,12 @@
 Toda operação segue o formato da transação portável: `preparar_*` só LÊ e devolve uma `Operacao`; `aplicar()` só
 ESCREVE. Assim dá para compor várias (aprovar proposta = operação + proposta + registro) sem ler depois de escrever.
 """
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
 from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, EntradaRegistro
@@ -14,6 +16,16 @@ from canteiro_dominio.modelos import DESFAZENDO_APROVACAO, EntradaRegistro
 from .armazenamento.base import normalizar
 from .auth import UsuarioAtual
 from .modelos import EventoOutbox, doc
+
+# O namespace não muda nunca: os IDs já gravados (obra, registro, proposta, versão) saíram dele.
+_NS = uuid.UUID("6f1c2a52-3b7e-4c1e-9a55-0c4a1f2b7d10")
+
+FUSO = ZoneInfo("America/Sao_Paulo")
+
+
+def id_derivado(tenant_id: str, *partes: str) -> str:
+    """ID determinístico: o mesmo pedido de gravação (mesma chave) cai sempre no mesmo documento."""
+    return str(uuid.uuid5(_NS, "|".join([tenant_id, *partes])))
 
 
 class ErroNegocio(Exception):
@@ -34,6 +46,15 @@ class Conflito(ErroNegocio):
 
 class GrandeDemais(ErroNegocio):
     codigo = 413
+
+
+class Retirado(ErroNegocio):
+    """O recurso existiu e saiu do produto: 410 diz ao cliente antigo que não adianta tentar de novo."""
+    codigo = 410
+
+
+COMPRAS_SAIRAM = ("Compras, pedidos e estoque saíram do Canteiro. Lance o que foi pago em Gastos, pelo "
+                  "comprovante.")
 
 
 @dataclass
@@ -82,8 +103,8 @@ def verbo_desfazer(receita: dict) -> str:
 
 
 def recusar_se_desfazendo(obra: dict) -> None:
-    """Compras está pela metade: nada novo entra nela até o Desfazer da aprovação terminar. Cancelar pedido e estornar
-    movimento continuam valendo, porque são o caminho para resolver o que travou o Desfazer."""
+    """Obra gravada no meio de um Desfazer da aprovação (de quando ele rodava em lotes): nada novo entra até ele
+    terminar."""
     if obra["status"] == DESFAZENDO_APROVACAO:
         raise Conflito("O Desfazer da aprovação desta obra parou no meio; termine-o antes de continuar.")
 
@@ -93,14 +114,6 @@ async def obra_do_tenant(leitor, tenant_id: str, obra_id: str) -> dict:
     if not o:
         raise NaoEncontrado("Obra não encontrada.")
     return o
-
-
-async def insumo_da_obra(leitor, tenant_id: str, obra_id: str, insumo_id: str) -> dict:
-    i = await leitor.obter("insumos", tenant_id, insumo_id)
-    # arquivado = cadastro desfeito: para quem lança movimento ou pedido, ele não existe mais
-    if not i or i["obra_id"] != obra_id or i.get("arquivado"):
-        raise NaoEncontrado("Insumo não encontrado nesta obra.")
-    return i
 
 
 

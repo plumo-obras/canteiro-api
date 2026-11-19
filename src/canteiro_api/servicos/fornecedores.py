@@ -1,5 +1,4 @@
-"""Fornecedores do tenant: valem para todas as obras. O pedido guarda o nome além do ID (a folha impressa não
-busca o cadastro)."""
+"""Fornecedores do tenant: valem para todas as obras. A leitura do comprovante casa o CNPJ lido com o cadastrado."""
 import re
 
 from canteiro_dominio.armazenamento import Consulta
@@ -15,10 +14,10 @@ from ..nucleo import (
     NaoEncontrado,
     Operacao,
     executar_e_registrar,
+    id_derivado,
     receita_inversa,
     verbo_desfazer,
 )
-from .estoque import id_derivado
 
 _ROTULOS = {"nome": "nome", "cnpj": "CNPJ", "contato": "contato", "telefone": "telefone", "email": "e-mail"}
 

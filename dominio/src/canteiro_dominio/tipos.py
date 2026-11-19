@@ -9,7 +9,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-# Quantidade em milésimos da unidade do insumo: 1,5 m³ = 1500. Inteiro para não perder precisão em soma de movimentos.
+# Quantidade em milésimos da unidade do item: 1,5 m³ = 1500. Inteiro para não perder precisão na soma.
 Milesimos = Annotated[int, Field(description="quantidade em milésimos da unidade (1 un = 1000)")]
 # Dinheiro em centavos de real.
 Centavos = Annotated[int, Field(description="valor em centavos de real")]
@@ -23,7 +23,7 @@ def _decimal(valor: str | int | float | Decimal) -> Decimal:
     """Lê número de planilha brasileira: vírgula é decimal e ponto é milhar.
 
     "2.760" é ambíguo (2 mil e 760, ou 2,76 em formato inglês?) e é recusado, como o vm-pay já fazia: adivinhar errado
-    em estoque custa caro. Aceita "2.760,0", "2760", "1,5", "1.5" (ponto com 1–2 casas é decimal) e números puros.
+    num orçamento custa caro. Aceita "2.760,0", "2760", "1,5", "1.5" (ponto com 1–2 casas é decimal) e números puros.
     """
     if isinstance(valor, (int, Decimal)):
         return Decimal(valor)

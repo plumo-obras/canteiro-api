@@ -20,8 +20,8 @@ description: Use ao criar ou mudar um endpoint da canteiro-api (arquivo em `src/
 
 - O tenant sai **só** de `u.tenant_id` (do token conferido no banco), nunca do corpo, da query ou de um campo que o
   agente informe.
-- Recurso com `obra_id` na rota: confira com `obra_do_tenant(arm, u.tenant_id, obra_id)`; insumo com
-  `insumo_da_obra`. Documento filho (pedido, gasto, comprovante): confira que o `obra_id` dele é o da rota.
+- Recurso com `obra_id` na rota: confira com `obra_do_tenant(arm, u.tenant_id, obra_id)`.
+  Documento filho (gasto, comprovante, tópico): confira que o `obra_id` dele é o da rota.
 - Recurso de outro tenant ou de outra obra → **404**, nunca 403 (não revela que existe).
 
 ## Papéis
@@ -46,7 +46,7 @@ description: Use ao criar ou mudar um endpoint da canteiro-api (arquivo em `src/
 ## Checklist
 
 - [ ] Rota fina → serviço → esquema; `response_model` declarado.
-- [ ] Tenant só de `u.tenant_id`; `obra_do_tenant`/`insumo_da_obra`; outro tenant/obra → 404.
+- [ ] Tenant só de `u.tenant_id`; `obra_do_tenant`; outro tenant/obra → 404.
 - [ ] Papel mínimo certo (`usuario_atual` / `exigir(Papel.ADMIN|MASTER)`), com teste de 403 para o papel abaixo.
 - [ ] Erros com `ErroNegocio` & cia., mensagem em português.
 - [ ] `docs/contrato.md` atualizado; web e agente avisados; mudança compatível para o deploy em ordem.

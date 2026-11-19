@@ -22,8 +22,8 @@ from canteiro_dominio.etapas import (
     validar_nome,
 )
 from canteiro_dominio.gastos import (
+    gasto_conta,
     gastos_no_orcamento,
-    soma_nos_gastos_avulsos,
     validar_gasto,
     validar_reclassificacao,
 )
@@ -315,10 +315,10 @@ def test_ativar_topico_confere_etapa_limite_e_nome():
     assert ativar_topico(extras, cheio, id_="t0", etapa="pisos", nome="Novo") == "Novo"
 
 
-def test_so_gasto_avulso_soma_no_total_de_gastos():
-    assert soma_nos_gastos_avulsos({"pedido_id": None})
-    assert not soma_nos_gastos_avulsos({"pedido_id": "p1"})         # o pedido já soma pela entrega
-    assert not soma_nos_gastos_avulsos({"pedido_id": None, "estornado": True})
+def test_so_gasto_estornado_fica_fora_do_total():
+    assert gasto_conta({})
+    assert gasto_conta({"pedido_id": "p1"})          # pagamento de pedido de antes de Compras sair: conta
+    assert not gasto_conta({"estornado": True})
 
 
 def test_documentos_novos_nascem_com_padrao_certo():
@@ -326,7 +326,7 @@ def test_documentos_novos_nascem_com_padrao_certo():
     assert c.status == StatusComprovante.A_REVISAR and c.leitura is None and c.gasto_id is None
     g = Gasto(tenant_id="t", obra_id="o", valor=1, data_pagamento="2026-11-03", favorecido="x", descricao="y",
               etapa="outros")
-    assert soma_nos_gastos_avulsos(g.model_dump())
+    assert gasto_conta(g.model_dump())
 
 
 # --- árvore a partir do orçamento e gastos no realizado ---
@@ -384,14 +384,14 @@ def _g(valor, etapa, **kw):
     return {"valor": valor, "etapa": etapa, **kw}
 
 
-def test_gastos_no_orcamento_repartem_por_origem_e_ignoram_pedido_e_estorno():
+def test_gastos_no_orcamento_repartem_por_origem_e_ignoram_estorno():
     gastos = [_g(100, "18"), _g(50, "18"), _g(30, "x-e1"), _g(20, "eletrica"),
-              _g(999, "18", pedido_id="p1"), _g(777, "18", estornado=True)]
+              _g(9, "18", pedido_id="p1"), _g(777, "18", estornado=True)]
     r = gastos_no_orcamento(gastos, {"1", "18"})
-    assert (r.por_etapa, r.fora_do_orcamento, r.sem_etapa_do_orcamento, r.na_lista_padrao) == ({"18": 150}, 30, 20, 0)
-    assert (r.nas_etapas, r.fora_das_etapas, r.total) == (150, 50, 200)
+    assert (r.por_etapa, r.fora_do_orcamento, r.sem_etapa_do_orcamento, r.na_lista_padrao) == ({"18": 159}, 30, 20, 0)
+    assert (r.nas_etapas, r.fora_das_etapas, r.total) == (159, 50, 209)
     sem = gastos_no_orcamento(gastos, set())
-    assert (sem.por_etapa, sem.na_lista_padrao, sem.sem_etapa_do_orcamento) == ({}, 20, 150)
+    assert (sem.por_etapa, sem.na_lista_padrao, sem.sem_etapa_do_orcamento) == ({}, 20, 159)
 
 
 def test_reclassificar_exige_destino_da_arvore_de_hoje():

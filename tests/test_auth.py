@@ -142,12 +142,10 @@ async def test_rota_sem_token_ou_token_invalido(vila, config):
 
 
 async def test_papel_vem_do_banco_a_cada_requisicao(vila):
-    corpo = {"insumo_id": vila.insumo["areia"], "tipo": "entrada", "quantidade": 1000,
-             "chave_idempotencia": "papel-teste-1"}
     uid = vila.sessao["usuario"]["id"]
     await vila.arm.atualizar("usuarios", vila.tenant_id, uid, {"papel": "viewer"})
     # mesmo token de admin, mas o banco diz viewer: vale o banco
-    r = await vila.http.post(f"/obras/{vila.obra}/movimentos", json=corpo, headers=vila.h)
+    r = await vila.http.patch(f"/obras/{vila.obra}", json={"cliente": "Outro"}, headers=vila.h)
     assert r.status_code == 403
     assert (await vila.http.get("/obras", headers=vila.h)).status_code == 200
     await vila.arm.atualizar("usuarios", vila.tenant_id, uid, {"ativo": False})
@@ -168,7 +166,8 @@ async def test_um_usuario_por_email(vila):
 async def test_openapi_exposto(http):
     r = await http.get("/openapi.json")
     assert r.status_code == 200
-    assert "/obras/{obra_id}/insumos" in r.json()["paths"]
+    paths = r.json()["paths"]
+    assert "/obras/{obra_id}/orcamento" in paths and "/obras/{obra_id}/insumos" not in paths
 
 
 async def _tentativas(arm, config, proxies, cliente_ip, xff, n):

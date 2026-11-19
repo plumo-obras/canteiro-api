@@ -23,9 +23,7 @@ No teste com uma obra pública real (creche FNDE, pagamentos do TCE-RS, 4 pontos
 meses de 2 a 15 vezes o que saiu; o segundo errou bem menos (o mais perto: 545 mil previstos, 510 mil reais), e o
 término real ficou entre os dois em 3 dos 4 pontos (no 4º, 2 meses depois do "no ritmo").
 
-**Pago** = os gastos confirmados (avulsos e pagamentos de pedido) pelo mês do pagamento: é dinheiro que saiu da conta.
-O realizado conta o pedido pela entrega; a diferença (entregue e sem pagamento registrado) também é devida agora e cai
-no mês corrente. Pago adiantado (pagou antes de receber) desconta dos primeiros meses, sem deixar mês negativo.
+**Pago** = os gastos confirmados pelo mês do pagamento: é dinheiro que saiu da conta, e é o mesmo número do realizado.
 """
 import math
 from dataclasses import dataclass, field
@@ -171,19 +169,9 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
                 cen[m] = cen.get(m, 0) + v
 
     pago_total = sum(pago_por_mes.values())
-    # Negativo = pagou mais do que recebeu (adiantamento, ou frete e juros pagos além do preço do pedido): vira crédito
-    # que desconta dos primeiros meses. Crédito maior que tudo o que falta não aparece em lugar nenhum: a série não
-    # fica negativa, e então `pago + falta` passa de `custo_final` (o contrato avisa).
-    entregue_sem_pagamento = realizado_total - pago_total
-    for cen in cenarios:
-        agora = devido_total + max(0, entregue_sem_pagamento)
-        if agora:
-            cen[hoje] = cen.get(hoje, 0) + agora
-        credito = max(0, -entregue_sem_pagamento)
-        for m in sorted(cen):
-            usado = min(credito, cen[m])
-            cen[m] -= usado
-            credito -= usado
+    if devido_total:
+        for cen in cenarios:
+            cen[hoje] = cen.get(hoje, 0) + devido_total
 
     def ultimo_com_valor(cen):
         meses = [m for m, v in cen.items() if v]
@@ -207,9 +195,7 @@ def projetar(etapas: list[EtapaBase], *, inicio: str | None, atraso: int, mes_at
         termino_no_ritmo=cron._mes(fins[1]) if fins[1] is not None else None, meses=meses, etapas=linhas,
         totais=TotaisDesembolso(orcado=orcado, realizado=realizado_total, pago=pago_total,
                                 falta=sum(pelo_plano.values()) + sem_mes, custo_final=custo_final,
-                                desvio=custo_final - orcado,
-                                entregue_sem_pagamento=versoes.entregue_a_pagar(realizado_total, pago_total),
-                                sem_mes=sem_mes))
+                                desvio=custo_final - orcado, sem_mes=sem_mes))
 
 
 async def desembolso_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> DesembolsoObra:

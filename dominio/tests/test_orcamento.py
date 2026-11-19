@@ -1,39 +1,10 @@
-"""Regras do orçamento da obra que moram no domínio: andamento da linha de pedido e tópicos da numeração."""
+"""Regras do orçamento da obra que moram no domínio: tópicos da numeração e gastos por tópico."""
 import pytest
 
 from canteiro_dominio.etapas import ativar_topico, montar_arvore
 from canteiro_dominio.gastos import gastos_no_orcamento
-from canteiro_dominio.modelos import StatusPedido
-from canteiro_dominio.orcamento import (
-    andamento_da_linha,
-    custo_da_venda,
-    numero_do_topico,
-    recebido_da_linha,
-    topicos_dos_itens,
-)
+from canteiro_dominio.orcamento import custo_da_venda, numero_do_topico, topicos_dos_itens
 from canteiro_dominio.regras import RegraViolada
-
-
-def linha(quantidade=10_000, total=100_00, recebida=0):
-    return {"quantidade": quantidade, "total": total, "recebida": recebida}
-
-
-def test_recebido_pelo_preco_do_pedido():
-    assert recebido_da_linha(linha(recebida=2_500)) == 25_00
-    assert recebido_da_linha(linha(quantidade=3_000, total=100_00, recebida=1_000)) == 33_33
-    assert recebido_da_linha(linha(quantidade=0)) == 0
-
-
-def test_andamento_da_linha():
-    assert andamento_da_linha(StatusPedido.CANCELADO, linha()) == (0, 0, 0)
-    assert andamento_da_linha(StatusPedido.EM_COTACAO, linha()) == (100_00, 0, 0)
-    assert andamento_da_linha(StatusPedido.APROVADO, linha()) == (0, 100_00, 0)
-    assert andamento_da_linha(StatusPedido.PARCIAL, linha(recebida=4_000)) == (0, 100_00, 40_00)
-    # entrega a mais também custa: compromete o entregue
-    assert andamento_da_linha(StatusPedido.CONFERIDO, linha(recebida=12_000)) == (0, 120_00, 120_00)
-    # encerrado com sobra: só o que chegou
-    assert andamento_da_linha(StatusPedido.CONFERIDO, linha(recebida=6_000)) == (0, 60_00, 60_00)
-
 
 # --- tópicos do orçamento ---
 
@@ -96,12 +67,12 @@ def test_arvore_com_topicos_do_orcamento_e_manuais():
                          chaves_base={"1", "2"}, topicos_orcamento=do_orc) == "Estacas"
 
 
-def test_gastos_avulsos_por_topico():
+def test_gastos_por_topico():
     gastos = [{"etapa": "1", "topico_id": "orc-a", "valor": 100}, {"etapa": "1", "topico_id": None, "valor": 50},
-              {"etapa": "1", "topico_id": "orc-a", "valor": 10, "pedido_id": "p"},     # pagamento de pedido: não soma
+              {"etapa": "1", "topico_id": "orc-a", "valor": 10, "pedido_id": "p"},     # pagamento de pedido: conta
               {"etapa": "x-9", "topico_id": "t", "valor": 7}]
     r = gastos_no_orcamento(gastos, {"1"})
-    assert r.por_etapa == {"1": 150} and r.por_topico == {"1": {"orc-a": 100, None: 50}}
+    assert r.por_etapa == {"1": 160} and r.por_topico == {"1": {"orc-a": 110, None: 50}}
     assert r.fora_do_orcamento == 7
 
 

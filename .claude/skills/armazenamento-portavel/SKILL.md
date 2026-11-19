@@ -32,12 +32,12 @@ passar na mesma suíte de contrato.
   `atualizado_em`). No Firestore a leitura entra no controle de conflito; no Mongo não — é essa regra que deixa os
   dois iguais (ver a trava `propostas_pendentes` em `servicos/propostas.py`).
 - **Unicidade e idempotência pelo ID:** não existe índice único. Use `id_derivado(tenant_id, ...)`
-  (`servicos/estoque.py`) e trate `ConflitoDeId`. IDs novos: `novo_id()` (UUIDv7, `canteiro_dominio.tipos`).
+  (`nucleo.py`) e trate `ConflitoDeId`. IDs novos: `novo_id()` (UUIDv7, `canteiro_dominio.tipos`).
 - **Números:** dinheiro em **centavos**, quantidade em **milésimos**, inteiros (`Centavos`, `Milesimos`, `qtd`,
   `reais`). Nunca float nem Decimal no banco. Créditos de IA em microdólares.
 - **Datas:** sempre com fuso, UTC; `normalizar` trunca no milissegundo. Data sem fuso é erro.
 - **Documento limitado:** nenhuma lista que cresce sem limite dentro de um documento (vira coleção, como
-  `mensagens`, `movimentos`, `arquivos_pedacos`). Máx. ~1 MiB por documento no Firestore.
+  `mensagens`, `registro`, `arquivos_pedacos`). Máx. ~1 MiB por documento no Firestore.
 - **Listagem paginada:** `nucleo.listar_pagina` (cursor exclusivo, completa o grupo do empate).
 
 ## Índice novo

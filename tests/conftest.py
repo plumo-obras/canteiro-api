@@ -65,13 +65,6 @@ class Vila:
         self.sessao = sessao
         self.h = {"Authorization": f"Bearer {sessao['acesso']}"}
         self.obra = docs["obras"][0]["id"]
-        self.insumo = {i["nome"].split()[0].lower(): i["id"] for i in docs["insumos"]}   # bloco, aço, cimento, areia
-        self.pedido = {p["numero"]: p["id"] for p in docs["pedidos"]}
-
-    async def conta(self, chave):
-        r = await self.http.get(f"/obras/{self.obra}/insumos", headers=self.h)
-        assert r.status_code == 200, r.text
-        return next(x["conta"] for x in r.json() if x["insumo"]["id"] == self.insumo[chave])
 
     async def usuario(self, papel, tenant_id=None):
         """Cria outro usuário e devolve os cabeçalhos dele já logado."""

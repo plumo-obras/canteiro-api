@@ -21,12 +21,10 @@ from canteiro_dominio.etapas import (
     nome_da_etapa,
     nomes_da_base,
     origem_da_etapa,
-    validar_classificacao,
     validar_nome,
 )
 from canteiro_dominio.gastos import (
     gastos_no_orcamento,
-    soma_nos_gastos_avulsos,
     validar_gasto,
     validar_reclassificacao,
 )
@@ -36,7 +34,6 @@ from canteiro_dominio.modelos import (
     EtapaExtra,
     Gasto,
     StatusComprovante,
-    StatusPedido,
     Topico,
     agora,
 )
@@ -54,13 +51,13 @@ from ..nucleo import (
     Operacao,
     evento,
     executar_e_registrar,
+    id_derivado,
     listar_pagina,
     obra_do_tenant,
     receita_inversa,
     verbo_desfazer,
 )
 from . import fornecedores, tipo_arquivo, versoes
-from .estoque import id_derivado
 
 _SP = ZoneInfo("America/Sao_Paulo")
 # Limites por tipo. A web repassa o envio por uma função da Vercel, que recusa corpo acima de 4,5 MB com um 413 sem
@@ -90,8 +87,8 @@ async def _extras_e_topicos(leitor, tenant_id: str, obra_id: str) -> tuple[list[
 
 
 async def base_da_arvore(leitor, tenant_id: str, obra_id: str) -> list[tuple[str, str]]:
-    """As etapas do orçamento vigente, (código, descrição), na ordem dele: as mesmas de `GET …/etapas` e da apropriação
-    de pedidos. Vazio = obra sem orçamento, e a árvore usa a lista padrão.
+    """As etapas do orçamento vigente, (código, descrição), na ordem dele: as mesmas de `GET …/etapas`. Vazio = obra
+    sem orçamento, e a árvore usa a lista padrão.
 
     Lida fora da transação (é consulta, e a porta não consulta dentro dela). Uma importação de orçamento no mesmo
     segundo de um tópico novo pode deixar o tópico numa etapa que acabou de sair: ele só não aparece."""
@@ -127,32 +124,11 @@ async def _nomes(leitor, tenant_id: str, obra_id: str) -> tuple[dict[str, str], 
             await _nomes_dos_topicos(leitor, tenant_id, obra_id, topicos))
 
 
-async def validar_topicos(leitor, tenant_id: str, obra_id: str, linhas) -> None:
-    """O tópico de cada linha de pedido (opcional) tem de ser da etapa dela na árvore de hoje. Fora da transação,
-    depois de `versoes.validar_etapa`: a árvore é consulta."""
-    com_topico = [x for x in linhas if x.topico_id]
-    if not com_topico:
-        return
-    arvore = await arvore_da_obra(leitor, tenant_id, obra_id)
-    for x in com_topico:
-        if not x.etapa:
-            raise ErroNegocio("Escolha a etapa do tópico da linha.")
-        validar_classificacao(arvore, x.etapa, x.topico_id)
-
-
-def fora_do_orcado(g: dict, tem_orcamento: bool) -> bool:
-    """Gasto lançado fora de pedido numa obra com orçamento. O critério é de propósito o simples: casar a descrição
-    do comprovante ("vidros 4mm", "diária do pedreiro") com o serviço do orçamento erra muito para os dois lados, e
-    o pedido é o que liga o dinheiro a um item. Só marca: o gasto continua somando onde já somava."""
-    return tem_orcamento and soma_nos_gastos_avulsos(g)
-
-
 def _com_etapa(g: dict, orcamento: dict[str, str], extras: dict[str, str]) -> dict:
     """O gasto com o nome e a origem da etapa dele: a lista de lançados mostra "sem etapa do orçamento" sem a tela
     precisar cruzar com a árvore."""
     return {**g, "etapa_nome": nome_da_etapa(g["etapa"], orcamento=orcamento, extras=extras),
-            "etapa_origem": origem_da_etapa(g["etapa"], orcamento),
-            "fora_do_orcado": fora_do_orcado(g, bool(orcamento))}
+            "etapa_origem": origem_da_etapa(g["etapa"], orcamento)}
 
 
 def _rotulo(etapa: str, topico_id: str | None, orcamento: dict[str, str], extras: dict[str, str],
@@ -497,48 +473,28 @@ async def confirmar(arm, u: UsuarioAtual, comprovante_id: str, corpo: ConfirmarC
     g = doc(Gasto(tenant_id=u.tenant_id, obra_id=obra_id, comprovante_id=comprovante_id, valor=corpo.valor,
                   data_pagamento=corpo.data_pagamento, favorecido=validado.favorecido,
                   fornecedor_id=corpo.fornecedor_id, descricao=validado.descricao, etapa=corpo.etapa,
-                  topico_id=corpo.topico_id, pedido_id=corpo.pedido_id, quem=u.nome, usuario_id=u.id))
+                  topico_id=corpo.topico_id, quem=u.nome, usuario_id=u.id))
 
     async def corpo_tx(tx):
         atual = await tx.obter("comprovantes", u.tenant_id, comprovante_id)
         if atual["status"] != StatusComprovante.A_REVISAR.value:
             raise Conflito("Este comprovante já foi revisado (confirmado ou descartado).")
-        pedido = None
-        if corpo.pedido_id:
-            pedido = await tx.obter("pedidos", u.tenant_id, corpo.pedido_id)
-            if not pedido or pedido["obra_id"] != obra_id:
-                raise ErroNegocio("Pedido não encontrado nesta obra.")
-            if pedido["status"] in (StatusPedido.CANCELADO.value, StatusPedido.EM_COTACAO.value):
-                raise ErroNegocio(f"O {pedido['numero']} não foi comprado (está "
-                                  f"{'cancelado' if pedido['status'] == 'cancelado' else 'em cotação'}).")
-            ja_pago = pedido.get("pago", 0)
-            if ja_pago + corpo.valor > pedido["valor"]:
-                # pagar mais que o pedido é engano (comprovante de outro pedido, valor digitado errado) ou um acréscimo
-                # que ainda não está no pedido: nos dois casos, quem decide é a pessoa, não a soma
-                raise Conflito(f"Com este gasto, o pago do {pedido['numero']} passaria do valor do pedido "
-                               f"({fmt_reais(ja_pago)} já pagos de {fmt_reais(pedido['valor'])}). Confira o valor, "
-                               "ligue a outro pedido ou confirme sem pedido.")
-
         def aplicar():
             tx.criar("gastos", g)
             tx.atualizar("comprovantes", u.tenant_id, comprovante_id,
                          {"status": StatusComprovante.CONFIRMADO.value, "gasto_id": g["id"],
                           "atualizado_em": _agora()})
-            if pedido:
-                # o pedido foi lido para decidir: a transação grava nele (regra do Firestore × Mongo)
-                tx.atualizar("pedidos", u.tenant_id, pedido["id"], {"pago": pedido.get("pago", 0) + corpo.valor})
             return g
 
         def texto(_):
-            base = f"Gasto de {fmt_reais(corpo.valor)} em {rotulo}: {validado.descricao} ({validado.favorecido})"
-            return base + (f" · pagamento do {pedido['numero']}" if pedido else "")
+            return f"Gasto de {fmt_reais(corpo.valor)} em {rotulo}: {validado.descricao} ({validado.favorecido})"
 
         op = Operacao(obra_id=obra_id, aplicar=aplicar, texto=texto,
                       desfazer=lambda r: {"op": "estornar_gasto", "gasto_id": g["id"]})
         _, reg = executar_e_registrar(tx, u, op)
         evento(tx, u.tenant_id, "gasto.confirmado", obra_id, {"gasto_id": g["id"], "comprovante_id": comprovante_id})
         comp = {**atual, "status": StatusComprovante.CONFIRMADO.value, "gasto_id": g["id"]}
-        return {"gasto": {**g, "fora_do_orcado": fora_do_orcado(g, bool(base))}, "comprovante": comp,
+        return {"gasto": g, "comprovante": comp,
                 "registro_id": reg["id"]}
 
     return await arm.em_transacao(corpo_tx)
@@ -555,15 +511,12 @@ async def preparar_estorno_gasto(tx, u: UsuarioAtual, receita: dict) -> Operacao
     c = await tx.obter("comprovantes", u.tenant_id, g["comprovante_id"]) if g.get("comprovante_id") else None
     if c and (c["status"] != StatusComprovante.CONFIRMADO.value or c.get("gasto_id") != g["id"]):
         raise Conflito("O comprovante deste gasto mudou depois; não dá para desfazer.")
-    pedido = await tx.obter("pedidos", u.tenant_id, g["pedido_id"]) if g.get("pedido_id") else None
 
     def aplicar():
         tx.atualizar("gastos", u.tenant_id, g["id"], {"estornado": True})
         if c:
             tx.atualizar("comprovantes", u.tenant_id, c["id"], {"status": StatusComprovante.A_REVISAR.value,
                                                                  "gasto_id": None, "atualizado_em": _agora()})
-        if pedido:
-            tx.atualizar("pedidos", u.tenant_id, pedido["id"], {"pago": max(0, pedido.get("pago", 0) - g["valor"])})
         return {**g, "estornado": True}
 
     return Operacao(obra_id=g["obra_id"], aplicar=aplicar,
@@ -645,11 +598,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
     ordem = {e.chave: i for i, e in enumerate(montar_arvore(extras, [], base))}
 
     por_etapa: dict[str | None, dict[str | None, int]] = {}
-    pedidos = 0
     for g in gastos:
-        if not soma_nos_gastos_avulsos(g):
-            pedidos += g["valor"]
-            continue
         t = por_etapa.setdefault(g["etapa"], {})
         t[g.get("topico_id")] = t.get(g.get("topico_id"), 0) + g["valor"]
 
@@ -666,30 +615,12 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
         itens.sort(key=lambda x: (x["topico_id"] is None, x["nome"]))
         total = sum(por_topico.values())
         etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
-                       "origem": origem_da_etapa(chave, orcamento), "total": total,
-                       "fora_do_orcado": total if orcamento else 0, "topicos": itens})
+                       "origem": origem_da_etapa(chave, orcamento), "total": total, "topicos": itens})
     # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o realizado de lá
     no_orcamento = gastos_no_orcamento(gastos, orcamento)
-    # Pedido que chegou já é gasto (realizado) antes de ser pago: sem isto, a aba mostra só os avulsos e o "gasto até
-    # hoje" do placar parece não bater. Total pela conta do desembolso; por etapa, repartido pelas linhas do pedido.
-    lista_pedidos = await versoes.pedidos_da_obra(arm, u.tenant_id, obra_id)
-    realizado = sum(g["realizado"] for g in versoes.andamento_dos_pedidos(lista_pedidos).values()) + no_orcamento.total
-    total_a_pagar = versoes.entregue_a_pagar(realizado, sum(g["valor"] for g in gastos))
-    a_pagar = {k or None: v for k, v in versoes.a_pagar_por_etapa(lista_pedidos, gastos, total_a_pagar).items()
-               if v}
-    for e in etapas:
-        e["entregue_a_pagar"] = a_pagar.pop(e["etapa"], 0)
-    for chave in sorted(a_pagar, key=posicao):
-        etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
-                       "origem": origem_da_etapa(chave, orcamento), "total": 0, "fora_do_orcado": 0, "topicos": [],
-                       "entregue_a_pagar": a_pagar[chave]})
-    etapas.sort(key=lambda e: posicao(e["etapa"]))
-    return {"total": no_orcamento.total, "pagamentos_de_pedidos": pedidos, "a_revisar": len(a_revisar),
-            "tem_orcamento": bool(orcamento), "fora_do_orcamento": no_orcamento.fora_do_orcamento,
-            # todo gasto avulso é fora de pedido (`fora_do_orcado`): com orçamento, é o total inteiro
-            "fora_do_orcado": no_orcamento.total if orcamento else 0,
+    return {"total": no_orcamento.total, "a_revisar": len(a_revisar), "tem_orcamento": bool(orcamento),
+            "fora_do_orcamento": no_orcamento.fora_do_orcamento,
             "sem_etapa_do_orcamento": no_orcamento.sem_etapa_do_orcamento, "a_definir": no_orcamento.a_definir,
-            "entregue_a_pagar": total_a_pagar,
             "etapas": etapas}
 
 

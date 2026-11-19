@@ -1,10 +1,9 @@
 """Ordem das etapas antes de aprovar: a etapa das pranchas vai para depois das fundações (ou dos serviços preliminares)
-ao somar a planilha, e a pessoa reordena à mão (contrato novo no lugar do vigente, com Desfazer). E o gasto fora de
-pedido sai marcado "fora do orçado"."""
+ao somar a planilha, e a pessoa reordena à mão (contrato novo no lugar do vigente, com Desfazer)."""
 import uuid
 
 from conftest import nova_vila
-from test_gastos_orcamento import _contrato, _gasto, _resumo
+from test_gastos_orcamento import _gasto
 from test_obras_orcamento import nova_obra, registro
 from test_orcamento_versoes import CABECALHO, mapa, orcamento, versao, xlsx
 
@@ -189,21 +188,6 @@ async def test_viewer_nao_reordena(vila):
     r = await vila.http.post(f"/obras/{o['id']}/orcamento/etapas/ordem", headers=hv,
                              json={"ordem": ["1"], "chave_idempotencia": uuid.uuid4().hex})
     assert r.status_code == 403
-
-
-async def test_gasto_fora_de_pedido_sai_marcado_fora_do_orcado(vila):
-    obra = vila.obra
-    await _contrato(vila, obra)
-    avulso = await _gasto(vila, obra, etapa="2", valor=64000)
-    pago = await _gasto(vila, obra, etapa="2", valor=35000, pedido_id=vila.pedido["PED-0158"])
-    assert (avulso["gasto"]["fora_do_orcado"], pago["gasto"]["fora_do_orcado"]) == (True, False)
-    lista = (await vila.http.get(f"/obras/{obra}/gastos", headers=vila.h)).json()
-    assert {g["id"]: g["fora_do_orcado"] for g in lista} == {avulso["gasto"]["id"]: True, pago["gasto"]["id"]: False}
-    r = await _resumo(vila, obra)
-    assert (r["total"], r["fora_do_orcado"], r["pagamentos_de_pedidos"]) == (64000, 64000, 35000)
-    assert [(e["etapa"], e["total"], e["fora_do_orcado"]) for e in r["etapas"] if e["total"]] == [("2", 64000, 64000)]
-    # só marca: o realizado do orçamento continua contando o gasto na etapa
-    assert next(e for e in (await orcamento(vila, obra))["etapas"] if e["etapa"] == "2")["gastos_avulsos"] == 64000
 
 
 async def _somado(vila):

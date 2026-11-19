@@ -21,8 +21,16 @@ from ..esquemas import (
     Prazo,
 )
 from ..modelos import doc
-from ..nucleo import Conflito, ErroNegocio, Operacao, evento, executar_e_registrar, obra_do_tenant, verbo_desfazer
-from .estoque import id_derivado
+from ..nucleo import (
+    Conflito,
+    ErroNegocio,
+    Operacao,
+    evento,
+    executar_e_registrar,
+    id_derivado,
+    obra_do_tenant,
+    verbo_desfazer,
+)
 from .versoes import CEM, orcamento_da_obra
 from .versoes import pct as _pct
 

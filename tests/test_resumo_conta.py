@@ -1,60 +1,43 @@
 """Página inicial (resumo das obras) e conta (perfil, chave própria sem o segredo, créditos)."""
 from conftest import nova_vila
+from test_cronograma import _obra as _obra_com_cronograma
 from test_obras_orcamento import nova_obra
 from test_orcamento_versoes import CONTRATO, mapa, versao
-from test_pedidos_propostas import pedido_corpo, proposta
+from test_propostas import OUTRO_PLANO, proposta
 
 from canteiro_dominio.tipos import novo_id
 
 
-async def test_resumo_soma_na_api_a_partir_do_seed(vila):
+async def test_resumo_a_partir_do_seed(vila):
     r = await vila.http.get("/obras/resumo", headers=vila.h)
     assert r.status_code == 200, r.text
     [res] = r.json()
     assert res["obra"]["id"] == vila.obra and res["obra"]["nome"] == "Casa Vila Nova"
-    # bloco (falta 2.040), cimento (34) e areia (8) faltam; o aço fecha com o que está a caminho e cotando
-    assert res["falta_comprar"] == 3
-    assert res["pedidos_abertos"] == 4
-    assert res["valor_pedidos_abertos"] == 480000 + 2080000 + 456000 + 396000
-    assert res["nf_para_conferir"] == 1                                    # PED-0157 recebido
-    assert res["pendencias"] == 0
+    assert (res["pendencias"], res["tem_orcamento"]) == (0, False)
+    assert not {"falta_comprar", "pedidos_abertos", "valor_pedidos_abertos", "nf_para_conferir"} & set(res)
 
 
 async def test_resumo_bate_com_as_rotas_da_obra(vila):
     """O número da página inicial tem de ser o mesmo que a pessoa vê ao entrar na obra."""
-    await vila.http.post("/propostas", headers=vila.h, json=proposta(vila))
-    # outra quantidade: duas propostas IGUAIS pendentes viram uma só (a segunda devolve a primeira)
-    await vila.http.post("/propostas", headers=vila.h, json=proposta(vila, dados=pedido_corpo(vila, q=30)))
-    await vila.http.post(f"/obras/{vila.obra}/pedidos", headers=vila.h, json=pedido_corpo(vila, q=34))
-    [res] = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
-
-    insumos = (await vila.http.get(f"/obras/{vila.obra}/insumos", headers=vila.h)).json()
-    pedidos = (await vila.http.get(f"/obras/{vila.obra}/pedidos", headers=vila.h)).json()
-    abertos = [p for p in pedidos if p["status"] not in ("conferido", "cancelado")]
-    pendentes = (await vila.http.get(f"/propostas?status=pendente&obra_id={vila.obra}", headers=vila.h)).json()
-    registro = (await vila.http.get(f"/registro?obra_id={vila.obra}&limite=1", headers=vila.h)).json()
-
-    assert res["falta_comprar"] == sum(1 for x in insumos if x["conta"]["comprar"] > 0) == 2   # cimento coberto
-    assert res["pedidos_abertos"] == len(abertos) == 5
-    assert res["valor_pedidos_abertos"] == sum(p["valor"] for p in abertos)
+    obra = await _obra_com_cronograma(vila, com_cronograma=False)
+    await vila.http.post("/propostas", headers=vila.h, json=proposta(obra))
+    # outro plano: duas propostas IGUAIS pendentes viram uma só (a segunda devolve a primeira)
+    await vila.http.post("/propostas", headers=vila.h, json=proposta(obra, OUTRO_PLANO))
+    res = next(x for x in (await vila.http.get("/obras/resumo", headers=vila.h)).json() if x["obra"]["id"] == obra)
+    pendentes = (await vila.http.get(f"/propostas?status=pendente&obra_id={obra}", headers=vila.h)).json()
+    registro = (await vila.http.get(f"/registro?obra_id={obra}&limite=1", headers=vila.h)).json()
     assert res["pendencias"] == len(pendentes) == 2
     assert res["ultima_atividade"] == registro[0]["criado_em"]
 
 
-async def test_resumo_conferir_tira_da_lista(vila):
-    await vila.http.post(f"/pedidos/{vila.pedido['PED-0157']}/avancar", headers=vila.h, json={"para": "conferido"})
-    [res] = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
-    assert (res["nf_para_conferir"], res["pedidos_abertos"]) == (0, 3)
-    assert res["valor_pedidos_abertos"] == 2080000 + 456000 + 396000
-
-
 async def test_resumo_so_do_proprio_tenant(vila, http, arm, config):
     outra = await nova_vila(http, arm, config)
-    await outra.http.post("/propostas", headers=outra.h, json=proposta(outra))
+    obra = await _obra_com_cronograma(outra, com_cronograma=False)
+    await outra.http.post("/propostas", headers=outra.h, json=proposta(obra))
     [res] = (await vila.http.get("/obras/resumo", headers=vila.h)).json()
     assert res["obra"]["id"] == vila.obra and res["pendencias"] == 0
-    [res_outra] = (await http.get("/obras/resumo", headers=outra.h)).json()
-    assert res_outra["obra"]["id"] == outra.obra and res_outra["pendencias"] == 1
+    res_outra = {x["obra"]["id"]: x for x in (await http.get("/obras/resumo", headers=outra.h)).json()}
+    assert set(res_outra) == {outra.obra, obra} and res_outra[obra]["pendencias"] == 1
 
 
 async def test_resumo_qualquer_papel_le_e_exige_sessao(vila):
@@ -142,5 +125,4 @@ async def test_tem_orcamento_no_resumo_de_obras(vila):
     r = await versao(vila, o["id"], CONTRATO, mapa(), aplicar=True)
     assert r.status_code == 201, r.text[:300]
     assert await tem(o["id"]) is True
-    # a Casa Vila Nova tem insumos com previsão, sem contrato importado
-    assert await tem(vila.obra) is True
+    assert await tem(vila.obra) is False
