@@ -96,7 +96,7 @@ async def test_planilha_de_venda_vira_custo_pelo_bdi(vila):
     assert (orc["totais"]["atual"], orc["totais"]["venda"]) == (1800000, 2250000)
 
 
-async def test_previsao_da_obra_fica_fora_do_orcado_e_de_compras(vila):
+async def test_previsao_da_obra_fica_fora_do_orcado(vila):
     obra = (await nova_obra(vila))["id"]
     await _padronizada(vila, obra, aplicar=True)
     r = await vila.http.post(f"/obras/{obra}/orcamento/organizar-fases", headers=vila.h)
@@ -110,12 +110,10 @@ async def test_previsao_da_obra_fica_fora_do_orcado_e_de_compras(vila):
     assert (fundacao["atual"], fundacao["estimado"] > 0) == (0, True)
     # a versão não engorda com o chute
     assert next(v for v in orc["versoes"] if v["ativa"])["total"] == 53727968
-    # Compras sai só do que a pessoa orçou
+    # aprovar fixa o orçado da planilha, sem o estimado
     r = await vila.http.post(f"/obras/{obra}/orcamento/aprovar", headers=vila.h)
     assert r.status_code == 200, r.text
-    insumos = (await vila.http.get(f"/obras/{obra}/insumos", headers=vila.h)).json()
-    nomes = {i["insumo"]["nome"] for i in insumos}
-    assert "Escavação manual de valas" not in nomes and "Portas" in nomes
+    assert (await orcamento(vila, obra))["totais"]["atual"] == 53727968
 
 
 async def test_aditivo_de_orcamento_padronizado_cai_nas_etapas_e_nos_topicos_dele(vila):

@@ -15,8 +15,8 @@ canteiro-dominio = { git = "https://github.com/plumo-obras/canteiro-api", tag = 
 
 ## O que pode ir no domínio
 
-Conta e regra determinística (falta, transições de pedido, etapas, gastos), modelos de documento e a porta. **Nada**
-de FastAPI, pymongo, rede ou configuração. Toda conta mora aqui, nunca no modelo de IA: o agente cita a `Conta` que a
+Conta e regra determinística (etapas, gastos, cronograma, tributos), modelos de documento e a porta. **Nada**
+de FastAPI, pymongo, rede ou configuração. Toda conta mora aqui, nunca no modelo de IA: o agente cita o número que a
 API devolve.
 
 ## Passo a passo

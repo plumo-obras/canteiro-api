@@ -150,12 +150,8 @@ def _m2(m: int) -> str:
 
 
 def natureza_padrao(gasto: dict) -> str | None:
-    """Gasto de pedido é material comprado: o pedido não paga mão de obra. Os outros a pessoa classifica."""
-    if gasto.get("natureza_fiscal"):
-        return gasto["natureza_fiscal"]
-    if gasto.get("pedido_id"):
-        return "material"
-    return None
+    """A natureza que a pessoa escolheu; None = a classificar."""
+    return gasto.get("natureza_fiscal") or None
 
 
 # --- INSS da obra ---

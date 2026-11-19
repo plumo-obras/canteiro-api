@@ -1,8 +1,8 @@
 # canteiro-api
 
 API central da **Plumo** (o produto; o código ainda se chama Canteiro), um agente de IA para gestão de obras. Esta API
-é **dona dos dados e das regras** de uma obra: orçamento em versões, cronograma e medições, compras, entregas e
-estoque, gastos com comprovante, propostas do agente e o registro com desfazer. FastAPI, MongoDB hoje e Firestore
+é **dona dos dados e das regras** de uma obra: orçamento em versões, cronograma e medições, gastos com comprovante,
+tributos, propostas do agente e o registro com desfazer. FastAPI, MongoDB hoje e Firestore
 depois, pela mesma porta de armazenamento.
 
 ## Papel no sistema
@@ -174,9 +174,11 @@ src/canteiro_api/
   eventos.py         publicar_pendentes (outbox → publicador)
   seed.py            Casa Vila Nova de exemplo
   armazenamento/     base.py (normalizar, validar, TransacaoComBuffer), memoria.py, mongo.py
-  rotas/             auth, obras, fornecedores, propostas (+ registro, uso), gastos, sessoes (+ conta), lista_espera
-  servicos/          obras, orcamento, versoes, cronograma, estoque, pedidos, fornecedores, propostas, gastos,
-                     importacao, resumo, sessoes, uso, tipo_arquivo
+  rotas/             auth, obras, fornecedores, propostas (+ registro, uso), gastos, sessoes (+ conta), lista_espera,
+                     retiradas (410 das rotas de compras que saíram)
+  servicos/          obras, orcamento, versoes, cronograma, desembolso, fornecedores, propostas, gastos, tributos,
+                     resumo, hoje, sessoes, uso, tipo_arquivo
+  apagar_pedidos.py  limpeza única do que sobrou de compras no banco (docs/deploy.md, seção 10)
 dominio/             pacote canteiro-dominio: modelos, regras, etapas, gastos, leitura, tipos, armazenamento (a porta)
 tests/               conftest.py (fixtures arm/http/vila) + um arquivo por área
 docs/                contrato.md, arquitetura.md, deploy.md

@@ -59,7 +59,7 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   sem credenciais. Origem fora da lista não recebe `Access-Control-Allow-Origin`. O resto da API não responde CORS.
 - O e-mail não vai para log (o adaptador do Mongo segura o log de comandos do driver em INFO).
 
-## Obras e almoxarifado
+## Obras
 
 - `GET /obras` → `[Obra]`. `Obra` = `{id, nome, cidade, cep, uf, endereco, verba, status, tipologia, area_construida,
   pavimentos, padrao, regime, cliente, inicio, prazo_meses, numero_contrato, bdi, data_base}`; `status` ∈ `em_orcamento | em_andamento | concluida`.
@@ -85,71 +85,24 @@ Quantidade em **milésimos** e dinheiro em **centavos** (inteiros) em todo JSON;
   os que já têm aquele valor são ignorados; se nada muda, `registro_id: null` e nenhum registro. Registro "Atualizou a
   obra X: área, padrão" com `desfazer` `restaurar_obra`, que volta os valores antigos e é recusado (409) se algum
   daqueles campos mudou de novo depois. `nome: null` → 422.
-- `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, falta_comprar, pedidos_abertos,
-  valor_pedidos_abertos, nf_para_conferir, ultima_atividade, prazo, tem_orcamento}]` (por nome da obra), para a página
-  inicial. `tem_orcamento` = contrato vigente ou algum insumo com `precisa_ate_o_fim > 0`.
+- `GET /obras/resumo` (qualquer papel) → `[{obra: Obra, pendencias, ultima_atividade, prazo, tem_orcamento}]` (por
+  nome da obra), para a página inicial. `tem_orcamento` = contrato vigente.
   `prazo` = o `Prazo` do `GET /obras/{id}/cronograma` (término contratual e projetado, atraso), `null` sem cronograma.
-  `pendencias` = propostas pendentes · `falta_comprar` = insumos com `Conta.comprar > 0` (a mesma Conta de
-  `GET …/insumos`) · `pedidos_abertos` = pedidos fora de `conferido`/`cancelado` e `valor_pedidos_abertos` o que eles
-  ainda vão custar (centavos): o `valor` inteiro em cotação; depois, só a parte que falta entregar de cada linha · `nf_para_conferir` = pedidos `recebido` · `ultima_atividade` = `criado_em` da entrada mais
-  nova do registro da obra, ou `null`. Somado na API: uma consulta por coleção para o tenant inteiro (sem agregação no
-  banco) e uma leitura de 1 documento do registro por obra.
-- `GET /obras/{obra_id}/insumos` → `[{insumo: Insumo, conta: Conta, ultimo_preco}]`, onde
-  `Conta = {precisa, saldo, a_caminho, cotando, transferencia, falta, comprar, sobra, sem_previsao, texto}` calculada
-  por `regras.conta_de_falta` (a_caminho e cotando vêm dos pedidos da obra; transferencia = 0 no MVP-0).
-  - `sem_previsao` = `precisa` 0: ninguém lançou a previsão (a falta não é calculada; **não** quer dizer "não precisa").
-    `sobra` (milésimos) = o que tem e vem além do que precisa (0 sem previsão).
-  - `texto` = a linha de conta pronta (`regras.texto_da_conta`, domínio ≥ 0.3.0), sempre aritmética verdadeira, em três
-    formas: com falta `"precisa 200 sc − saldo 46 sc − a caminho 120 sc − em cotação 0 sc − transferência 0 sc = falta
-    34 sc"`; com sobra `"saldo 32 m³ + a caminho 40 m³ + em cotação 0 m³ + transferência 0 m³ = 72 m³ para precisa
-    60 m³: sobra 12 m³, falta 0"`; sem previsão `"sem previsão lançada para a obra (…) · saldo 60 sc · a caminho 0 sc
-    · …"`. Saldo negativo aparece como 0 com o valor do livro entre parênteses.
-  - `ultimo_preco` = `{valor_unitario (centavos por unidade), pedido_id, numero, fornecedor, data ("AAAA-MM-DD", dia de
-    criação no fuso de São Paulo), status}` da linha do pedido **não cancelado** mais novo desse insumo na obra, ou
-    `null` se nunca foi comprado. É o "quanto custa 10 sacos a mais?" sem dividir total por quantidade.
-- `Insumo.valor_unitario` (centavos, 0 = sem preço) é o preço unitário do orçamento. `Insumo.etapa` = chave da etapa
-  do orçamento onde ele mais pesa (`null` = cadastrado à mão ou anterior à aprovação): agrupa "Falta comprar" e sugere a
-  etapa da linha do pedido. Na `Conta`, `medido` = o que já foi medido de um serviço (não é saldo, mas desconta da falta).
-- `Insumo.tipo` ∈ `material | servico` (padrão `material`). Serviço (terraplanagem, aterro, empreiteiro) não tem
-  estoque: movimento de entrada/saída/ajuste nele → 422, saldo sempre 0, e "a caminho" na Conta é o contratado ainda
-  não medido.
-- `POST /obras/{obra_id}/insumos` `{nome, unidade, tipo?="material", curva?="C", precisa_ate_o_fim?=0, valor_unitario?=0}` → `Insumo` + `registro_id`
-  (admin). O que chegou ou foi comprado fora da planilha do orçamento. Nome repetido na obra (sem diferenciar
-  maiúsculas e espaços) → 409. Com `precisa_ate_o_fim` 0 o insumo não entra na conta de falta. Registro "Cadastrou o
-  insumo X (un, curva C)" com `desfazer` `restaurar_insumos` (ver abaixo).
-- **Desfazer de cadastro e importação de insumos** (`restaurar_insumos`): a porta não apaga, então o insumo criado é
-  **arquivado** (`Insumo.arquivado = true`, domínio ≥ 0.2.0): sai de `GET …/insumos`, do resumo e da aprovação do
-  orçamento, e movimento ou pedido nele → 404. Saldo inicial de importação sai por um AJUSTE oposto. Os campos que uma
-  importação de orçamento sobrescreveu voltam ao valor de antes. Tudo ou nada: 409 se qualquer insumo do lote teve
-  movimento ou foi editado depois. Refazer reativa (e relança o ajuste). Cadastrar ou importar de novo o mesmo nome
-  reaproveita o documento arquivado (o ID sai do nome).
-- `GET /obras/{obra_id}/insumos/{insumo_id}/movimentos?limite=50&antes_de=…` → `[Movimento]` (mais novos primeiro;
-  paginação em "Listagens paginadas")
-- `GET /obras/{obra_id}/movimentos?limite=50&antes_de=…` (qualquer papel) → `[Movimento]` de **todos** os insumos da
-  obra, mais novos primeiro (o "histórico do almoxarifado" sem insumo; mesma paginação)
-- `POST /obras/{obra_id}/movimentos` `{insumo_id, tipo, quantidade, destino?, etapa?, origem_doc?, chave_idempotencia}` →
-  `Movimento + registro_id` (o ID da `EntradaRegistro` criada: é o que o Desfazer usa logo depois da ação; derivado
-  do movimento, então a repetição da chave devolve o mesmo `registro_id`). Grava o movimento **e** atualiza o `Saldo` na mesma transação; mesma chave = mesmo resultado (201 na 1ª, 200 nas repetidas).
-  `tipo` ∈ `entrada | saida | ajuste` (transferência fica para depois); mesma chave com outro conteúdo → 409.
-  Saída de curva A sem `destino` → 422. `etapa` é a apropriação do consumo (uma chave de `GET …/etapas`): obrigatória
-  em **saída** quando a obra tem orçamento importado; etapa que não existe → 422; obra sem orçamento → deixe em branco.
-  Papel `admin`+. Gera `EntradaRegistro` com `desfazer` (estorno).
-- `Movimento.quem` é o **nome** de quem lançou (o que a tela mostra); o ID do usuário vem em `usuario_id` (`null` em
-  movimento semeado). Vale para movimento da tela, da conferência de pedido, de proposta aprovada e da importação.
-- `POST /obras/{obra_id}/importar` (multipart, CSV `;` ou `,`, UTF-8 ou Windows-1252): colunas
-  `nome;unidade;saldo;precisa_ate_o_fim;curva`. Cria insumos e um movimento de AJUSTE inicial. Responde a prévia
-  (`?aplicar=false`) ou aplica (`?aplicar=true`). Número ambíguo ("2.760") volta como erro da linha.
-  Resposta sempre `{aplicado, linhas:[{linha, nome, unidade, saldo, precisa_ate_o_fim, curva}], erros:[{linha, campo, mensagem}]}`;
-  com qualquer erro nada é gravado (`aplicado: false`). Nome já existente na obra (sem diferenciar maiúsculas e
-  espaços) é erro da linha; o nome é gravado com os espaços arrumados e o ID sai dele, o mesmo do cadastro pela tela
-  (duas importações iguais ao mesmo tempo não duplicam: a segunda → 409). Aplicada, a resposta traz `registro_ids`
-  (um registro "Importou N insumo(s) da planilha" por lote de 100, com `desfazer` `restaurar_insumos`). É a importação
-  antiga, no nosso formato de colunas; a do orçamento (abaixo) lê a planilha que a construtora já tem.
+  `pendencias` = propostas pendentes · `ultima_atividade` = `criado_em` da entrada mais nova do registro da obra, ou
+  `null`. Somado na API: uma consulta por coleção para o tenant inteiro (sem agregação no banco) e uma leitura de 1
+  documento do registro por obra.
+- **Compras, pedidos e estoque saíram do produto** (11/2026). As rotas deles respondem **410** com
+  `{"detail": "Compras, pedidos e estoque saíram do Canteiro. Lance o que foi pago em Gastos, pelo comprovante."}`:
+  `GET`/`POST /obras/{id}/insumos`, `GET /obras/{id}/insumos/{insumo_id}/movimentos`, `GET`/`POST
+  /obras/{id}/movimentos`, `POST /obras/{id}/importar`, `POST /obras/{id}/orcamento/importar`, `POST
+  /obras/{id}/orcamento/materiais`, `GET`/`POST /obras/{id}/pedidos`, `POST /pedidos/{id}/avancar`, `PATCH
+  /pedidos/{id}`, `GET`/`POST /pedidos/{id}/recebimentos`. O que sobrou no banco sai com o script de limpeza
+  (`docs/deploy.md`, seção 10).
 
 ## Orçamento por planilha
 
 Em dois passos, sem estado no servidor: a tela manda o arquivo para `ler`, mostra a sugestão de colunas, e manda o
-mesmo arquivo de novo com o mapeamento confirmado para `importar`. Aceita `.xlsx` e `.csv` (até 5 MB); `.xls` → 422
+mesmo arquivo de novo com o mapeamento confirmado para `…/orcamento/versoes`. Aceita `.xlsx` e `.csv` (até 5 MB); `.xls` → 422
 pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
 
 - `POST /obras/{obra_id}/orcamento/ler` (multipart `arquivo`, form `planilha?` = nome da aba) →
@@ -174,69 +127,28 @@ pedindo para salvar como `.xlsx` ou `.csv`. Papel `admin`+.
   - `banco` = o banco de preços dito nessas linhas do topo, em maiúsculas, com a desoneração quando escrita
     (`"SINAPI não desonerado"`, `"SICRO"`), ou `null`. Só para mostrar.
 - `Mapeamento` = `{planilha, linha_cabecalho, item, codigo, fonte, nome, unidade, quantidade, valor_unitario,
-  valor_total, saldo, curva, complemento}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do
+  valor_total, complemento}` (cada coluna é índice ou `null`). Sinônimos da sugestão: item/nº (número do
   item, "3.2.1") · código/cód · fonte/banco/base/referência · descrição/discriminação/insumo/material/serviço ·
   un/und/unid/unidade · quant/qtd/qtde · "unit" (preço unitário; também o preço solto, "preço (R$)"/valor/custo/P.U.,
-  quando há outra coluna de total) · total/orçado · saldo/estoque · curva/abc · complemento. `item`, `codigo`, `fonte`
-  e `complemento` só valem no orçamento (EAP); `saldo` e `curva`, só na lista de materiais.
-- A planilha é uma de duas coisas, e a tela pergunta antes de importar: o **orçamento da obra** (serviços por etapa,
-  `POST …/orcamento/versoes`, abaixo) ou uma **lista de materiais** (insumos para comprar e estocar, `…/importar`).
-
-### Lista de materiais
-
-- `POST /obras/{obra_id}/orcamento/importar` (multipart `arquivo`, `mapeamento` = JSON, `aplicar` = bool) →
-  `PreviaOrcamento` = `{aplicado, linhas: [LinhaOrcamento], ignoradas: [{linha, texto, motivo}],
-  erros: [{linha, campo, mensagem}], total, novos, atualizados, juntadas, registro_ids}` (`registro_ids` só quando
-  aplicada: um por lote).
-  - `nome`, `unidade` e `quantidade` têm de estar mapeados (422).
-  - **Ignorada** (não é erro): sem descrição, sem unidade (título de etapa ou subtotal) ou quantidade vazia/zero.
-  - **Erro da linha**: número inválido ou ambíguo ("2.760"), negativo, curva fora de A/B/C, descrição > 120 ou unidade
-    > 12 caracteres, o mesmo nome com outra unidade na planilha, ou unidade diferente da do insumo já cadastrado.
-    Com qualquer erro nada é gravado.
-  - `valor_unitario` vem da coluna unitária; sem ela, de `total / quantidade`; sem as duas, 0. Aceita "R$".
-  - O mesmo insumo em várias linhas (nome sem diferenciar maiúsculas e espaços, mesma unidade) vira uma linha só:
-    quantidades somadas e preço médio ponderado. `juntadas` conta as linhas absorvidas.
-  - `curva`: a da coluna, se mapeada; senão ABC pelo valor (A até 80% do total, o item que cruza os 80% incluído;
-    B até 95%; resto C; sem preço = C). Planilha sem preço nenhum → B.
-  - `LinhaOrcamento` = `{linhas: [int], nome, unidade, quantidade, valor_unitario, total, curva, saldo,
-    situacao: "novo" | "atualiza", precisa_antes, valor_antes}`. **atualiza** = já existe insumo com esse nome na obra:
-    troca `precisa_ate_o_fim`, `valor_unitario` e `curva` (o saldo da planilha só vale para insumo novo).
-  - Gravação em lotes de 100 por transação; insumo novo tem o mesmo ID do cadastro pela tela (nome repetido depois
-    colide em vez de duplicar) e saldo > 0 vira um AJUSTE inicial. Registro "Importou o orçamento: N novos, M
-    atualizados (R$ X)" por lote, com `desfazer` `restaurar_insumos`: arquiva os novos e devolve aos atualizados
-    `precisa_ate_o_fim`, `valor_unitario` e `curva` de antes.
-
-### Materiais do projeto estrutural
-
-- `POST /obras/{obra_id}/orcamento/materiais` (JSON `{origem, itens: [{nome, unidade, quantidade, valor_unitario}],
-  aplicar}`, admin) → o mesmo `PreviaOrcamento` da lista de materiais. É a lista que o canteiro-cad tira das pranchas
-  (`GET /v1/projetos/materiais`): a web manda o nome do insumo do SINAPI quando ele existe e o preço de referência.
-  - `quantidade` em milésimos (> 0), `valor_unitario` em centavos (0 = sem preço); até 500 itens; `origem` (até 80
-    caracteres) entra no registro: "Importou os materiais do {origem}: N novos, M atualizados (R$ X)".
-  - Unidade em ASCII do tradutor vira a do almoxarifado (`m3` → `m³`, `m2` → `m²`). O mesmo nome repetido soma; com
-    outra unidade, ou unidade diferente da do insumo já cadastrado, é erro da linha e nada é gravado.
-  - Daí em diante é a lista de materiais: **atualiza** troca `precisa_ate_o_fim`, `valor_unitario` e `curva`; a curva
-    sai do peso no valor; lotes de 100 com `desfazer` (`"Desfeito: importação dos materiais do {origem}"`). O que falta
-    comprar é a `Conta` de sempre (precisa − saldo − a caminho).
+  quando há outra coluna de total) · total/orçado · complemento.
+- A planilha é o **orçamento da obra** (serviços por etapa, `POST …/orcamento/versoes`, abaixo).
 
 ### Materiais do projeto como orçamento (etapa "Estrutura")
 
 - `POST /obras/{obra_id}/orcamento/estrutura` (JSON `{etapa?, itens: [{nome, unidade, quantidade, valor_unitario}],
   aplicar, chave_idempotencia?}`, admin) → `PreviaVersao`. Os materiais do projeto viram uma **versão do orçamento**
-  (uma etapa, "Estrutura" por padrão), em vez da lista de materiais: vira **contrato** se a obra ainda não tem um;
+  (uma etapa, "Estrutura" por padrão): vira **contrato** se a obra ainda não tem um;
   com contrato e a obra ainda em orçamento, **soma ao contrato** (o mesmo `somar` de `…/orcamento/versoes`: etapa pelo
   nome, `repetido_de`, Desfazer volta o anterior); com o orçamento aprovado, **aditivo**. `ignorar_itens?` (lista de
   `ordem`, ≤ 500) tira itens da prévia e da gravação. Reaproveita a importação de versão (prévia, gravação em versão, Desfazer). `quantidade` em
-  milésimos, `valor_unitario` em centavos; 201 quando grava. É alternativa ao `…/orcamento/materiais` (lista de
-  materiais em Compras): aqui o projeto entra como orçamento por etapa.
+  milésimos, `valor_unitario` em centavos; 201 quando grava.
 
 ### Orçamento da obra (EAP, em versões)
 
 O orçamento é etapa → item, como a planilha da construtora: cada linha vira um item, com o número, o código e a fonte
 dela, **sem juntar linhas repetidas** (o mesmo serviço em duas etapas são dois itens), e o total fecha no centavo com a
 planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; reimportar substitui a versão inteira) ou um
-**aditivo** (soma ao contrato, que fica intacto). As duas têm Desfazer. A importação do orçamento **não cria insumos**:
-material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do pedido.
+**aditivo** (soma ao contrato, que fica intacto). As duas têm Desfazer.
 
 - `VersaoOrcamento` = `{id, obra_id, tipo: "contrato" | "aditivo", numero, descricao, data, arquivo, itens, etapas,
   total, ativa, substitui, criado_em}`. `numero`: 0 no contrato, 1, 2… nos aditivos (o maior ativo + 1). `data`
@@ -337,7 +249,7 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
     etapas e pelo `organizar-fases` (o tópico vai com o item para a etapa padrão, e o Desfazer volta; só os títulos
     de nível 1 viram os das etapas, e a linha de nível 2 fica com o nome e vai para a etapa do primeiro item abaixo
     dela); o Desfazer de uma versão leva os tópicos dela junto. Não são documento: reordenar e somar continuam livres com eles, e só o
-    lançamento (gasto, pedido, tópico manual…) numa etapa que mudaria de número trava, como antes.
+    lançamento (gasto, tópico manual…) numa etapa que mudaria de número trava, como antes.
 - **Orçamento padronizado** (`padronizar=true`, só no contrato novo; com `somar` ou `tipo=aditivo` → 422): cada linha
   da planilha é **encaixada numa etapa da lista padrão** (`ETAPAS_FIXAS`, as 24 da obra sem orçamento), e a obra fica
   comparável com as outras. Regra em `canteiro_dominio.encaixe.etapa_no_contexto`: a linha que diz o que é ("Porta
@@ -364,10 +276,10 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   pelas fases de antes da lista), e **prevê a obra completa**: das fases de obra que já têm orçamento estima o porte e
   descreve os serviços típicos das que faltam (`canteiro_dominio.cronograma.estimar_fases_faltantes`), gravados como
   itens com `fonte: "estimativa"` na etapa padrão da fase (`encaixe.etapa_da_estimativa`). O estimado **não é orçado**:
-  fica em `estimado` (ver Previsto × realizado), não entra no `total` da versão nem em Compras, e o cronograma usa
+  fica em `estimado` (ver Orçado × gasto), não entra no `total` da versão, e o cronograma usa
   orçado + estimado como peso. `fases` = os nomes das etapas do orçamento depois. 422 se não há orçamento, se nada muda
   ("O orçamento já está nas etapas padrão, e a obra já está prevista inteira.") ou se há aditivo num contrato ainda fora
-  da lista; 409 se há gasto ou pedido numa etapa que mudaria de sentido ("Há gasto ou pedido lançado nas etapas 7…").
+  da lista; 409 se há gasto numa etapa que mudaria de sentido ("Há gasto lançado nas etapas 7…").
   O item que já está numa etapa padrão fica onde está (a escolha da pessoa não se desfaz). Registro "Previu a obra
   completa: N etapas, M estimadas", Desfazer `restaurar_etapas` (volta etapa, tópico e `grupo` dos itens, os títulos e
   `padronizada`; zera os estimados criados).
@@ -412,8 +324,8 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   hoje → 422 "Nada mudou…"; `versao_id` (o contrato vigente que a tela viu; a web manda sempre) que não é mais o
   vigente → 409 "O orçamento mudou desde que você abriu a tela; recarregue e confira a ordem." (depois de uma
   reordenação as chaves são sempre 1..N, e só o `versao_id` denuncia a tela velha); obra aprovada → 409; aditivo vigente → 409; orçamento mudou entre a leitura e a gravação →
-  409; **lançamento numa etapa que mudaria de número** (gasto não estornado, linha de pedido não cancelado, tópico,
-  movimento, insumo, cronograma) → 409 "Já há lançamento (gasto, pedido, tópico ou cronograma) na etapa 3 FUNDAÇÕES:
+  409; **lançamento numa etapa que mudaria de número** (gasto não estornado, tópico, cronograma) → 409 "Já há
+  lançamento (gasto, tópico ou cronograma) na etapa 3 FUNDAÇÕES:
   renumerar levaria o lançamento para outra etapa." (renumerar trocaria calado a etapa dele); viewer → 403; obra de
   outro cliente → 404.
   - **Desfazer de uma mudança de ordem** (a reordenação, ou o somar que reordenou): a receita guarda
@@ -451,71 +363,55 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `etapas_itens` (JSON `{"ordem": "etapa"}`) aponta a etapa de itens específicos (`"escolhida"`; etapa que não existe
   no orçamento nem na planilha → 422; vale a chave da prévia ou a original da planilha). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
   sem item some da versão.
-- **Previsto × realizado** (Fase 3): cada etapa e os totais trazem também `cotando`, `comprometido` e `realizado`
-  (centavos), somados das linhas dos pedidos da obra pela `etapa` de cada linha. `cotando` = pedidos em cotação ·
-  `comprometido` = pedidos de aprovado em diante pelo valor da linha (o maior entre o pedido e o entregue; pedido
-  encerrado com sobra compromete só o que chegou) · `realizado` = o que já foi entregue ou medido, pelo preço do pedido.
-  Cancelado não conta. `totais.sem_etapa` = o pedido sem etapa ou em etapa que não está nas versões vigentes (já somado
-  nos totais). `atual` é o orçado da planilha como veio: na de **venda** (`natureza: "venda"`) já é o custo, e o preço
-  do cliente vem à parte em `venda` (por etapa e em `totais`; `null` sem planilha de venda); na planilha de engenheiro
-  importada como `custo` ele ainda é preço de contrato (com BDI). Comprometido e realizado são custo de compra.
-  `estimado` (por etapa e em `totais`) = os serviços que a previsão da obra estimou (`fonte: "estimativa"`), **fora**
-  de `contratado`/`atual`/`saldo`; a etapa só estimada aparece com `atual` 0. As etapas saem na ordem de `lista_etapas`
-  das versões vigentes (contrato primeiro).
-- **Gastos no realizado** (regra em `canteiro_dominio.gastos.gastos_no_orcamento`): o **gasto avulso** (comprovante
-  confirmado **sem** `pedido_id`, não estornado) é dinheiro que saiu e soma, pelo `valor`, no `comprometido` **e** no
-  `realizado` da etapa dele, mexendo no `saldo` e no `estourou`; cada etapa traz `gastos_avulsos` (a parte que veio de
-  gasto, já somada). **Pagamento de pedido não soma**: o custo do pedido já está no realizado pela entrega; somar o
-  pagamento contaria duas vezes. `totais.gastos` = `{total, nas_etapas, fora_do_orcamento, na_lista_padrao,
-  sem_etapa_do_orcamento}`, todos já somados no `comprometido`/`realizado`/`saldo` dos totais: `fora_do_orcamento` =
-  gastos nas **etapas extras** (não engordam etapa do orçamento); `sem_etapa_do_orcamento` = gastos numa chave que não
-  é etapa vigente nem extra (lançados na lista padrão antes da importação, ou etapa de versão desfeita; reclassifique
-  com `PATCH /gastos/{id}`); `na_lista_padrao` = obra sem orçamento, gastos na lista padrão.
-- **Contas prontas** (a tela e o agente só mostram): cada etapa traz `saldo` (= `atual − comprometido`, centavos;
-  negativo quando estourou) e `estourou` (`comprometido > atual`); `totais` traz `saldo` (o mesmo, da obra) e
+- **Orçado × gasto**: cada etapa, cada tópico e os totais trazem `gasto` (centavos) = os gastos confirmados. Os nomes
+  de quando havia compras vêm juntos, com o mesmo número, até os clientes lerem `gasto`: `comprometido` = `realizado`
+  = `gasto`, e `cotando` = 0. `totais.sem_etapa` = o gasto que conta na obra sem estar numa etapa do orçamento
+  (extra, a definir, lista padrão, etapa de versão desfeita; já somado nos totais). `atual` é o orçado da planilha como
+  veio: na de **venda** (`natureza: "venda"`) já é o custo, e o preço do cliente vem à parte em `venda` (por etapa e em
+  `totais`; `null` sem planilha de venda); na planilha de engenheiro importada como `custo` ele ainda é preço de
+  contrato (com BDI). `estimado` (por etapa e em `totais`) = os serviços que a previsão da obra estimou
+  (`fonte: "estimativa"`), **fora** de `contratado`/`atual`/`saldo`; a etapa só estimada aparece com `atual` 0. As
+  etapas saem na ordem de `lista_etapas` das versões vigentes (contrato primeiro).
+- **Gastos no orçamento** (regra em `canteiro_dominio.gastos.gastos_no_orcamento`): todo gasto confirmado e não
+  estornado é dinheiro que saiu e soma, pelo `valor`, na etapa dele, mexendo no `saldo` e no `estourou`; cada etapa
+  traz `gastos_avulsos` (o mesmo número, nome de quando havia pedido). O gasto que era pagamento de pedido (`pedido_id`
+  gravado antes de Compras sair) conta como qualquer outro. `totais.gastos` = `{total, nas_etapas, fora_do_orcamento,
+  na_lista_padrao, sem_etapa_do_orcamento, a_definir}`, todos já somados nos totais: `fora_do_orcamento` = gastos nas
+  **etapas extras** (não engordam etapa do orçamento); `sem_etapa_do_orcamento` = gastos numa chave que não é etapa
+  vigente nem extra (lançados na lista padrão antes da importação, ou etapa de versão desfeita; reclassifique com
+  `PATCH /gastos/{id}`); `na_lista_padrao` = obra sem orçamento, gastos na lista padrão.
+- **Contas prontas** (a tela e o agente só mostram): cada etapa traz `saldo` (= `atual − gasto`, centavos; negativo
+  quando estourou) e `estourou` (gasto > `atual`); `totais` traz `saldo` (o mesmo, da obra) e
   `aditivos_pct` = aditivos sobre o contratado em **centésimos de %** (290 = 2,9%; arredondado ao mais próximo) ou
   `null` sem contrato. A base (`contratado`) é o total do **contrato vigente**: o orçamento aprovado inteiro, já com o
   que foi somado antes de aprovar (pranchas + planilha), não só a primeira importação. Sem aditivo de verdade, 0. É
   número neutro (não há limite legal: obra privada).
 - **Por tópico** (`etapas[].topicos`): cada etapa aberta em `[{topico_id, nome, origem, contratado, aditivos, atual,
-  cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
+  gasto, cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
   ordem: os tópicos do orçamento da etapa (mesmo sem nada lançado; `contratado`/`aditivos` = a soma dos itens dele),
-  os tópicos manuais que têm pedido ou gasto avulso na etapa (`origem: "manual"`, orçado 0), os de versão desligada
+  os tópicos manuais que têm gasto na etapa (`origem: "manual"`, orçado 0), os de versão desligada
   que têm (`origem: "orcamento"`, orçado 0: continuam sem renomear nem arquivar) e
-  **"Sem tópico"** (`topico_id: null`, `origem: null`: os itens sem tópico, as linhas de pedido e os gastos lançados
-  só na etapa; some quando tudo nele é 0). Somados, dão a etapa. Etapa sem tópico nenhum → `topicos: []`. Cada item
+  **"Sem tópico"** (`topico_id: null`, `origem: null`: os itens sem tópico e os gastos lançados só na etapa; some
+  quando tudo nele é 0). Somados, dão a etapa. Etapa sem tópico nenhum → `topicos: []`. Cada item
   de `itens` traz o `topico_id` dele (também nas versões gravadas antes do campo, montado pela numeração).
 - `PATCH /obras/{obra_id}/orcamento/itens/{item_id}` (admin) `{quantidade?, valor_unitario?}` → `{item: ItemOrcamento,
   total_versao, registro_id}`. O total da linha vira quantidade × unitário, e a diferença soma no total da versão.
   Título de etapa, quantidade zero, quantidade negativa fora de aditivo, preço negativo ou nada mudou → 422; versão fora
-  de vigência → 409; item de outra obra → 404. **Orçamento aprovado:** só o preço de item que estava em R$ 0,00 (o
-  `valor_unitario` do insumo acompanha, com o preço médio quando o insumo junta mais de uma linha; insumo cadastrado com
-  preço próprio fica com ele); o resto → 409 "lance um aditivo". Desfazer/Refazer `editar_item_orcamento`: 409 se a linha
+  de vigência → 409; item de outra obra → 404. **Orçamento aprovado:** só o preço de item que estava em R$ 0,00; o
+  resto → 409 "lance um aditivo". Desfazer/Refazer `editar_item_orcamento`: 409 se a linha
   mudou de novo, ou se a edição é de antes da aprovação e a obra já foi aprovada.
-- `POST /obras/{obra_id}/orcamento/aprovar` → `Obra + {registro_id, insumos_criados, insumos_atualizados}`. Tira a obra de
-  `em_orcamento` para `em_andamento` e, **com contrato vigente, gera Compras**: cada item com quantidade > 0 das versões
-  vigentes (menos o estimado pela previsão da obra, `fonte: "estimativa"`) vira insumo (`precisa_ate_o_fim` = quantidade, `valor_unitario`, `etapa`). O que veio das pranchas é
-  `material`; o que veio de planilha, `servico`. Mesmo nome em mais de uma linha = um insumo só (quantidades somadas,
-  preço médio ponderado, etapa de maior valor). Insumo já cadastrado não duplica: fica o maior `precisa_ate_o_fim`, e o
-  preço só entra se o dele for 0. Mesmo nome com unidades diferentes (no orçamento, ou contra o cadastrado) → 422
-  listando os itens, sem aprovar. Grava em lotes e só a última transação vira o status e o registro (repetir depois de
-  uma queda é seguro). Desfazer: arquiva os insumos gerados (reaprovar reaproveita os IDs) e devolve os atualizados; 409
-  se algum gerado teve pedido não cancelado ou movimento não estornado, se foi editado depois, ou se há aditivo lançado
-  após a aprovação (desfaça o aditivo primeiro). **Em lotes e retomável:** se parar no meio (queda ou 409), a obra fica
-  com `status: "desfazendo_aprovacao"` e `desfazendo_registro_id` (o registro a desfazer de novo); o mesmo
-  `POST /registro/{id}/desfazer` continua de onde parou e só no fim a obra volta a `em_orcamento`. Nesse estado Compras
-  está pela metade, e criar pedido, receber entrega, lançar movimento, cadastrar ou importar insumo, editar linha,
-  importar versão e aprovar → 409; cancelar pedido e estornar movimento continuam valendo, para resolver o que travou.
-- **Com a obra aprovada:** aditivo mexe em Compras na hora (item novo vira insumo, item existente soma, supressão reduz
-  até 0; até 200 itens por aditivo; unidade diferente → 422), e o Desfazer do aditivo volta isso. Trocar o contrato →
-  409 "desfaça a aprovação ou lance um aditivo"; importar contrato sem nenhum vigente e retirar o contrato também dão
-  409 quando a obra passou pelo Aprovar (`Obra.aprovada`). Obra antiga em andamento, que nunca foi aprovada, segue
-  podendo. Uma aprovação que parou antes de virar o status não aparece em Compras nem conta em `tem_orcamento`.
-- Sem contrato (lista de materiais), a aprovação não gera nada: só muda o status.
-  Já aprovado → 409; sem contrato vigente **e** sem insumo com `precisa_ate_o_fim > 0` → 422. Registro "Aprovou o
-  orçamento de X (N itens, R$ total)" com o orçado atual (contrato + aditivos vigentes; sem contrato, "N insumos" da
-  lista de materiais) com `desfazer` `reabrir_orcamento` (volta para
-  `em_orcamento`; 409 se a obra já não está em andamento). A tela confirma antes, mostrando total e nº de itens.
+- `POST /obras/{obra_id}/orcamento/aprovar` (admin) → `Obra + registro_id`. Tira a obra de `em_orcamento` para
+  `em_andamento` e marca `aprovada`: o orçado atual (contrato + aditivos vigentes) passa a ser o que cronograma e gastos
+  seguem. Já aprovado → 409; sem contrato vigente → 422 "Importe o orçamento antes de aprovar."; versões mudadas entre
+  a leitura e a gravação → 409. Registro "Aprovou o orçamento de X (N itens, R$ total)" com `desfazer`
+  `reabrir_orcamento` (volta para `em_orcamento` e `aprovada: false`; 409 se a obra já não está em andamento). A tela
+  confirma antes, mostrando total e nº de itens.
+- **Com a obra aprovada:** aditivo soma e o Desfazer dele tira. Trocar o contrato → 409 "desfaça a aprovação ou lance
+  um aditivo"; importar contrato sem nenhum vigente e retirar o contrato também dão 409 quando a obra passou pelo
+  Aprovar (`Obra.aprovada`). Obra antiga em andamento, que nunca foi aprovada, segue podendo.
+- `status: "desfazendo_aprovacao"` (com `desfazendo_registro_id`) é de quando o Desfazer da aprovação rodava em lotes e
+  podia parar no meio. Não nasce mais; a obra que ficou assim recusa importar versão, editar linha e aprovar (409) até
+  o `POST /registro/{id}/desfazer` daquela aprovação, que a devolve a `em_orcamento`.
 
 ## Hoje na obra
 
@@ -526,15 +422,14 @@ material de almoxarifado vem da lista de materiais, do cadastro ou (Fase 2) do p
   `semanas_total` se a obra atrasar; `mais` = pontos fora do limite.
 - `Ponto` = `{tipo, prioridade, titulo, detalhe, acao: {tela, rotulo, filtro?}}`, no máximo 6, um por tipo, em ordem
   `pede_voce`, `atencao`, `a_caminho`, `ok`. `pede_voce`: `desfazendo_aprovacao`, `sem_orcamento`, `gastos_a_conferir`.
-  Proposta pendente não vira ponto: a tela mostra um cartão para cada uma, e ela conta em `esperando`. `atencao`: `entregas_atrasadas`, `falta_comprar` (`filtro.etapa`), `etapas_estouradas`,
-  `etapas_atrasadas`, `itens_sem_preco`, `orcamento_so_pranchas` (só em orçamento), `gastos_sem_etapa`. `a_caminho`:
-  `entregas_semana`. `falta_comprar` (todo insumo com `conta.comprar > 0`, material ou serviço, como a tela de Compras): etapas em andamento e as que começam em até 4 semanas (o cronograma é mensal: conta
-  do dia 1 do 1º mês); sem cronograma, a 1ª etapa do orçamento com falta.
-- `Evento` = `{data, tipo: "entrega" | "inicio_etapa", titulo, detalhe, acao}`, de hoje até hoje + 7, por data.
+  Proposta pendente não vira ponto: a tela mostra um cartão para cada uma, e ela conta em `esperando`. `atencao`:
+  `etapas_estouradas`, `etapas_atrasadas`, `itens_sem_preco`, `orcamento_so_pranchas` (só em orçamento),
+  `gastos_sem_etapa`. `acao.tela` ∈ `projeto | orcamento | cronograma | gastos | aprovacoes | historico`.
+- `Evento` = `{data, tipo: "inicio_etapa", titulo, detalhe, acao}`, de hoje até hoje + 7, por data.
 
 ## Listagens paginadas
 
-Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mais antigo e paginam por `antes_de`:
+Registro, propostas, gastos, comprovantes e sessões vêm do mais novo para o mais antigo e paginam por `antes_de`:
 - a página seguinte se pede com `antes_de` = o campo de data do ÚLTIMO item recebido (`criado_em`; nas sessões,
   `atualizado_em`), sem mexer nos outros filtros;
 - o cursor é **exclusivo** (`< antes_de`) e a página **nunca parte um empate**: se o item seguinte tem o mesmo instante
@@ -544,62 +439,13 @@ Registro, propostas, pedidos, movimentos e sessões vêm do mais novo para o mai
 - `antes_de` em ISO 8601 **com fuso** (`2026-11-01T13:00:00.123Z` ou `-03:00`); sem fuso → 422. A API compara no
   milissegundo, como grava.
 
-## Suprimentos: pedidos, entregas e fornecedores
+## Etapas e fornecedores
 
 - `GET /obras/{obra_id}/etapas` → `[{etapa, descricao}]`: as etapas das versões vigentes do orçamento (contrato
   primeiro, depois as que nasceram em aditivo). Lista vazia = obra sem orçamento; aí a etapa é opcional em tudo.
-- `GET /obras/{obra_id}/pedidos?status=…&limite=100&antes_de=…` → `[Pedido]` (mais novos primeiro). `status` pode
-  repetir (`?status=enviado&status=em_transito`, até 30 valores): vira um filtro "in". `limite` até 500.
-- `Pedido` = `{id, numero, obra_id, fornecedor, fornecedor_id, previsao, observacao, status, valor, recebimentos,
-  recebido_em ("AAAA-MM-DD" da última entrega, null se nada chegou), criado_em,
-  linhas: [{insumo_id, nome, unidade, tipo, etapa, topico_id, quantidade, valor_unitario, total, recebida,
-  falta_entregar}]}`. `topico_id` = o tópico da `etapa` na árvore da obra (`null` = só a etapa; pedido gravado antes
-  do campo também sai `null`). Nome, unidade e tipo são cópia do insumo no momento do pedido; o pedido gravado antes
-  das linhas (um insumo só) não tem a cópia, e a leitura completa pelo insumo. `valor` = soma dos `total`;
-  `recebida` soma as entregas; `recebimentos` = quantas entregas valem. `falta_entregar` (milésimos, calculado pela
-  API com `regras.falta_na_linha`) = `quantidade − recebida`, nunca negativo, e 0 em pedido `conferido` (encerrado)
-  ou `cancelado`; vem no `GET …/pedidos` e nas respostas de criar, avançar e editar. Pedido gravado antes das linhas
-  sai no mesmo formato, com uma linha.
-- Status: `em_cotacao → aprovado → enviado → em_transito → (recebido) → parcial → conferido`, e `cancelado` até antes
-  de receber. `parcial` = recebeu parte, o resto continua "a caminho". A tela chama `conferido` de **Recebido**.
-  Conta: `cotando` soma as linhas dos pedidos em cotação; `a_caminho` soma o que **falta entregar** em cada linha
-  (`quantidade − recebida`, nunca negativo) dos pedidos de aprovado a parcial.
-- `POST /obras/{obra_id}/pedidos` (admin) `{fornecedor, fornecedor_id?, previsao?, observacao?, aprovado?, linhas:
-  [{insumo_id, quantidade, valor_unitario?, total?, etapa?, topico_id?}]}` → `Pedido + registro_id` (201; PED-NNNN por
-  tenant). 1 a 50 linhas; o mesmo insumo duas vezes → 422. `total` padrão = quantidade × unitário arredondado ao
-  centavo (informe quando o total combinado não fecha). Com orçamento importado, toda linha exige `etapa` válida.
-  `topico_id` (opcional, ≤ 80) tem de ser um tópico **daquela etapa** em `GET …/arvore` (do orçamento ou manual) →
-  senão 422 "Esse tópico não está na etapa …"; tópico sem etapa → 422. `aprovado`
-  `true` → nasce `aprovado`. O formato antigo de um insumo só (`{insumo_id, quantidade, fornecedor, valor}`) ainda é
-  aceito e vira uma linha com `total = valor`. Registro: `"PED-0168 criado: 2 itens (Cimento e Brita 1) com X (R$ …)"`;
-  desfazer `cancelar_pedido` só enquanto o pedido estiver no status de nascimento.
-- `PATCH /pedidos/{pedido_id}` (admin) `{previsao?, observacao?}` → `Pedido + registro_id`. Registro "PED-0168:
-  previsão 2026-11-10 → 2026-11-24", desfazer `editar_pedido` (409 se editado de novo depois).
-- `POST /obras/{obra_id}/pedidos` aceita `chave_idempotencia?` (8 a 64): a mesma chave devolve o pedido já criado (200,
-  mesmo `id` e `registro_id`, no estado de agora); com outro conteúdo → 409. A linha sem `topico_id` assina como antes
-  do campo: a repetição de uma chave enviada antes dele continua 200.
-- `POST /pedidos/{pedido_id}/recebimentos` (admin) `{nf_numero?, nf_data?, nf_valor?, linhas: [{indice, quantidade}],
-  chave_idempotencia}` → `{recebimento, pedido, registro_id}` (201; a mesma chave devolve a mesma entrega com 200, e
-  com outras quantidades → 409). Vale de `aprovado` a `parcial`. Linha de material dá ENTRADA no almoxarifado na
-  mesma transação (`origem_doc` "PED-0168 · NF 1187", `etapa` da linha); linha de serviço só soma o medido. Entregar a
-  mais é aceito. Tudo entregue → `conferido`; senão → `parcial`. Registro: `"PED-0168 · 1ª entrega (NF 1187): 120 sc
-  de Cimento; 18 de 25 m³ de Brita 1 · faltam 7 m³ de Brita 1"` ("medição" quando só há serviço). Desfazer
-  `desfazer_recebimento` estorna as entradas e volta as quantidades e o status, **só para a última entrega** (409 se
-  houver outra depois ou se o pedido foi encerrado).
-- `Recebimento` = `{id, pedido_id, pedido_numero, numero, nf_numero, nf_data, nf_valor, valor, criado_em, quem,
-  linhas: [{indice, insumo_id, nome, unidade, tipo, etapa, quantidade, valor}], movimentos}`. `valor` = as linhas pelo
-  preço do pedido; a tela compara com `nf_valor`. `GET /pedidos/{pedido_id}/recebimentos` → as que valem, em ordem.
-- `POST /pedidos/{pedido_id}/avancar` `{para, quantidade_recebida?, nf?}` → `Pedido + registro_id`. Valida em
-  `regras.validar_transicao`. `para = conferido` tem dois sentidos: de `parcial`, **encerra** o resto (o fornecedor
-  não manda; sai do "a caminho"; registro "PED-0157 encerrado: o resto não vem (4 m³ de Areia média)", desfazer
-  `voltar_pedido`); de `recebido`, recebe tudo o que falta numa entrega só (o caminho que o agente usa), com
-  `quantidade_recebida` (só em pedido de uma linha) e `nf` — vira um `Recebimento` igual ao de cima.
-  `quantidade_recebida`/`nf` com outro destino → 422.
-- **De `parcial`, `para = conferido` só encerra:** `quantidade_recebida` ou `nf` junto → 422 ("De parcial, conferir só
-  encerra o resto…"); antes eram descartados em silêncio. O que chegou entra por `POST …/recebimentos` (ou proposta
-  `registrar_entrega`).
 - `GET /fornecedores` → `[Fornecedor]` por nome; `Fornecedor` = `{id, nome, cnpj, contato, telefone, email}` (cnpj só
-  dígitos ou `""`). São do tenant, valem para todas as obras.
+  dígitos ou `""`). São do tenant, valem para todas as obras. A leitura do comprovante casa o CNPJ lido com o
+  cadastrado.
 - `POST /fornecedores` (admin) `{nome, cnpj?, contato?, telefone?, email?}` → `Fornecedor + registro_id` (201). CNPJ
   com ou sem pontuação, dígitos verificadores conferidos (inválido → 422); CNPJ repetido, ou o mesmo nome sem CNPJ →
   409 "Já cadastrado: X". Sem desfazer.
@@ -653,24 +499,23 @@ atual de cada etapa (contrato + aditivos vigentes).
     totais}`. `base` ∈ `medicao` (avanço = última medição) | `gastos` (sem medição: realizado ÷ orçado faz o papel do
     avanço) | `sem_cronograma` (tudo em `totais.sem_mes`).
   - `meses`: `[{mes, pago, previsto, projetado, projetado_no_ritmo}]`, do primeiro mês com pagamento ou do início do
-    cronograma até o último mês projetado. `pago` = gastos confirmados (avulsos e pagamentos de pedido) pelo mês do
+    cronograma até o último mês projetado. `pago` = gastos confirmados pelo mês do
     pagamento; `previsto` = o `mensal[].previsto` do cronograma vigente; `projetado` = o que falta, **pelo cronograma**
     (o resto do plano empurrado por `atraso_meses`, nada antes do mês corrente); `projetado_no_ritmo` = o mesmo
     esticado pelo ritmo medido (`ritmo_pct` = % medido ÷ % previsto na última medição, entre 1000 e 10000; 10000 sem
     medição, e aí os dois cenários são iguais). Os dois somam `totais.falta − totais.sem_mes`.
-  - `etapas`: `[{etapa, descricao, atual, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`. `falta` =
+  - `etapas`: `[{etapa, descricao, atual, gasto, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`
+    (`realizado` = `gasto`, até os clientes lerem `gasto`). `falta` =
     orçado atual − realizado (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
     executado pela medição e ainda não realizado, no mês corrente.
-  - `totais`: `{orcado, realizado, pago, falta, custo_final, desvio, entregue_sem_pagamento, sem_mes}`; `custo_final`
-    = realizado + Σ falta das etapas, que é `pago + falta` salvo quando o pago adiantado passa de tudo o que falta (o
-    crédito que sobra não aparece na série); `desvio` = custo_final − orçado (o estouro que já houve, e gasto
-    fora do orçamento); `entregue_sem_pagamento` = realizado − pago (pedido entregue sem pagamento registrado; está no
-    mês corrente). Pago adiantado desconta dos primeiros meses, sem mês negativo.
+  - `totais`: `{orcado, gasto, realizado, pago, falta, custo_final, desvio, sem_mes}`; `gasto` = `realizado` = `pago`
+    (os gastos confirmados); `custo_final` = realizado + Σ falta das etapas; `desvio` = custo_final − orçado (o estouro que já
+    houve, e gasto fora do orçamento).
 
 ## Resumo de uma obra ("como está a obra?")
 
 - `GET /obras/{obra_id}/resumo?hoje=AAAA-MM-DD` (qualquer papel; `hoje` padrão = hoje em São Paulo) → `ResumoDaObra` =
-  `{obra: Obra, hoje, cronograma, financeiro, entregas, almoxarifado, pendencias}`, tudo somado na API a partir do que
+  `{obra: Obra, hoje, cronograma, financeiro, pendencias}`, tudo somado na API a partir do que
   as outras rotas já calculam. Cada bloco diz quando o dado não existe.
   - `cronograma`: `{cadastrado, mes_corrente, termino_contratual, termino_projetado, termino_original, atraso_decimos,
     atraso_base_decimos, revisoes, mes_ultima_medicao, medicoes, pct_previsto_na_medicao, pct_medido, previsto_no_mes,
@@ -684,19 +529,13 @@ atual de cada etapa (contrato + aditivos vigentes).
     ou com situação diferente de `nao_comecou`, nunca "começa"); `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
-  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
-    saldo, falta_gastar, realizado_pct, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de `GET …/orcamento`;
-    `realizado` e `comprometido` já com os gastos avulsos, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra:
-    `falta_gastar` = orçado atual − realizado (nunca negativo; realizado + falta fecham no orçado) e `realizado_pct` =
-    realizado ÷ orçado em centésimos de ponto (`null` sem orçado). `pago` = todo gasto confirmado e não estornado
-    (avulso e pagamento de pedido) e `entregue_a_pagar` = `max(0, realizado − pago)`, a mesma conta de `totais.pago` e
-    `totais.entregue_sem_pagamento` do desembolso: **realizado ("gasto até hoje") = pago + entregue_a_pagar**, salvo
-    quando se pagou além do entregue (adiantamento), em que `entregue_a_pagar` = 0 e `pago` > `realizado`.
-  - `entregas`: `{hoje, atrasadas, proximos_7_dias, sem_previsao, nf_para_conferir}`; cada entrega =
-    `{pedido_id, numero, fornecedor, status, previsao, itens: [{nome, unidade, falta_entregar}]}`, só pedidos de
-    aprovado a parcial, pela `previsao` "AAAA-MM-DD" (outro formato conta em `sem_previsao`).
-  - `almoxarifado`: `{insumos, falta_comprar: [{insumo_id, nome, unidade, falta, texto}], sem_previsao,
-    consumo_projetado: false}` (materiais; o consumo por semana ainda não é projetado).
+  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, gasto, cotando, comprometido,
+    realizado, saldo, falta_gastar, realizado_pct, pago, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os
+    totais de `GET …/orcamento`, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra: `falta_gastar` = orçado
+    atual − gasto (nunca negativo; gasto + falta fecham no orçado) e `realizado_pct` = gasto ÷ orçado em centésimos
+    de ponto (`null` sem orçado). `pago` = todo gasto confirmado e não estornado, o mesmo `totais.pago` do desembolso e
+    o mesmo número do `gasto`. `cotando` (0), `comprometido` e `realizado` (= `gasto`) ficam até os clientes lerem
+    `gasto`.
   - `pendencias`: `{propostas, titulos}` (até 5 títulos, as mais novas primeiro).
 
 ## Gastos da obra: comprovantes, leitura por IA e revisão
@@ -708,10 +547,9 @@ Só a confirmação cria o `Gasto`; até lá o comprovante fica "a revisar" e n�
 
 **Uma árvore só, a do orçamento quando ele existe.** Obra **com orçamento** (alguma versão vigente): as etapas de
 gasto são as **etapas do orçamento** (as mesmas de `GET …/etapas`, na ordem dele; chave = o código da etapa, como
-`"18"`, a mesma chave de `GET …/orcamento`, do cronograma e da apropriação de pedidos) mais as **etapas extras** da
+`"18"`, a mesma chave de `GET …/orcamento` e do cronograma) mais as **etapas extras** da
 obra. Obra **sem orçamento**: a **lista padrão** de 24 etapas (chave estável como `fundacao`, `eletrica`, `pessoal`)
-mais as extras antes de "Outros". O gasto avulso soma no `realizado` da etapa do orçamento (ver "Gastos no realizado"
-no orçamento); o das extras fica "fora do orçamento". Gasto lançado na lista padrão antes de a obra importar o
+mais as extras antes de "Outros". O gasto soma no `realizado` da etapa do orçamento (ver "Gastos no orçamento"); o das extras fica "fora do orçamento". Gasto lançado na lista padrão antes de a obra importar o
 orçamento **continua contando** (nos totais) e aparece como **"sem etapa do orçamento"** até alguém reclassificar.
 
 `origem` (em `/arvore`, no resumo e nos lançados) diz de onde vem a etapa: `orcamento` · `padrao` (lista padrão, só em
@@ -736,7 +574,7 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   a descrição de cada etapa dele, com ou sem o código; sem: a lista padrão) / os tópicos da etapa, os do orçamento
   inclusive → 422. `etapa` do tópico tem de estar na árvore de hoje → 422. Até 20 etapas extras por obra e 30 tópicos
   por etapa (os do orçamento contam). Desfazer a
-  criação arquiva; refazer reativa. Limite e nome único valem também com pedidos simultâneos e no Desfazer/Refazer
+  criação arquiva; refazer reativa. Limite e nome único valem também com requisições simultâneas e no Desfazer/Refazer
   (reativar ou voltar o nome antigo que outro pegou nesse meio-tempo → 422 "Já existe: …").
 - `PATCH /etapas-extras/{id}` e `PATCH /topicos/{id}` `{nome?, arquivado?}` (admin) → renomeia e/ou arquiva/reativa,
   com Desfazer e Refazer. Nada mudou → 422. Arquivado sai da árvore e não recebe gasto novo; gasto antigo fica.
@@ -784,7 +622,7 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
     de um ano → conferir + aviso. CNPJ lido que bate com fornecedor cadastrado → opção marcada com `fornecedor_id`.
     `a_pagar`/`incerto` → aviso de que o documento não comprova pagamento. Leitura que falhou → o erro vem em `avisos`.
 - `POST /comprovantes/{id}/confirmar` (admin) `{valor, data_pagamento, favorecido, descricao, etapa, topico_id?,
-  fornecedor_id?, pedido_id?}` → `{gasto, comprovante, registro_id}` (201). `etapa: null` (obrigatório mandar o campo) é
+  fornecedor_id?}` → `{gasto, comprovante, registro_id}` (201). Campo a mais (como o antigo `pedido_id`) → 422. `etapa: null` (obrigatório mandar o campo) é
   o "ver depois": sem tópico, conta no realizado e no comprometido da obra e em nenhuma etapa (`a_definir` em
   `totais.gastos` e em `GET …/gastos/resumo`, com uma linha `etapa: null`); escolhe-se a etapa depois com
   `PATCH /gastos/{id}`. Valor > 0 em centavos; data `AAAA-MM-DD`
@@ -793,47 +631,28 @@ que agora tem orçamento, ou etapa de versão desfeita; só no resumo e nos lan�
   422 e o comprovante continua na fila. Já revisado → 409. Registro "Gasto de R$ 350,00 em Instalações elétricas ›
   Quadro: mão de obra (João da Silva)", desfazer `estornar_gasto`: o gasto sai das contas (`estornado`) e o
   comprovante volta para a fila.
-  - **Com `pedido_id`** (pedido da obra, de aprovado em diante): o gasto é o pagamento do pedido. Soma em
-    `Pedido.pago` e **não** no total da etapa nem no realizado do orçamento, porque o custo do pedido já conta pela
-    entrega. `pago` nunca passa do
-    `valor` do pedido: confirmar um gasto que passaria → **409** (o comprovante continua na fila; a pessoa corrige o
-    valor, liga a outro pedido ou confirma sem pedido). O estorno tira de `pago` só o valor daquele gasto.
 - `POST /comprovantes/{id}/descartar` `{motivo?}` (admin) → `Comprovante + registro_id`. O arquivo fica guardado.
   Desfazer `reabrir_comprovante` volta para a fila.
 
 **Gastos:**
 
 - `Gasto` = `{id, obra_id, comprovante_id, valor, data_pagamento, favorecido, fornecedor_id, descricao, etapa,
-  topico_id, pedido_id, quem, usuario_id, estornado, criado_em}`.
-- **Gasto fora do orçado** (derivado, não se edita): `fora_do_orcado: true` no gasto **avulso** (sem `pedido_id`,
-  não estornado) de obra **com orçamento**; pagamento de pedido e obra sem orçamento → `false`. Vem em
-  `GET …/gastos`, na resposta do confirmar (`gasto`) e do `PATCH /gastos/{id}`. **Só marca**: o gasto continua
-  somando no realizado da etapa dele, como antes. Critério escolhido por ser o confiável: casar a descrição do
-  comprovante ("vidros 4mm", "diária do pedreiro") com o serviço do orçamento erra para os dois lados; é o pedido que
-  liga o dinheiro a um item. A tela diz "lançado fora de pedido". (Não confundir com o `fora_do_orcamento` já
-  existente, que é só a parte nas **etapas extras**.)
+  topico_id, quem, usuario_id, estornado, criado_em, natureza_fiscal, ibs_cbs, nf_cno, retencao}`.
 - `GET /obras/{obra_id}/gastos?etapa=…&limite=100&antes_de=…` → confirmados e não estornados (mais novos primeiro),
-  cada um com `fora_do_orcado`, `etapa_nome` (o nome de hoje; chave antiga da lista padrão mantém o nome dela, ex. "Fundação") e
+  cada um com `etapa_nome` (o nome de hoje; chave antiga da lista padrão mantém o nome dela, ex. "Fundação") e
   `etapa_origem` (`orcamento` | `padrao` | `extra` | `sem_etapa_do_orcamento`): a tela marca "sem etapa do orçamento"
   e oferece mudar a etapa.
-- `GET /obras/{obra_id}/gastos/resumo` → `{total, pagamentos_de_pedidos, a_revisar, tem_orcamento, fora_do_orcamento,
-  fora_do_orcado, sem_etapa_do_orcamento, a_definir, entregue_a_pagar, etapas: [{etapa, nome, origem, total,
-  fora_do_orcado, entregue_a_pagar, topicos: [{topico_id, nome, total}]}]}`. `entregue_a_pagar` = pedidos entregues e ainda não pagos: o mesmo número de
-  `financeiro.entregue_a_pagar` em `GET …/resumo` e de `totais.entregue_sem_pagamento` do desembolso. Por etapa: para
-  cada pedido, o recebido menos o que já se pagou dele, repartido pelas etapas das linhas na proporção do recebido
-  (linha sem etapa → `etapa: null`); o total da obra (que já desconta o pagamento adiantado de outro pedido) é então
-  dividido na proporção desse bruto, com o centavo que sobra no maior resto: **a soma das etapas fecha sempre no
-  total**. Etapa que só tem entregue a pagar aparece com `total` 0 e `topicos` vazio. `total` =
-  gastos avulsos (é o que soma no realizado do orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
+- `GET /obras/{obra_id}/gastos/resumo` → `{total, a_revisar, tem_orcamento, fora_do_orcamento,
+  sem_etapa_do_orcamento, a_definir, etapas: [{etapa, nome, origem, total, topicos: [{topico_id, nome, total}]}]}`.
+  `total` = os gastos confirmados (é o que soma no orçamento: igual a `totais.gastos.total` de `GET …/orcamento`);
   `fora_do_orcamento` e `sem_etapa_do_orcamento` = as partes do `total` nas extras e em chave fora da árvore (com
-  orçamento; sem orçamento é 0). `fora_do_orcado` (total e por etapa) = a parte do `total` lançada **fora de pedido**
-  numa obra com orçamento (ver "Gasto fora do orçado"); sem orçamento é 0. `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
+  orçamento; sem orçamento é 0). `topico_id: null` = "Sem tópico". Etapas na ordem da árvore; inclui etapa e tópico já
   arquivados; as `sem_etapa_do_orcamento` vêm por último.
 - `PATCH /gastos/{gasto_id}` `{etapa, topico_id?}` (admin) → `Gasto + {etapa_nome, etapa_origem, registro_id}`. Muda a
   etapa (e o tópico; sem `topico_id` = sem tópico) de um gasto confirmado: é como o "sem etapa do orçamento" vai para
   uma etapa do orçamento e passa a somar no realizado dela. Destino tem de estar na árvore de hoje e o tópico naquela
   etapa → 422; mesma etapa e tópico → 422 "Nada mudou."; gasto estornado → 409; não existe → 404; viewer → 403.
-  Vale também para pagamento de pedido (que continua sem somar). Registro "Mudou o gasto de R$ 120,00 (descrição) de
+  Registro "Mudou o gasto de R$ 120,00 (descrição) de
   Fundação para 2 FUNDAÇÕES", desfazer `reclassificar_gasto`: volta para a etapa de antes (mesmo que ela não esteja
   mais na árvore), com Refazer; 409 se a etapa do gasto mudou de novo depois ou se ele foi estornado.
 
@@ -894,10 +713,9 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
     unidade residencial; `prestacao_servico`: base = `verba`; a pagar = débito − `creditos` (soma do `ibs_cbs` dos
     gastos), nunca negativo. `uso_proprio` → `nao_incide`. `transicao` = a frase do ano corrente (2026 teste…2033).
   - `linhas`: a conta pronta, linha a linha, para a tela e o agente citarem.
-  - `a_classificar`/`valor_a_classificar`: gastos avulsos sem natureza fiscal (contam zero no INSS); `pendentes` e
+  - `a_classificar`/`valor_a_classificar`: gastos sem natureza fiscal (contam zero no INSS); `pendentes` e
     `sem_nota`: até 20 de cada, maiores primeiro, `{id, valor, data_pagamento, favorecido, descricao,
-    natureza_fiscal, nf_cno}`; `sem_nota` traz a mão de obra sem nota e a com nota sem o CNO. Gasto de pedido conta
-    como `material` sem precisar classificar.
+    natureza_fiscal, nf_cno}`; `sem_nota` traz a mão de obra sem nota e a com nota sem o CNO.
 - `PATCH /gastos/{gasto_id}/fiscal` `{natureza_fiscal, ibs_cbs?=0, nf_cno?=null, retencao?=0}` (admin) → `Gasto +
   {etapa_nome, etapa_origem, registro_id}`. `natureza_fiscal` ∈ `folha | mao_de_obra_nf | gps | autonomo_mei |
   pre_moldado | concreto_usinado | mao_de_obra_sem_nf | material | equipamento | outros` ou `null` (a classificar).
@@ -921,53 +739,28 @@ A plataforma refaz, durante a obra, a conta que a Receita faz no fim: o **INSS d
     não contam), volta ela, com 200 e `ja_existia: true`, e nada é gravado. Aprovar ou recusar libera: depois disso a
     mesma proposta pode ser criada de novo. Por trás, um documento `propostas_pendentes/{id derivado de tenant, obra,
     tipo e dados}` aponta para a pendente, e aprovar/recusar o solta na mesma transação.
-  `dados` por tipo: `criar_pedido` = `{insumo_id, quantidade, fornecedor, valor, etapa?, topico_id?, previsao?}` (o
-  corpo do POST de pedido **sem** `aprovado`; `etapa` é uma chave de `GET …/etapas`, e o agente a exige quando a obra
-  tem orçamento; `topico_id` (ou `linhas[].topico_id`) é conferido contra a árvore na criação da proposta, como no
-  POST, tópico sem etapa → 422, e o pedido aprovado nasce com ele) · `avancar_pedido` = `{pedido_id, para,
-  quantidade_recebida?, nf?}` (as mesmas regras do
-  `POST …/avancar`; de `parcial`, sem quantidade/NF) · `ajuste_estoque` = `{insumo_id, quantidade, motivo}` ·
-  `registrar_entrega` = `{pedido_id, linhas: [{indice, quantidade}], nf_numero?, nf_data? ("AAAA-MM-DD"), nf_valor?
-  (centavos), confirmar_excesso?=false}` (o corpo de `POST /pedidos/{id}/recebimentos` sem a chave).
-  - **`registrar_entrega`** (domínio ≥ 0.3.0, `regras.validar_entrega`): o pedido tem de estar de aprovado a parcial,
-    as linhas existir e não repetir; quantidade acima do que falta na linha → 422 "A entrega passa do que falta…" a
-    menos que `confirmar_excesso: true` (o "chegou a mais" da tela). A API **preenche a `conta`** com a prévia do
-    domínio (`regras.texto_da_entrega`): `"PED-0170 · Brita 1: recebido 18 m³ + esta entrega 7 m³ = 25 de 25 m³ ·
-    pedido completo"`. Aprovar revalida contra o pedido de agora (outra entrega no meio → 422, proposta continua
-    pendente) e roda o **mesmo** `preparar_receber` do `POST …/recebimentos` (entrada no almoxarifado, NF, status
-    parcial/conferido; o ID da entrega sai da proposta); o registro tem `desfazer` `desfazer_recebimento` (só a última
-    entrega, como na tela).
-  - **`efeito`** (novo campo da `Proposta`, decidido pela API ao criar): `compra` (criar_pedido) · `entrada`
-    (registrar_entrega, ou avancar_pedido `conferido` de um pedido que não está parcial) · `encerramento`
-    (avancar_pedido `conferido` de parcial) · `cancelamento` · `status` (outros avanços) · `ajuste`. É o que o botão da
-    tela diz ("Aprovar entrada" × "Aprovar encerramento"). Aprovar um `avancar_pedido` cujo pedido mudou a ponto de o
-    efeito ser outro (era entrada, virou encerramento) → 409 "mudou desde a proposta". Proposta antiga vem sem o campo.
+  `tipo` = `cronograma` (`dados` = o corpo do `PUT /obras/{id}/cronograma`, validado contra o orçamento na criação).
+  Os tipos de compra (`criar_pedido`, `avancar_pedido`, `ajuste_estoque`, `registrar_entrega`) saíram: criar → **410**;
+  os antigos continuam no histórico (`GET /propostas`).
+  - **`efeito`** (decidido pela API ao criar): `cronograma`. É o que o botão da tela diz. Proposta antiga pode trazer
+    um efeito de compra (`compra`, `entrada`, `encerramento`, `cancelamento`, `status`, `ajuste`) ou vir sem o campo.
 - `GET /propostas?status=pendente&obra_id=…&limite=100&antes_de=…` → `[Proposta]` (mais novas primeiro)
-- `POST /propostas/{id}/aprovar` `{ajustes?}` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o
-  Desfazer usa); executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro` com `desfazer`
-  preenchido. `POST /propostas/{id}/recusar` `{motivo}`.
-- Aprovar `criar_pedido` cria o pedido já **`aprovado`** (não `em_cotacao`): a aprovação da proposta é a aprovação da
-  compra. O texto do registro termina em `· aprovado`.
-- **Ajustar e aprovar**: `ajustes` corrige campos de `dados` antes de executar. Chaves aceitas por tipo:
-  `criar_pedido` → `quantidade, fornecedor, valor, previsao` (só em proposta de uma linha) · `avancar_pedido` → `quantidade_recebida, nf` (só se
-  `dados.para = conferido`, senão 422) · `ajuste_estoque` → `quantidade, motivo` · `registrar_entrega` → `linhas,
-  nf_numero, nf_data, nf_valor, confirmar_excesso`. Chave fora da lista → 422. Os dados
-  mesclados são revalidados com as regras da criação (ex.: ajuste de zero → 422); erro deixa a proposta pendente.
-  Na mesma transação a proposta grava `dados` (o que foi executado), `dados_originais` (o que o agente propôs) e
-  `ajustada: true`, e o texto do registro ganha o sufixo `· ajustado: quantidade 34 → 30 sc; fornecedor A → B`
-  (`—` para campo que estava vazio). Sem corpo, `ajustes` vazio ou com os mesmos valores = aprovação normal
-  (`ajustada: false`, `dados_originais: null`).
+- `POST /propostas/{id}/aprovar` (corpo opcional) → `{proposta, registro}` (o `registro.id` é o que o Desfazer usa);
+  executa a operação do tipo (papel `admin`+), marca aprovada, grava `EntradaRegistro` com `desfazer` preenchido.
+  Proposta de compra que ficou pendente → **410** (só se recusa). `ajustes` não vale para o cronograma: aprove ou
+  recuse (422). `POST /propostas/{id}/recusar` `{motivo}`.
 - Aprovar grava em `Proposta.registro_id` o ID da `EntradaRegistro` da execução (a tela mostra o Desfazer mesmo depois
   de recarregar); desfazer mantém o `registro_id` e muda a proposta para `desfeita`.
 - Proposta decidida traz `decidido_por` (ID) e `decidido_por_nome`. `EntradaRegistro.quem` é o nome legível;
   vem também `quem_nome` (igual) e `usuario_id`.
-- Respostas de escrita que já trazem o ID do registro, para a tela oferecer **Desfazer** logo depois: `POST
-  /obras/{id}/movimentos`, `POST /obras/{id}/pedidos` e `POST /pedidos/{id}/avancar` (campo `registro_id`) e `POST
-  /propostas/{id}/aprovar` (`registro.id`).
+- Respostas de escrita que já trazem o ID do registro, para a tela oferecer **Desfazer** logo depois: as de obra,
+  orçamento, gasto, fornecedor, cronograma e medição (campo `registro_id`) e `POST /propostas/{id}/aprovar`
+  (`registro.id`).
 - `GET /registro?obra_id=…&limite=50&antes_de=…` → `[EntradaRegistro]` (mais novas primeiro) · `POST /registro/{id}/desfazer` → aplica a operação inversa
-  (estorno de movimento, volta de status do pedido) e registra o desfazer.
+  e registra o desfazer. Entrada de compra de antes da saída (pedido, entrega, movimento, insumo) que ainda traz
+  Desfazer → **410**; a limpeza do banco tira esses Desfazer.
 - **Refazer** é o mesmo `POST /registro/{id}/desfazer` aplicado à entrada "Desfeito: …": quando o desfazer tem
-  inverso (medição, cronograma, edição de obra/pedido/fornecedor), a entrada "Desfeito" vem com `desfazer.refazer:
+  inverso (medição, cronograma, edição de obra/fornecedor/linha do orçamento), a entrada "Desfeito" vem com `desfazer.refazer:
   true` e `desfazer.texto` = o texto da ação original; a nova entrada é "Refeito: <texto original>", com desfazer
   normal. Refazer a medição só vale se o cronograma ficou como o desfazer deixou (senão 409 "lance a medição de
   novo"); as edições, só se ninguém mexeu nos mesmos campos depois. Entradas "Desfeito" anteriores a esta regra não
@@ -1031,7 +824,7 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
 - `POST /conversa` (serviço do agente, porta própria) `{sessao_id?, obra_id?, texto}` com o mesmo `Authorization` do
   usuário → **SSE**:
-  - `event: texto` `{delta}` · `event: ferramenta` `{nome, nivel: consulta|propoe, resumo}` (o "usou almoxarifado…"),
+  - `event: texto` `{delta}` · `event: ferramenta` `{nome, nivel: consulta|propoe, resumo}` (o "consultou o orçamento…"),
     emitido quando a ferramenta **começa** (a tela mostra o andamento durante uma consulta lenta), uma vez por chamada
   - `event: proposta` `{Proposta + ja_existia}` (vira cartão de decisão na tela; `ja_existia: true` = é a proposta
     igual que já esperava aprovação) · `event: fim` `{sessao_id, uso:{tokens, custo}}`
@@ -1052,26 +845,18 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 |---|---|---|
 | `listar_obras()` | consulta | `GET /obras` |
 | `resumo_obra(obra_id)` | consulta | `GET /obras/{id}/resumo` (o "como está a obra?"; usado primeiro em pergunta aberta) |
-| `consultar_estoque(obra_id, busca?)` | consulta | `GET /obras/{id}/insumos` (conta, sem previsão, último preço) |
-| `historico_movimentos(obra_id, insumo_id?, limite?=30)` | consulta | sem insumo: `GET /obras/{id}/movimentos` (todos os insumos, mais novos primeiro, diz se cortou) + `GET …/insumos` (nomes); com insumo: `GET …/insumos/{id}/movimentos` |
-| `listar_pedidos(obra_id, status?, abertos?, busca?)` | consulta | `GET /obras/{id}/pedidos` (`abertos` = `?status=` em cotação a parcial; `busca` por fornecedor ou insumo, filtrada no agente) |
 | `consultar_orcamento(obra_id, busca?)` | consulta | `GET /obras/{id}/orcamento` |
 | `consultar_cronograma(obra_id, mes?)` | consulta | `GET /obras/{id}/cronograma` (por etapa; `mes` detalha o que está previsto no mês) |
-| `listar_fornecedores(busca?)` | consulta | `GET /fornecedores` |
 | `consultar_tributos(obra_id)` | consulta | `GET /obras/{id}/tributos` (INSS da aferição e IBS/CBS estimados, com as linhas da conta e o que reduz) |
 | `calcular(expressao, unidade_resultado?)` | consulta | nenhuma (calculadora local em Decimal, sem `eval`) |
-| `propor_pedido(obra_id, insumo_id, quantidade, fornecedor, justificativa, valor? \| preco_unitario?, etapa?, previsao?)` | propõe | `GET /obras/{id}/etapas` + `POST /propostas` (criar_pedido; com `preco_unitario` o total sai da calculadora e volta em `conta_do_valor`) |
-| `propor_entrega(obra_id, pedido_id, linhas, justificativa, nf_numero?, nf_data?, nf_valor?, confirmar_excesso?)` | propõe | `POST /propostas` (registrar_entrega; `nf_data` aceita "hoje"/"ontem", resolvido no fuso de Brasília, e com número de nota sem data fica hoje) |
-| `propor_avanco_pedido(obra_id, pedido_id, para, justificativa)` | propõe | `POST /propostas` (avancar_pedido; `conferido` só de parcial = encerrar) |
-| `propor_ajuste_estoque(obra_id, insumo_id, motivo, contagem? \| quantidade?)` | propõe | `GET …/insumos` + `POST /propostas` (ajuste_estoque; com `contagem`, a diferença contra o saldo sai da calculadora) |
+| `propor_cronograma(obra_id, …)` | propõe | `GET /obras/{id}/orcamento` + `POST /propostas` (cronograma) |
 
-- `propor_pedido` confere a `etapa` contra `GET …/etapas` antes de propor: etapa que não existe, ou obra com orçamento
-  e etapa omitida → erro para o modelo (que pergunta à pessoa), sem criar proposta.
+O agente não faz compras, pedidos nem controle de estoque (saíram do produto em 11/2026).
 
 - As ferramentas devolvem números já formatados **e** brutos e datas para gente ("16/11/2026", "ago/2027"); o agente
-  nunca faz conta de cabeça: cita a `Conta` da API (falta, `falta_entregar` do pedido, saldo/estouro da etapa,
-  `aditivos_pct`, situação da etapa vêm prontos) e qualquer outra conta passa por `calcular`.
-- Lembretes de "uma vez por conversa" (falta de previsão ou de cadastro, data futura num documento) vão em
+  nunca faz conta de cabeça: cita o que a API manda pronto (gasto, falta gastar e estouro da etapa, `aditivos_pct`,
+  situação da etapa) e qualquer outra conta passa por `calcular`.
+- Lembretes de "uma vez por conversa" (orçamento sem preço, data futura num documento) vão em
   `lembretes: {chave: texto}` na primeira vez e só como `lembretes_ja_ditos: {chaves, nota}` depois; o agente lê do
   histórico guardado da sessão o que já foi dito.
 - A data de hoje (Brasília) vai como bloco de contexto na mensagem do usuário ("(Hoje é quinta-feira, 05/11/2026, …)"),
@@ -1080,7 +865,5 @@ privada de quem a criou (`dono` = usuário do token); de outra pessoa → 404.
 
 ## Dados de exemplo (seed)
 
-Casa Vila Nova do protótipo: insumos bloco (entrou 4.000, saiu 1.050 + 190 de quebra = 2.760), aço (3.940 precisa,
-140 saldo, PED-0158 de 3.200 kg em trânsito, PED-0167 de 600 kg em cotação), cimento (precisa 200, saldo 46, PED-0160
-de 120 sc a caminho), areia (PED-0157 recebido, 40 m³ na NF). Movimentos semeados com `quem = "Joana (mestre)"`.
+Casa Vila Nova do protótipo: a obra com os dados de cadastro e fiscais (sem orçamento: importa-se a planilha pela tela).
 Um usuário `admin` de exemplo, senha só no `.env` local.

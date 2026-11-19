@@ -1,7 +1,7 @@
 """Modelos de documento. Cada classe é um documento de uma coleção, com `tenant_id` sempre presente.
 
 Regras de portabilidade (Mongo agora, Firestore depois):
-- nada de lista que cresce sem limite dentro de um documento (movimentos, mensagens e registro são documentos próprios);
+- nada de lista que cresce sem limite dentro de um documento (mensagens e registro são documentos próprios);
 - referências por ID (string), sem joins: quem precisa de dado de outra coleção busca pelo ID ou lê uma projeção;
 - datas em UTC com fuso (datetime aware).
 """
@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from .tipos import Centavos, Milesimos, novo_id
 
@@ -24,8 +24,8 @@ class Documento(BaseModel):
     criado_em: datetime = Field(default_factory=agora)
 
 
-# O Desfazer da aprovação roda em lotes e pode parar no meio: enquanto não termina, a obra não está aprovada nem em
-# orçamento, e Compras está pela metade.
+# Situação de obra de quando o Desfazer da aprovação rodava em lotes e podia parar no meio. Não nasce mais, mas obra
+# gravada nela ainda volta para o orçamento pelo Desfazer.
 DESFAZENDO_APROVACAO = "desfazendo_aprovacao"
 
 
@@ -103,7 +103,6 @@ class VersaoOrcamento(Documento):
     # gravado antes do campo não tem a chave, e a leitura monta pelos itens.
     lista_topicos: list[dict[str, str]] = Field(default_factory=list)
     edicoes: int = 0                       # linhas editadas à mão: aprovar confere que nada mudou no meio dela
-    gerou_compras: bool = False            # aditivo que entrou com a obra aprovada e já mexeu em Compras
     # "venda" = a planilha veio com o preço do cliente (com BDI): os itens guardam o custo (preço ÷ (1 + bdi)) e o
     # preço de venda à parte. "custo" = a planilha já é custo (a de quem orça à mão, ou a do próprio software).
     natureza: Literal["custo", "venda"] = "custo"
@@ -138,77 +137,6 @@ class ItemOrcamento(Documento):
     total_venda: Centavos | None = None
 
 
-class CurvaABC(StrEnum):
-    A = "A"
-    B = "B"
-    C = "C"
-
-
-class TipoInsumo(StrEnum):
-    MATERIAL = "material"                  # tem estoque: entra, sai, conta
-    SERVICO = "servico"                    # terraplanagem, empreiteiro: contratado e medido, sem estoque
-
-
-class Insumo(Documento):
-    obra_id: str
-    nome: str
-    tipo: TipoInsumo = TipoInsumo.MATERIAL
-    unidade: str                           # un, sc, kg, m³…
-    precisa_ate_o_fim: Milesimos = 0       # quanto a obra ainda vai consumir (orçamento/planejamento)
-    curva: CurvaABC = CurvaABC.B           # curva A exige destino na baixa
-    valor_unitario: Centavos = 0           # preço unitário do orçamento; 0 = sem preço
-    etapa: str | None = None               # etapa do orçamento onde ele mais pesa: agrupa Compras e sugere a do pedido
-    # Quando veio da aprovação do orçamento: {id, antes (None = criado por ela), depois}. Fica no insumo, e não na
-    # receita do registro, porque um orçamento de 2.000 linhas não caberia num documento só.
-    aprovacao: dict[str, Any] | None = None
-    # cadastro desfeito pelo registro: a porta não apaga documento, então ele sai das listas e da Conta. O ID fica
-    # reservado: cadastrar o mesmo nome de novo reaproveita este documento.
-    arquivado: bool = False
-
-
-class TipoMovimento(StrEnum):
-    ENTRADA = "entrada"
-    SAIDA = "saida"
-    AJUSTE = "ajuste"                      # contagem: pode ser positivo ou negativo
-    TRANSFERENCIA_ENTRADA = "transferencia_entrada"
-    TRANSFERENCIA_SAIDA = "transferencia_saida"
-
-
-class Movimento(Documento):
-    """Livro-razão do almoxarifado: só se acrescenta. O ID é a chave de idempotência (evento repetido não duplica)."""
-    obra_id: str
-    insumo_id: str
-    tipo: TipoMovimento
-    quantidade: Milesimos                  # sempre positiva, exceto em AJUSTE
-    destino: str | None = None             # frente de serviço (obrigatório em saída de curva A)
-    etapa: str | None = None               # etapa do orçamento que consumiu (apropriação da saída)
-    origem_doc: str | None = None          # PED-…, TRF-…, NF…
-    quem: str                              # nome legível de quem lançou (a tela mostra direto, sem buscar usuário)
-    usuario_id: str | None = None          # o ID fica à parte, para auditoria (None em dado semeado/importado antigo)
-    origem: str = "tela"                   # tela | agente | whatsapp | sistema
-    desfaz: str | None = None              # ID do movimento que este estorna
-
-
-class Saldo(BaseModel):
-    """Projeção por insumo, atualizada na mesma transação do movimento. ID = insumo_id."""
-    id: str
-    tenant_id: str
-    obra_id: str
-    saldo: Milesimos = 0
-    atualizado_em: datetime = Field(default_factory=agora)
-
-
-class StatusPedido(StrEnum):
-    EM_COTACAO = "em_cotacao"
-    APROVADO = "aprovado"
-    ENVIADO = "enviado"
-    EM_TRANSITO = "em_transito"
-    RECEBIDO = "recebido"                  # chegou, falta conferir
-    PARCIAL = "parcial"                    # recebeu parte: o resto continua a caminho
-    CONFERIDO = "conferido"                # tudo entregue (ou o resto encerrado); a tela chama de "Recebido"
-    CANCELADO = "cancelado"
-
-
 class Fornecedor(Documento):
     """Do tenant, vale para todas as obras. O ID sai do CNPJ (ou do nome, sem CNPJ): cadastro repetido colide."""
     nome: str
@@ -216,70 +144,6 @@ class Fornecedor(Documento):
     contato: str = ""
     telefone: str = ""
     email: str = ""
-
-
-class LinhaPedido(BaseModel):
-    """Uma linha do pedido. Nome, unidade e tipo são cópia do insumo na hora do pedido: a folha impressa e a lista de
-    entregas não precisam buscar o insumo, e renomear o insumo depois não reescreve o pedido já enviado."""
-    insumo_id: str
-    nome: str = ""
-    unidade: str = ""
-    tipo: TipoInsumo = TipoInsumo.MATERIAL
-    etapa: str | None = None               # apropriação: etapa do orçamento que paga esta linha
-    topico_id: str | None = None           # tópico daquela etapa na árvore da obra (do orçamento ou manual), opcional
-    quantidade: Milesimos
-    valor_unitario: Centavos = 0
-    total: Centavos = 0
-    recebida: Milesimos = 0                # somada a cada entrega; o resto (quantidade − recebida) está a caminho
-
-
-class Pedido(Documento):
-    numero: str                            # PED-0168 (legível; único por tenant via documento de contador)
-    obra_id: str
-    fornecedor: str
-    fornecedor_id: str | None = None
-    linhas: list[LinhaPedido]              # até 50 (limite do corpo): a lista não cresce depois de criado
-    valor: Centavos                        # soma dos totais das linhas
-    status: StatusPedido = StatusPedido.EM_COTACAO
-    previsao: str | None = None
-    observacao: str = ""
-    rastreio: str | None = None
-    # Quantas entregas já entraram: numera a próxima e trava o desfazer (só a última entrega pode ser desfeita).
-    recebimentos: int = 0
-    # Soma dos gastos confirmados como pagamento deste pedido. Só informa: o custo do pedido já conta no realizado
-    # pela entrega, e o gasto ligado a ele não soma de novo (`gastos.soma_nos_gastos_avulsos`).
-    pago: Centavos = 0
-    recebido_em: str | None = None         # "AAAA-MM-DD", dia da última entrega (None = nada chegou)
-    assinatura: str = ""                   # hash do corpo: a mesma chave com outro conteúdo é conflito
-
-    @model_validator(mode="before")
-    @classmethod
-    def _linha_unica_antiga(cls, d: Any) -> Any:
-        # pedido gravado antes das linhas (MVP-0): um insumo só, com quantidade e valor no próprio pedido
-        if isinstance(d, dict) and "linhas" not in d and d.get("insumo_id"):
-            recebida = d.get("quantidade_recebida") or (d["quantidade"] if d.get("status") == "conferido" else 0)
-            d = {**d, "linhas": [{"insumo_id": d["insumo_id"], "quantidade": d["quantidade"], "total": d["valor"],
-                                  "valor_unitario": round(d["valor"] * 1000 / d["quantidade"]) if d["quantidade"]
-                                  else 0, "recebida": recebida}]}
-        return d
-
-
-class Recebimento(Documento):
-    """Uma entrega (material) ou medição (serviço) de um pedido, com a nota. As entradas no almoxarifado têm ID
-    derivado deste documento e são estornadas juntas no desfazer."""
-    obra_id: str
-    pedido_id: str
-    pedido_numero: str
-    numero: int                            # 1ª, 2ª… entrega do pedido
-    nf_numero: str = ""
-    nf_data: str | None = None             # "AAAA-MM-DD"
-    nf_valor: Centavos | None = None       # o que a nota diz; a tela compara com `valor`
-    valor: Centavos = 0                    # as linhas pelo preço do pedido
-    linhas: list[dict[str, Any]]           # {indice, insumo_id, nome, unidade, tipo, etapa, quantidade, valor}
-    movimentos: list[str] = Field(default_factory=list)
-    quem: str = ""
-    usuario_id: str | None = None
-    desfeito: bool = False
 
 
 class Cronograma(Documento):
@@ -324,11 +188,12 @@ class StatusProposta(StrEnum):
 
 
 class TipoProposta(StrEnum):
+    CRONOGRAMA = "cronograma"                 # a IA propõe o cronograma (etapas × meses); aprovar grava-o
+    # De compras, que saíram do produto: só para ler o histórico. Ninguém cria nem aprova (a API responde 410).
     CRIAR_PEDIDO = "criar_pedido"
     AVANCAR_PEDIDO = "avancar_pedido"
     AJUSTE_ESTOQUE = "ajuste_estoque"
-    REGISTRAR_ENTREGA = "registrar_entrega"   # entrada de uma entrega num pedido (o "Registrar entrega" da tela)
-    CRONOGRAMA = "cronograma"                 # a IA propõe o cronograma (etapas × meses); aprovar grava-o
+    REGISTRAR_ENTREGA = "registrar_entrega"
 
 
 class Proposta(Documento):
@@ -347,12 +212,11 @@ class Proposta(Documento):
     motivo_recusa: str | None = None
     # a EntradaRegistro da execução: é o que o Desfazer usa (sobrevive a recarregar a tela)
     registro_id: str | None = None
-    # Quem aprova pode corrigir a proposta antes (ex.: 30 sc em vez de 34). `dados` passa a ser o que foi executado e
-    # `dados_originais` guarda o que o agente propôs, para a auditoria mostrar a diferença.
+    # Na proposta de compra (histórico), quem aprovava podia corrigir antes: `dados` é o que foi executado e
+    # `dados_originais` o que o agente propôs. A de cronograma não se ajusta.
     ajustada: bool = False
     dados_originais: dict[str, Any] | None = None
-    # O que aprovar faz, decidido pela API ao criar (compra | entrada | encerramento | cancelamento | status | ajuste).
-    # O botão da tela diz a consequência por ele: "conferido" num pedido parcial encerra, num recebido dá entrada.
+    # O que aprovar faz, decidido pela API ao criar ("cronograma"; no histórico, os de compra). O botão diz por ele.
     efeito: str | None = None
 
 
@@ -415,10 +279,7 @@ class Comprovante(Documento):
 
 class Gasto(Documento):
     """Dinheiro que saiu, numa data, numa etapa da obra. Nota a prazo ou boleto em aberto não é gasto: cada parcela
-    paga entra pelo próprio comprovante.
-
-    Ligado a um pedido (`pedido_id`), o gasto só registra o pagamento daquele pedido: o custo já conta no realizado
-    pela entrega, e somar de novo contaria duas vezes (`gastos.soma_nos_gastos_avulsos`)."""
+    paga entra pelo próprio comprovante."""
     obra_id: str
     comprovante_id: str | None = None
     valor: Centavos
@@ -429,7 +290,6 @@ class Gasto(Documento):
     # código da etapa do orçamento, chave da lista padrão ou "x-<id>" (extra); None = "ver depois", ainda a definir
     etapa: str | None = None
     topico_id: str | None = None
-    pedido_id: str | None = None
     quem: str = ""
     usuario_id: str | None = None
     estornado: bool = False                # desfeito pelo registro: sai das contas, o documento fica
@@ -450,7 +310,7 @@ class UsoIA(Documento):
     usuario_id: str | None = None
     obra_id: str | None = None
     sessao_id: str | None = None
-    rota: str                              # conversa | briefing | whatsapp | nf …
+    rota: str                              # conversa | briefing | whatsapp | comprovante …
     modelo: str
     tokens_entrada: int = 0
     tokens_saida: int = 0

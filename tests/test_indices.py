@@ -59,7 +59,7 @@ def _estagios(plano) -> list[dict]:
 # planejador do Mongo pode preferir ordenar meia dúzia de documentos em memória a fazer um SORT_MERGE por seis faixas
 # de `in` (com pouco dado o teste não o desempata); ali basta existir um plano candidato sem SORT, ou seja, o índice
 # certo existir. COLLSCAN e índice que não começa por tenant_id não passam em consulta nenhuma.
-QUENTES = {"mensagens", "registro", "sessoes", "movimentos", "propostas", "outbox"}
+QUENTES = {"mensagens", "registro", "sessoes", "propostas", "outbox"}
 
 
 async def _conferir(arm, consultas) -> None:
@@ -100,19 +100,12 @@ async def test_consultas_das_rotas_usam_indice_sem_ordenar_em_memoria(espiao, ht
                                                           {"papel": "assistant", "conteudo": "olá"}]})
     espiao.consultas.clear()      # o que importa são as leituras, não o seed
 
-    insumo = next(iter(vila.insumo.values()))
-    pedido = next(iter(vila.pedido.values()))
     hoje = date.today()
     for url in [f"/sessoes/{s['id']}/mensagens", f"/sessoes/{s['id']}/mensagens?depois_de=0",
                 "/registro", f"/registro?obra_id={obra}", "/registro?antes_de=2099-01-01T00:00:00Z",
                 f"/registro?obra_id={obra}&antes_de=2099-01-01T00:00:00Z&limite=1",
                 "/sessoes", f"/sessoes?obra_id={obra}", "/sessoes?antes_de=2099-01-01T00:00:00Z",
-                "/obras", "/obras/resumo", f"/obras/{obra}/hoje", f"/obras/{obra}/insumos",
-                f"/obras/{obra}/insumos/{insumo}/movimentos",
-                f"/obras/{obra}/movimentos", f"/obras/{obra}/movimentos?limite=2&antes_de=2099-01-01T00:00:00Z",
-                f"/obras/{obra}/pedidos", f"/obras/{obra}/pedidos?status=em_cotacao",
-                f"/obras/{obra}/pedidos?status=em_cotacao&status=enviado&antes_de=2099-01-01T00:00:00Z",
-                f"/pedidos/{pedido}/recebimentos", "/propostas", "/propostas?status=pendente",
+                "/obras", "/obras/resumo", f"/obras/{obra}/hoje", "/propostas", "/propostas?status=pendente",
                 f"/propostas?obra_id={obra}", f"/propostas?status=pendente&obra_id={obra}", "/fornecedores",
                 f"/obras/{obra}/orcamento", f"/obras/{obra}/etapas", f"/obras/{obra}/cronograma",
                 f"/obras/{obra}/resumo",

@@ -1,82 +1,50 @@
 """Resumo de cada obra para a página inicial. Lê o tenant inteiro coleção por coleção e soma aqui: agregação no
 banco não é portável para o Firestore, e uma consulta por coleção custa menos que uma por obra."""
-import re
-from datetime import date, timedelta
+from datetime import date
 
 from canteiro_dominio.armazenamento import Consulta, Filtro
-from canteiro_dominio.modelos import StatusPedido, StatusProposta, TipoVersao
-from canteiro_dominio.regras import A_CAMINHO, falta_na_linha
+from canteiro_dominio.modelos import StatusProposta, TipoVersao
 
 from ..esquemas import (
-    EntregaResumo,
     EtapaAtrasada,
     EtapaEstourada,
     EtapaNoMes,
-    FaltaResumo,
-    ItemEntrega,
-    ResumoAlmoxarifado,
     ResumoCronograma,
     ResumoDaObra,
-    ResumoEntregas,
     ResumoFinanceiro,
     ResumoObra,
     ResumoPendencias,
 )
 from ..nucleo import obra_do_tenant
-from . import cronograma, estoque, versoes
+from . import cronograma, versoes
 
 
 async def resumo_obras(arm, tenant_id: str) -> list[ResumoObra]:
     obras = await arm.consultar(Consulta("obras", tenant_id, ordem=[("nome", "asc")]))
     if not obras:
         return []
-    insumos = estoque.ativos(await arm.consultar(Consulta("insumos", tenant_id)))
-    saldos = {s["id"]: s["saldo"] for s in await arm.consultar(Consulta("saldos", tenant_id))}
-    # os conferidos vêm só para a medição de serviço, que continua valendo depois de o pedido fechar
-    com_conferidos = await arm.consultar(Consulta("pedidos", tenant_id, [
-        Filtro("status", "in", [*estoque.PEDIDOS_ABERTOS, StatusPedido.CONFERIDO.value])]))
-    pedidos = [p for p in com_conferidos if p["status"] in estoque.PEDIDOS_ABERTOS]
-    medido = estoque.medido_por_insumo(com_conferidos)
     pendentes = await arm.consultar(Consulta("propostas", tenant_id,
                                              [Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     # o prazo projetado depende do orçamento e das medições: só se calcula para a obra que tem cronograma montado
     com_cronograma = {c["obra_id"] for c in await arm.consultar(Consulta("cronogramas", tenant_id)) if c.get("etapas")}
     com_orcamento = {v["obra_id"] for v in await arm.consultar(Consulta("versoes_orcamento", tenant_id))
                      if v["ativa"] and v["tipo"] == TipoVersao.CONTRATO}
-
-    def por_obra(docs: list[dict]) -> dict[str, list[dict]]:
-        g: dict[str, list[dict]] = {}
-        for d in docs:
-            g.setdefault(d["obra_id"], []).append(d)
-        return g
-
-    insumos_de, pedidos_de, pendentes_de = por_obra(insumos), por_obra(pedidos), por_obra(pendentes)
-    for o in obras:
-        if o["status"] == "em_orcamento" and o["id"] in insumos_de:
-            insumos_de[o["id"]] = estoque.sem_aprovacao_abandonada(insumos_de[o["id"]])
-    com_orcamento |= {obra for obra, docs in insumos_de.items() if any(i.get("precisa_ate_o_fim", 0) > 0 for i in docs)}
+    pendentes_de: dict[str, int] = {}
+    for x in pendentes:
+        pendentes_de[x["obra_id"]] = pendentes_de.get(x["obra_id"], 0) + 1
     saida = []
     for o in obras:
-        ped = pedidos_de.get(o["id"], [])
-        contas = estoque.com_conta(insumos_de.get(o["id"], []), saldos, ped, medido)
         # a última atividade é a entrada mais nova do registro: uma leitura de 1 documento por obra
         ultima = await arm.consultar(Consulta("registro", tenant_id, [Filtro("obra_id", "==", o["id"])],
                                               [("criado_em", "desc")], limite=1))
         saida.append(ResumoObra(
             obra=o,
-            pendencias=len(pendentes_de.get(o["id"], [])),
-            falta_comprar=sum(1 for c in contas if c["conta"]["comprar"] > 0),
-            pedidos_abertos=len(ped),
-            valor_pedidos_abertos=sum(estoque.valor_em_aberto(p) for p in ped),
-            nf_para_conferir=sum(1 for p in ped if p["status"] == StatusPedido.RECEBIDO.value),
+            pendencias=pendentes_de.get(o["id"], 0),
             ultima_atividade=ultima[0]["criado_em"] if ultima else None,
             prazo=(await cronograma.cronograma_da_obra(arm, tenant_id, o["id"])).prazo
             if o["id"] in com_cronograma else None,
             tem_orcamento=o["id"] in com_orcamento))
     return saida
-
-
-_DIA = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _mes_idx(mes: str) -> int:
@@ -152,78 +120,33 @@ def resumo_cronograma(c, hoje: date) -> ResumoCronograma:
     return r
 
 
-def resumo_financeiro(o, pago: int = 0) -> ResumoFinanceiro:
+def resumo_financeiro(o) -> ResumoFinanceiro:
     t = o.totais
     tem = any(v.ativa and v.tipo == "contrato" for v in o.versoes)
-    if not tem and not t.comprometido and not t.cotando:
+    if not tem and not t.gasto:
         return ResumoFinanceiro(tem_orcamento=False)
     return ResumoFinanceiro(
         tem_orcamento=tem, contratado=t.contratado, aditivos=t.aditivos, aditivos_pct=t.aditivos_pct,
-        orcado_atual=t.atual, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado, saldo=t.saldo,
-        falta_gastar=max(t.atual - t.realizado, 0),
-        pago=pago, entregue_a_pagar=versoes.entregue_a_pagar(t.realizado, pago),
-        realizado_pct=t.realizado * 10000 // t.atual if t.atual > 0 else None,
+        orcado_atual=t.atual, gasto=t.gasto, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado,
+        saldo=t.saldo, falta_gastar=max(t.atual - t.gasto, 0), pago=t.gasto,
+        realizado_pct=t.gasto * 10000 // t.atual if t.atual > 0 else None,
         etapas_estouradas=[EtapaEstourada(etapa=e.etapa, descricao=e.descricao, saldo=e.saldo)
                            for e in o.etapas if e.estourou],
         gastos=t.gastos)
 
 
-def resumo_entregas(pedidos: list[dict], hoje: date, insumos: dict[str, dict]) -> ResumoEntregas:
-    r = ResumoEntregas()
-    semana = hoje + timedelta(days=7)
-    for p in sorted(pedidos, key=lambda p: p.get("previsao") or ""):
-        st = StatusPedido(p["status"])
-        if st == StatusPedido.RECEBIDO:
-            r.nf_para_conferir += 1
-        if st not in A_CAMINHO:
-            continue
-        # pedido de antes das linhas não tem a cópia do nome: vem do insumo
-        ins = lambda x: insumos.get(x["insumo_id"], {})  # noqa: E731
-        itens = [ItemEntrega(nome=x.get("nome") or ins(x).get("nome", ""),
-                             unidade=x.get("unidade") or ins(x).get("unidade", ""), falta_entregar=falta_na_linha(x))
-                 for x in estoque.linhas_de(p) if falta_na_linha(x)]
-        e = EntregaResumo(pedido_id=p["id"], numero=p["numero"], fornecedor=p.get("fornecedor", ""), status=st,
-                          previsao=p.get("previsao"), itens=itens)
-        prev = (p.get("previsao") or "").strip()
-        if not _DIA.match(prev):
-            r.sem_previsao += 1
-            continue
-        d = date.fromisoformat(prev)
-        if d == hoje:
-            r.hoje.append(e)
-        elif d < hoje:
-            r.atrasadas.append(e)
-        elif d <= semana:
-            r.proximos_7_dias.append(e)
-    return r
-
-
 async def resumo_da_obra(arm, tenant_id: str, obra_id: str, hoje: date) -> ResumoDaObra:
-    """O "como está a obra?" numa leitura: prazo e etapas do mês, financeiro, entregas, falta e pendências.
+    """O "como está a obra?" numa leitura: prazo e etapas do mês, financeiro e pendências.
 
-    Junta o que as telas já calculam (cronograma, orçamento, Conta, pedidos) em vez de refazer as contas: o agente cita
-    este resumo, e cada bloco diz quando o dado não existe (sem cronograma, sem orçamento, sem previsão)."""
+    Junta o que as telas já calculam (cronograma, orçamento) em vez de refazer as contas: o agente cita este resumo, e
+    cada bloco diz quando o dado não existe (sem cronograma, sem orçamento)."""
     obra = await obra_do_tenant(arm, tenant_id, obra_id)
     crono = await cronograma.cronograma_da_obra(arm, tenant_id, obra_id)
     orc = await versoes.orcamento_da_obra(arm, tenant_id, obra_id)
-    insumos = await estoque.insumos_com_conta(arm, tenant_id, obra_id)
-    pedidos = await arm.consultar(Consulta("pedidos", tenant_id, [Filtro("obra_id", "==", obra_id),
-                                                                  Filtro("status", "in", estoque.PEDIDOS_ABERTOS)]))
     pendentes = await arm.consultar(Consulta("propostas", tenant_id, [
         Filtro("obra_id", "==", obra_id), Filtro("status", "==", StatusProposta.PENDENTE.value)]))
     pendentes.sort(key=lambda x: x["criado_em"], reverse=True)
-    por_id = {x["insumo"]["id"]: x["insumo"] for x in insumos}
-    # o mesmo pago do desembolso: todo gasto confirmado, avulso ou de pedido
-    pago = sum(g["valor"] for g in await versoes.gastos_da_obra(arm, tenant_id, obra_id))
-    materiais = [x for x in insumos if x["insumo"].get("tipo", "material") == "material"]
     return ResumoDaObra(
         obra=obra, hoje=hoje.isoformat(), cronograma=resumo_cronograma(crono, hoje),
-        financeiro=resumo_financeiro(orc, pago), entregas=resumo_entregas(pedidos, hoje, por_id),
-        almoxarifado=ResumoAlmoxarifado(
-            insumos=len(materiais),
-            falta_comprar=[FaltaResumo(insumo_id=x["insumo"]["id"], nome=x["insumo"]["nome"],
-                                       unidade=x["insumo"].get("unidade", ""), falta=x["conta"]["falta"],
-                                       texto=x["conta"]["texto"])
-                           for x in materiais if x["conta"]["comprar"] > 0],
-            sem_previsao=sum(1 for x in materiais if x["conta"]["sem_previsao"])),
+        financeiro=resumo_financeiro(orc),
         pendencias=ResumoPendencias(propostas=len(pendentes), titulos=[x["titulo"] for x in pendentes[:5]]))

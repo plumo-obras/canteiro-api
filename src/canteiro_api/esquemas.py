@@ -13,22 +13,15 @@ from canteiro_dominio.modelos import (
     EtapaExtra,
     Fornecedor,
     Gasto,
-    Insumo,
     ItemOrcamento,
-    LinhaPedido,
     Medicao,
-    Movimento,
     Obra,
-    Pedido,
     Proposta,
-    Recebimento,
-    StatusPedido,
     TipoProposta,
     TipoVersao,
     Topico,
     VersaoOrcamento,
 )
-from canteiro_dominio.regras import falta_na_linha
 
 
 class Entrada(BaseModel):
@@ -64,150 +57,6 @@ class Sessao(BaseModel):
     usuario: UsuarioResumo
 
 
-class ContaSaida(BaseModel):
-    precisa: int
-    saldo: int
-    a_caminho: int
-    cotando: int
-    transferencia: int
-    falta: int
-    comprar: int
-    sobra: int = Field(0, description="milésimos que já tem ou vêm além do que precisa (0 sem previsão)")
-    medido: int = Field(0, description="serviço: milésimos já medidos (não é saldo, mas desconta da falta)")
-    sem_previsao: bool = Field(False, description="precisa = 0: ninguém lançou a previsão; NÃO quer dizer que não "
-                                                  "precisa")
-    texto: str = Field("", description="a linha de conta pronta (regras.texto_da_conta), sempre aritmética verdadeira")
-
-
-class UltimoPreco(BaseModel):
-    """Preço unitário da última compra do insumo nesta obra (pedido não cancelado mais novo)."""
-    valor_unitario: int = Field(description="centavos por unidade do insumo")
-    pedido_id: str
-    numero: str
-    fornecedor: str
-    data: str = Field(description="AAAA-MM-DD em que o pedido foi criado")
-    status: StatusPedido
-
-
-class InsumoComConta(BaseModel):
-    insumo: Insumo
-    conta: ContaSaida
-    ultimo_preco: UltimoPreco | None = Field(None, description="null = nunca comprado nesta obra")
-
-
-class InsumoCorpo(Entrada):
-    """Insumo cadastrado pela tela: o que chegou ou foi comprado sem estar na planilha do orçamento."""
-    nome: str = Field(min_length=1, max_length=120)
-    unidade: str = Field(min_length=1, max_length=12)
-    tipo: Literal["material", "servico"] = "material"
-    curva: Literal["A", "B", "C"] = "C"
-    precisa_ate_o_fim: int = Field(0, ge=0,
-                                   description="milésimos; 0 = fora do orçamento (não entra na conta de falta)")
-    valor_unitario: int = Field(0, ge=0, description="centavos; 0 = sem preço")
-
-
-class InsumoSaida(Insumo):
-    registro_id: str | None = Field(None, description="a EntradaRegistro do cadastro")
-
-
-class MovimentoCorpo(Entrada):
-    insumo_id: str
-    # transferência entre obras ainda não existe no MVP-0
-    tipo: Literal["entrada", "saida", "ajuste"]
-    quantidade: int = Field(description="milésimos; positiva, exceto em ajuste (que carrega o sinal)")
-    destino: str | None = Field(None, max_length=200)
-    etapa: str | None = Field(None, max_length=60, description="etapa do orçamento (obrigatória em saída quando a obra "
-                                                              "tem orçamento)")
-    origem_doc: str | None = Field(None, max_length=100)
-    chave_idempotencia: str = Field(min_length=8, max_length=200)
-
-
-_DATA = r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"
-
-
-class LinhaPedidoCorpo(Entrada):
-    insumo_id: str
-    quantidade: int = Field(gt=0, description="milésimos")
-    valor_unitario: int = Field(0, ge=0, description="centavos por unidade")
-    total: int | None = Field(None, ge=0, description="centavos; padrão = quantidade × unitário. Informe quando o "
-                                                      "total combinado não fecha com o unitário arredondado")
-    etapa: str | None = Field(None, max_length=60)
-    topico_id: str | None = Field(None, max_length=80, description="tópico da `etapa` na árvore da obra (do orçamento "
-                                                                   "ou manual); opcional, e só com a etapa")
-
-
-class PedidoDados(Entrada):
-    """O pedido em si. É também o `dados` da proposta `criar_pedido`, que não aceita `aprovado`: aprovar a proposta já
-    é a aprovação."""
-    fornecedor: str = Field(min_length=1, max_length=200)
-    fornecedor_id: str | None = None
-    linhas: list[LinhaPedidoCorpo] = Field(min_length=1, max_length=50)
-    previsao: str | None = Field(None, max_length=50)
-    observacao: str = Field("", max_length=500)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _linha_unica(cls, d: Any) -> Any:
-        # o formato de um insumo só (agente e propostas antigas): vira um pedido de uma linha com o total combinado
-        if isinstance(d, dict) and "linhas" not in d and "insumo_id" in d:
-            d = dict(d)
-            d["linhas"] = [{"insumo_id": d.pop("insumo_id"), "quantidade": d.pop("quantidade", 0),
-                            "total": d.pop("valor", 0), "etapa": d.pop("etapa", None),
-                            "topico_id": d.pop("topico_id", None)}]
-        return d
-
-    @field_validator("linhas")
-    @classmethod
-    def _sem_repetir(cls, v: list[LinhaPedidoCorpo]) -> list[LinhaPedidoCorpo]:
-        # duas linhas do mesmo insumo gravariam o mesmo saldo duas vezes na mesma transação da entrega
-        vistos = [x.insumo_id for x in v]
-        if len(vistos) != len(set(vistos)):
-            raise ValueError("o mesmo insumo aparece em duas linhas; junte as quantidades numa linha só")
-        return v
-
-
-class PedidoCorpo(PedidoDados):
-    aprovado: bool = Field(False, description="true: nasce aprovado (compra já decidida); false: em cotação")
-    chave_idempotencia: str | None = Field(None, min_length=8, max_length=64,
-                                           description="a mesma chave devolve o pedido já criado, sem duplicar")
-
-
-class PedidoEdicao(Entrada):
-    previsao: str | None = Field(None, max_length=50)
-    observacao: str | None = Field(None, max_length=500)
-
-
-class LinhaEntrega(Entrada):
-    indice: int = Field(ge=0, description="posição da linha no pedido")
-    quantidade: int = Field(gt=0, description="milésimos")
-
-
-class RecebimentoCorpo(Entrada):
-    nf_numero: str | None = Field("", max_length=60)
-    nf_data: str | None = Field(None, pattern=_DATA)
-    nf_valor: int | None = Field(None, ge=0, description="centavos, como está na nota")
-    linhas: list[LinhaEntrega] = Field(min_length=1, max_length=50)
-    chave_idempotencia: str = Field(min_length=8, max_length=200)
-
-    @field_validator("nf_numero")
-    @classmethod
-    def _nf(cls, v: str | None) -> str:
-        # null e em branco = entrega sem nota (o formulário manda o campo vazio como null)
-        return (v or "").strip()
-
-    @field_validator("linhas")
-    @classmethod
-    def _uma_vez(cls, v: list[LinhaEntrega]) -> list[LinhaEntrega]:
-        if len({x.indice for x in v}) != len(v):
-            raise ValueError("a mesma linha do pedido aparece duas vezes na entrega")
-        return v
-
-
-class RecebimentoSaida(BaseModel):
-    recebimento: Recebimento
-    # Com a conta das linhas (falta_entregar): a tela troca o pedido por este depois da entrega.
-    pedido: PedidoListado
-    registro_id: str | None = None
 
 
 class _DadosFornecedor(Entrada):
@@ -240,71 +89,8 @@ class EtapaRef(BaseModel):
     descricao: str
 
 
-class Conferencia(Entrada):
-    """Só fazem sentido com `para = conferido` (regras.validar_conferencia recusa no resto)."""
-    quantidade_recebida: int | None = Field(None, gt=0, description="milésimos; padrão = a quantidade do pedido")
-    nf: str | None = Field(None, max_length=60, description="número da nota fiscal da entrega")
+DADOS_POR_TIPO: dict[TipoProposta, type[Entrada]] = {}
 
-    @field_validator("nf")
-    @classmethod
-    def _nf_sem_espaco(cls, v: str | None) -> str | None:
-        # NF em branco é "não informada", não uma NF vazia que apareceria como "NF " no documento de origem
-        return (v.strip() or None) if v is not None else None
-
-
-class AvancarCorpo(Conferencia):
-    para: StatusPedido
-
-
-class AvancarPedidoDados(Conferencia):
-    pedido_id: str
-    para: StatusPedido
-
-
-class AjusteEstoqueDados(Entrada):
-    insumo_id: str
-    quantidade: int = Field(description="milésimos, com sinal (+ sobrou na contagem, − faltou)")
-    motivo: str = Field(min_length=1, max_length=500)
-
-
-class RegistrarEntregaDados(Entrada):
-    """A entrega proposta: o mesmo corpo do `POST /pedidos/{id}/recebimentos`, sem a chave (a aprovação deriva uma do
-    ID da proposta) e com a confirmação de "chegou a mais" que a tela pede."""
-    pedido_id: str
-    linhas: list[LinhaEntrega] = Field(min_length=1, max_length=50)
-    nf_numero: str = Field("", max_length=60)
-    nf_data: str | None = Field(None, pattern=_DATA)
-    nf_valor: int | None = Field(None, ge=0, description="centavos, como está na nota")
-    confirmar_excesso: bool = Field(False, description="a pessoa confirmou que chegou mais do que faltava")
-
-    @field_validator("nf_numero")
-    @classmethod
-    def _nf(cls, v: str | None) -> str:
-        return (v or "").strip()
-
-    @field_validator("linhas")
-    @classmethod
-    def _uma_vez(cls, v: list[LinhaEntrega]) -> list[LinhaEntrega]:
-        if len({x.indice for x in v}) != len(v):
-            raise ValueError("a mesma linha do pedido aparece duas vezes na entrega")
-        return v
-
-
-DADOS_POR_TIPO: dict[TipoProposta, type[Entrada]] = {
-    TipoProposta.CRIAR_PEDIDO: PedidoDados,
-    TipoProposta.AVANCAR_PEDIDO: AvancarPedidoDados,
-    TipoProposta.AJUSTE_ESTOQUE: AjusteEstoqueDados,
-    TipoProposta.REGISTRAR_ENTREGA: RegistrarEntregaDados,
-}
-
-# O que quem aprova pode corrigir antes de aprovar. Fora daqui (insumo, pedido, destino do status) já é outra proposta.
-AJUSTAVEIS: dict[TipoProposta, set[str]] = {
-    TipoProposta.CRIAR_PEDIDO: {"quantidade", "fornecedor", "valor", "previsao"},
-    TipoProposta.AVANCAR_PEDIDO: {"quantidade_recebida", "nf"},
-    TipoProposta.AJUSTE_ESTOQUE: {"quantidade", "motivo"},
-    TipoProposta.REGISTRAR_ENTREGA: {"linhas", "nf_numero", "nf_data", "nf_valor", "confirmar_excesso"},
-    TipoProposta.CRONOGRAMA: set(),  # a proposta de cronograma não se ajusta campo a campo: aprova ou recusa
-}
 
 
 class PropostaCorpo(Entrada):
@@ -430,8 +216,7 @@ class ObraSaida(Obra):
 
 
 class AprovacaoSaida(ObraSaida):
-    insumos_criados: int = Field(0, description="itens do orçamento que viraram insumo em Compras")
-    insumos_atualizados: int = Field(0, description="insumos que já existiam e receberam a previsão do orçamento")
+    pass
 
 
 # --- orçamento por planilha ---
@@ -453,8 +238,6 @@ class Mapeamento(Entrada):
     quantidade: int | None = Field(None, ge=0, le=500)
     valor_unitario: int | None = Field(None, ge=0, le=500)
     valor_total: int | None = Field(None, ge=0, le=500)
-    saldo: int | None = Field(None, ge=0, le=500)
-    curva: int | None = Field(None, ge=0, le=500)
     # só no orçamento da obra (EAP): medida, marca ou detalhe da linha ("0,60 x 2,10", "Tigre")
     complemento: int | None = Field(None, ge=0, le=500)
 
@@ -472,74 +255,16 @@ class LeituraPlanilha(BaseModel):
                                                 "só para mostrar")
 
 
-class LinhaOrcamento(BaseModel):
-    linhas: list[int] = Field(description="linhas da planilha que formam este insumo (mais de uma quando juntou)")
-    nome: str
-    unidade: str
-    quantidade: int
-    valor_unitario: int
-    total: int
-    curva: str
-    saldo: int
-    situacao: Literal["novo", "atualiza"]
-    precisa_antes: int | None = None
-    valor_antes: int | None = None
-
-
 class LinhaIgnorada(BaseModel):
     linha: int
     texto: str
     motivo: str
 
 
-class LinhaImportada(BaseModel):
-    linha: int
-    nome: str
-    unidade: str
-    saldo: int
-    precisa_ate_o_fim: int
-    curva: str
-
-
 class ErroLinha(BaseModel):
     linha: int
     campo: str | None = None
     mensagem: str
-
-
-class Previa(BaseModel):
-    aplicado: bool
-    linhas: list[LinhaImportada]
-    erros: list[ErroLinha]
-    registro_ids: list[str] = Field(default_factory=list,
-                                    description="uma EntradaRegistro por lote gravado: é o que o Desfazer usa")
-
-
-class PreviaOrcamento(BaseModel):
-    aplicado: bool
-    linhas: list[LinhaOrcamento]
-    ignoradas: list[LinhaIgnorada]
-    erros: list[ErroLinha]
-    total: int = Field(description="centavos")
-    novos: int
-    atualizados: int
-    juntadas: int = Field(description="linhas da planilha absorvidas em outra (mesmo insumo repetido)")
-    registro_ids: list[str] = Field(default_factory=list,
-                                    description="uma EntradaRegistro por lote gravado: é o que o Desfazer usa")
-
-
-class MaterialDoProjeto(BaseModel):
-    nome: str = Field(min_length=1, max_length=120, description="como vai aparecer no almoxarifado e em Compras")
-    unidade: str = Field(min_length=1, max_length=12)
-    quantidade: int = Field(gt=0, description="milésimos: o quanto o projeto pede (vira o precisa_ate_o_fim)")
-    valor_unitario: int = Field(0, ge=0, description="centavos; 0 = sem preço de referência")
-
-
-class MateriaisDoProjeto(BaseModel):
-    """A lista de materiais que o tradutor tirou das pranchas (o \"precisa\" da conta de compras)."""
-    origem: str = Field(min_length=1, max_length=80, description="vai no registro: \"projeto estrutural\"")
-    itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
-    aplicar: bool = False
 
 
 class ItemOrcamentoEdicao(Entrada):
@@ -553,9 +278,16 @@ class ItemEditado(BaseModel):
     registro_id: str
 
 
+class MaterialDoProjeto(BaseModel):
+    nome: str = Field(min_length=1, max_length=120, description="como vai aparecer no orçamento")
+    unidade: str = Field(min_length=1, max_length=12)
+    quantidade: int = Field(gt=0, description="milésimos: o quanto o projeto pede")
+    valor_unitario: int = Field(0, ge=0, description="centavos; 0 = sem preço de referência")
+
+
 class EstruturaCorpo(Entrada):
-    """Os materiais do projeto lançados como uma versão do orçamento (uma etapa \"Estrutura\"), em vez da lista de
-    materiais. Reaproveita a importação de versão: vira contrato se a obra ainda não tem um, ou aditivo se já tem."""
+    """Os materiais do projeto lançados como uma versão do orçamento (uma etapa \"Estrutura\"). Reaproveita a
+    importação de versão: vira contrato se a obra ainda não tem um, ou aditivo se já tem."""
     etapa: str = Field("Estrutura", min_length=1, max_length=60, description="nome da etapa no orçamento")
     itens: list[MaterialDoProjeto] = Field(min_length=1, max_length=500)
     aplicar: bool = False
@@ -680,9 +412,9 @@ class ItemComCurva(ItemOrcamento):
 
 
 class _Andamento(BaseModel):
-    """Previsto × realizado, em centavos. Cotando = pedidos em cotação; comprometido = o que já foi contratado com
-    fornecedor (pedido aprovado em diante; o encerrado conta só o que foi entregue); realizado = entregas e medições
-    lançadas, pelo preço do pedido."""
+    """O que já foi gasto, em centavos: os gastos confirmados. `gasto` é o nome que fica; `cotando` (sempre 0),
+    `comprometido` e `realizado` (o mesmo número) ficam até os clientes lerem `gasto`."""
+    gasto: int = 0
     cotando: int = 0
     comprometido: int = 0
     realizado: int = 0
@@ -693,10 +425,9 @@ class _OrcadoRealizado(_Andamento):
     aditivos: int
     atual: int
     # Calculados aqui, não em quem lê: o agente só cita, e a tela não refaz a conta.
-    saldo: int = Field(0, description="saldo a comprometer = atual − comprometido (negativo = estourou)")
-    estourou: bool = Field(False, description="comprometido passou do orçado atual")
-    gastos_avulsos: int = Field(0, description="gastos confirmados por comprovante, sem pedido, nesta etapa; já "
-                                               "somados no comprometido e no realizado")
+    saldo: int = Field(0, description="atual − gasto (negativo = estourou)")
+    estourou: bool = Field(False, description="o gasto passou do orçado atual")
+    gastos_avulsos: int = Field(0, description="o mesmo do gasto (nome de quando havia pedido)")
 
 
 class TopicoOrcamento(_OrcadoRealizado):
@@ -718,8 +449,7 @@ class EtapaOrcamento(_OrcadoRealizado):
 
 
 class GastosNoOrcamentoSaida(BaseModel):
-    """Os gastos avulsos (comprovante confirmado, sem pedido) da obra, todos já somados no comprometido e no
-    realizado dos totais. Pagamento de pedido não entra: o custo do pedido já conta pela entrega."""
+    """Os gastos (comprovante confirmado) da obra, todos já somados nos totais, abertos por onde estão."""
     total: int = 0
     nas_etapas: int = Field(0, description="nas etapas do orçamento (cada etapa traz o seu em gastos_avulsos)")
     fora_do_orcamento: int = Field(0, description="nas etapas extras da obra: não engordam etapa do orçamento")
@@ -733,10 +463,10 @@ class TotaisOrcamento(_Andamento):
     contratado: int
     aditivos: int
     atual: int
-    saldo: int = Field(0, description="saldo a comprometer da obra = atual − comprometido")
+    saldo: int = Field(0, description="atual − gasto da obra")
     aditivos_pct: int | None = Field(None, description="aditivos sobre o contratado, em centésimos de % (290 = "
                                                        "2,9%); null sem contrato")
-    # gasto sem etapa (obra sem orçamento na hora do pedido); já está somado nos três campos acima
+    # gasto fora das etapas do orçamento (extra, a definir, etapa de versão desfeita); já está somado acima
     sem_etapa: _Andamento = Field(default_factory=_Andamento)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
     n_itens: int
@@ -863,15 +593,9 @@ class MinhaConta(BaseModel):
 class ResumoObra(BaseModel):
     obra: Obra
     pendencias: int = Field(description="propostas pendentes")
-    falta_comprar: int = Field(description="insumos com Conta.comprar > 0")
-    pedidos_abertos: int = Field(description="pedidos que ainda não foram conferidos nem cancelados")
-    valor_pedidos_abertos: int = Field(description="centavos")
-    nf_para_conferir: int = Field(description="pedidos recebidos esperando conferência")
     ultima_atividade: datetime | None = Field(None, description="última entrada do registro da obra")
     prazo: Prazo | None = Field(None, description="o mesmo do GET /obras/{id}/cronograma; null sem cronograma")
-    tem_orcamento: bool = Field(False, description="contrato vigente, ou algum insumo com previsão (o que permite "
-                                                   "aprovar a obra)")
-
+    tem_orcamento: bool = Field(False, description="contrato vigente (o que permite aprovar a obra)")
 
 
 # --- resumo de UMA obra ("como está a obra?"): tudo pronto para citar, cada bloco diz se o dado existe ---
@@ -940,54 +664,14 @@ class ResumoFinanceiro(BaseModel):
     comprometido: int = 0
     realizado: int = 0
     saldo: int = 0
-    # o placar da obra: gasto até hoje (realizado) + falta gastar fecham no orçado; o saldo desconta também o que
-    # está comprometido em pedido que nem chegou, e não serve para isso
+    # o placar da obra: gasto até hoje (realizado) + falta gastar fecham no orçado
     falta_gastar: int = Field(0, description="orçado atual − realizado, nunca negativo")
     realizado_pct: int | None = Field(None, description="realizado ÷ orçado atual, em centésimos de ponto percentual "
                                                         "(4,8% = 480); None sem orçado")
-    # "gasto até hoje" (realizado) = pago + entregue_a_pagar: o pedido que chegou já conta como gasto antes de ser pago
-    pago: int = Field(0, description="todos os gastos confirmados (avulsos e pagamentos de pedido), como no desembolso")
-    entregue_a_pagar: int = Field(0, description="realizado − pago, nunca negativo: entregue e ainda sem pagamento")
+    gasto: int = Field(0, description="os gastos confirmados da obra (o mesmo de `realizado`, o nome que fica)")
+    pago: int = Field(0, description="todos os gastos confirmados, como no desembolso (o mesmo do gasto)")
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
-
-
-class ItemEntrega(BaseModel):
-    nome: str
-    unidade: str
-    falta_entregar: int
-
-
-class EntregaResumo(BaseModel):
-    pedido_id: str
-    numero: str
-    fornecedor: str
-    status: StatusPedido
-    previsao: str | None
-    itens: list[ItemEntrega]
-
-
-class ResumoEntregas(BaseModel):
-    hoje: list[EntregaResumo] = Field(default_factory=list)
-    atrasadas: list[EntregaResumo] = Field(default_factory=list, description="previsão antes de hoje e ainda a caminho")
-    proximos_7_dias: list[EntregaResumo] = Field(default_factory=list)
-    sem_previsao: int = Field(0, description="pedidos a caminho sem data (ou com data fora de AAAA-MM-DD)")
-    nf_para_conferir: int = 0
-
-
-class FaltaResumo(BaseModel):
-    insumo_id: str
-    nome: str
-    unidade: str
-    falta: int
-    texto: str
-
-
-class ResumoAlmoxarifado(BaseModel):
-    insumos: int = 0
-    falta_comprar: list[FaltaResumo] = Field(default_factory=list)
-    sem_previsao: int = Field(0, description="insumos sem quantidade prevista: a falta deles não é calculada")
-    consumo_projetado: bool = Field(False, description="o sistema ainda não projeta consumo por semana")
 
 
 class ResumoPendencias(BaseModel):
@@ -1000,14 +684,13 @@ class ResumoDaObra(BaseModel):
     hoje: str = Field(description="AAAA-MM-DD, fuso de São Paulo")
     cronograma: ResumoCronograma
     financeiro: ResumoFinanceiro
-    entregas: ResumoEntregas
-    almoxarifado: ResumoAlmoxarifado
     pendencias: ResumoPendencias
+
 
 # --- hoje na obra: a casa da obra, sem IA ---
 
 class AcaoHoje(BaseModel):
-    tela: Literal["projeto", "orcamento", "suprimentos", "cronograma", "gastos", "aprovacoes", "historico"]
+    tela: Literal["projeto", "orcamento", "cronograma", "gastos", "aprovacoes", "historico"]
     rotulo: str
     filtro: dict[str, str] | None = Field(None, description="`etapa` em falta_comprar; `status` nos gastos")
 
@@ -1115,35 +798,8 @@ class RegistroSaida(EntradaRegistro):
     usuario_id: str | None = None
 
 
-class LinhaPedidoSaida(LinhaPedido):
-    falta_entregar: int = Field(0, description="milésimos que ainda faltam chegar: quantidade − recebida, nunca "
-                                               "negativo; 0 em pedido encerrado (conferido) ou cancelado")
 
 
-# Pedido encerrado com sobra não espera mais nada: "falta entregar" ali induziria a cobrar o fornecedor à toa.
-_FECHADOS = {StatusPedido.CONFERIDO, StatusPedido.CANCELADO}
-
-
-class PedidoListado(Pedido):
-    """O pedido como sai para leitura, com a conta de cada linha pronta (o agente cita, não subtrai)."""
-    linhas: list[LinhaPedidoSaida]
-
-    @model_validator(mode="after")
-    def _falta_entregar(self):
-        for x in self.linhas:
-            x.falta_entregar = 0 if self.status in _FECHADOS else falta_na_linha(x.model_dump())
-        return self
-
-
-class PedidoSaida(PedidoListado):
-    registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita: é o que o Desfazer usa")
-
-
-RecebimentoSaida.model_rebuild()
-
-
-class MovimentoSaida(Movimento):
-    registro_id: str | None = Field(None, description="a EntradaRegistro desta escrita; null na repetição da chave")
 
 
 class Aprovacao(BaseModel):
@@ -1284,7 +940,7 @@ class CronogramaObra(BaseModel):
 
 class MesDesembolso(BaseModel):
     mes: str
-    pago: int = Field(0, description="gastos confirmados (avulsos e pagamentos de pedido) pagos neste mês")
+    pago: int = Field(0, description="gastos confirmados pagos neste mês")
     previsto: int = Field(0, description="o cronograma vigente para o mês (o mesmo `previsto` do mensal)")
     projetado: int = Field(0, description="o que ainda vai sair neste mês, pelo cronograma (empurrado pelo atraso); "
                                           "0 antes do mês corrente")
@@ -1296,6 +952,7 @@ class EtapaDesembolso(BaseModel):
     etapa: str
     descricao: str
     atual: int
+    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
     realizado: int
     executado_pct: int = Field(description="avanço usado na conta (centésimos): o medido, ou realizado ÷ orçado se a "
                                            "obra não tem medição")
@@ -1306,13 +963,12 @@ class EtapaDesembolso(BaseModel):
 
 class TotaisDesembolso(BaseModel):
     orcado: int
+    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
     realizado: int
     pago: int
     falta: int = Field(description="Σ projetado + sem_mes: o que ainda vai sair (o mesmo nos dois cenários)")
     custo_final: int = Field(description="realizado + o que falta nas etapas")
     desvio: int = Field(description="custo_final − orçado (positivo = acima do orçado, pelo que já estourou)")
-    entregue_sem_pagamento: int = Field(0, description="realizado − pago: pedido entregue sem pagamento registrado; "
-                                                       "está no projetado do mês corrente")
     sem_mes: int = Field(0, description="o que falta nas etapas fora do cronograma")
 
 
@@ -1415,7 +1071,6 @@ class ConfirmarCorpo(Entrada):
     etapa: str | None = Field(max_length=80, description='null = "ver depois": conta na obra e em nenhuma etapa')
     topico_id: str | None = Field(None, max_length=80)
     fornecedor_id: str | None = Field(None, max_length=80)
-    pedido_id: str | None = Field(None, max_length=80, description="o gasto é o pagamento deste pedido")
 
 
 class DescartarCorpo(Entrada):
@@ -1425,7 +1080,6 @@ class DescartarCorpo(Entrada):
 class GastoSaida(Gasto):
     etapa_nome: str | None = None
     etapa_origem: Origem | None = None
-    fora_do_orcado: bool = Field(False, description="lançado fora de pedido numa obra com orçamento (derivado)")
 
 
 class ReclassificarCorpo(Entrada):
@@ -1551,22 +1205,15 @@ class EtapaNoResumo(BaseModel):
     etapa: str | None = Field(description="null = gastos sem etapa, a definir")
     nome: str
     origem: Origem
-    total: int = Field(description="centavos; só gastos avulsos (os de pedido ficam em pagamentos_de_pedidos)")
+    total: int = Field(description="centavos")
     topicos: list[TopicoNoResumo]
-    entregue_a_pagar: int = Field(0, description="pedidos desta etapa entregues e ainda não pagos (centavos)")
-    fora_do_orcado: int = Field(0, description="parte do total lançada fora de pedido (com orçamento)")
 
 
 class ResumoGastos(BaseModel):
-    total: int = Field(description="gastos avulsos confirmados (centavos): é o que soma no realizado do orçamento")
-    pagamentos_de_pedidos: int = Field(description="gastos ligados a pedido: o custo já conta pela entrega")
+    total: int = Field(description="gastos confirmados (centavos): é o que soma no realizado do orçamento")
     a_revisar: int = Field(description="comprovantes esperando revisão (não contam em nada)")
     tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")
-    fora_do_orcado: int = Field(0, description="parte do total lançada fora de pedido, com orçamento (hoje: todo o "
-                                               "total; sem orçamento, 0)")
     sem_etapa_do_orcamento: int = Field(0, description="parte do total em etapa que não é do orçamento nem extra")
     a_definir: int = Field(0, description='parte do total confirmada sem etapa ("ver depois")')
-    entregue_a_pagar: int = Field(0, description="pedidos entregues e ainda não pagos: o mesmo do resumo da obra e "
-                                                 "do desembolso")
     etapas: list[EtapaNoResumo]

@@ -179,3 +179,20 @@ e o comprovante enviado de manhã sumiria antes da revisão.
   comprovante mantém o arquivo de propósito (é a prova do pagamento e o Desfazer precisa dele). Falta decidir o prazo
   (ex.: descartados apagados após N dias; confirmados enquanto a obra existir + prazo fiscal) e o pedido de exclusão
   do titular.
+
+## 10. Limpar compras, pedidos e estoque (uma vez, depois do deploy que os tira)
+
+Compras, pedidos e estoque saíram do produto.
+O que ficou deles no banco sai com `python -m canteiro_api.apagar_pedidos`, com `MONGO_URL` e `MONGO_DB` no ambiente.
+Quem roda em produção é o dono da conta, nunca um agente.
+
+1. Rodar sem argumento: só simula e imprime as contagens. Nada é gravado.
+2. Rodar com `--aplicar --copia <pasta fora do repo>`: grava a cópia em JSON de tudo o que vai mudar e só então muda o banco.
+   A cópia tem dado de cliente; não a coloque no repositório.
+3. Rodar sem argumento de novo: tem de dar "0 cliente(s) com o que limpar".
+
+O que ele faz: apaga `pedidos`, `recebimentos`, `insumos`, `movimentos`, `saldos` e o contador de pedidos.
+O gasto que era pagamento de pedido perde o `pedido_id` e passa a contar como gasto.
+A proposta de compra pendente é recusada.
+A entrada do Histórico com Desfazer de pedido ou estoque perde o Desfazer (a frase fica).
+Rodar de novo é seguro.

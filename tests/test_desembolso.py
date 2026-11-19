@@ -84,17 +84,6 @@ def test_material_comprado_antes_de_executar_nao_vira_estouro():
     assert sum(_serie(d).values()) == A + B // 2
 
 
-def test_entregue_sem_pagamento_e_pago_adiantado():
-    d = _proj(_etapas(rb=40_000), pago_por_mes={"2026-01": 10_000})
-    assert d.totais.entregue_sem_pagamento == 30_000
-    sem = _proj(_etapas(rb=40_000), pago_por_mes={"2026-01": 40_000})
-    assert _serie(d)["2026-02"] == _serie(sem)["2026-02"] + 30_000
-    # pagou R$ 500 a mais do que recebeu: sai dos primeiros meses, sem mês negativo
-    adiantado = _proj(_etapas(), pago_por_mes={"2026-01": 50_000}, realizado_total=0)
-    assert _serie(adiantado) == {"2026-02": A + B // 2 - 50_000, "2026-03": B // 2}
-    assert all(m.projetado >= 0 for m in adiantado.meses)
-
-
 def test_etapa_fora_do_cronograma_fica_sem_mes():
     etapas = [*_etapas(), EtapaBase("3", "Pintura", 50_000, 0, [])]
     d = _proj(etapas)
@@ -167,7 +156,7 @@ def test_ritmo_so_vale_com_medicao_e_tem_piso():
     parada = _proj(_etapas(ma=0, mb=0), mes_referencia="2026-01", ritmo=0)
     assert parada.ritmo_pct == 1000                    # obra parada: 10%, não infinito
     assert sum(_ritmo(parada).values()) == A + B
-    # o devido agora e o entregue sem pagamento caem no mês corrente nos dois cenários
+    # o devido agora cai no mês corrente nos dois cenários
     d = _proj(_etapas(ra=30_000, ma=5000, mb=0, rb=10_000), mes_referencia="2026-01", ritmo=5000,
               pago_por_mes={"2026-01": 30_000})
     assert _serie(d)["2026-02"] >= 30_000 and _ritmo(d)["2026-02"] >= 30_000

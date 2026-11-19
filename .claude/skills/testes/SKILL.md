@@ -15,8 +15,7 @@ description: Use ao escrever, corrigir ou rodar testes da canteiro-api ou do pac
 - `http`: `httpx.AsyncClient` com `ASGITransport` sobre `create_app(config, arm)` e um IP aleatório por teste (o
   limite de tentativas não vaza entre testes).
 - `vila` / `nova_vila(http, arm, config)`: semeia a Casa Vila Nova num tenant novo e loga um admin. Atalhos:
-  `vila.h` (cabeçalho), `vila.obra`, `vila.insumo["bloco"|"aço"|"cimento"|"areia"]`, `vila.pedido["PED-0157"]`,
-  `await vila.conta("aço")`, `h, u = await vila.usuario("viewer")` (outro usuário já logado: cabeçalho e documento; `tenant_id=` opcional).
+  `vila.h` (cabeçalho), `vila.obra`, `h, u = await vila.usuario("viewer")` (outro usuário já logado: cabeçalho e documento; `tenant_id=` opcional).
 - `tenant`: um `tenant_id` novo para testes direto na porta.
 - Quantidade/dinheiro nos asserts com `qtd(...)` / `reais(...)` de `canteiro_dominio.tipos`.
 - pytest-asyncio em modo `auto` com loop de sessão (`pyproject.toml`): `async def test_...` sem decorador.
@@ -24,11 +23,11 @@ description: Use ao escrever, corrigir ou rodar testes da canteiro-api ou do pac
 ## O que todo recurso novo testa
 
 - **Isolamento por tenant (obrigatório):** um `intruso = await nova_vila(http, arm, config)` tenta ler e gravar no
-  recurso da `vila` → 404, e o dado da vila não mudou. Modelo: `test_isolamento_entre_tenants` em
-  `tests/test_estoque.py`.
+  recurso da `vila` → 404, e o dado da vila não mudou. Modelo: `test_editar_outro_tenant_e_404` em
+  `tests/test_aprovar_orcamento.py`.
 - **Papel:** o papel abaixo do mínimo recebe 403 (`h, _ = await vila.usuario("viewer")`).
 - **Escrita:** resposta traz `registro_id`; `POST /registro/{id}/desfazer` volta o estado; desfazer de novo → 409;
-  repetir com a mesma `chave_idempotencia` devolve o mesmo resultado (ver `tests/test_pedidos_propostas.py`).
+  repetir com a mesma `chave_idempotencia` devolve o mesmo resultado (ver `tests/test_propostas.py`).
 - **Consulta nova de rota:** `tests/test_indices.py` pega sozinho se faltar índice (só com Mongo).
 - **Porta/adaptador:** caso em `tests/test_contrato_armazenamento.py` (roda nos dois adaptadores).
 - **Regra pura:** em `dominio/tests/` (sem banco, sem fixtures da API).
@@ -38,7 +37,7 @@ description: Use ao escrever, corrigir ou rodar testes da canteiro-api ou do pac
 
 ```bash
 docker compose up -d mongo                         # para a metade mongo não ser pulada
-.venv/bin/pytest                                   # ou: .venv/bin/pytest tests/test_estoque.py -k isolamento
+.venv/bin/pytest                                   # ou: .venv/bin/pytest tests/test_gastos.py -k desfazer
 .venv/bin/ruff check src tests dominio
 (cd dominio && .venv/bin/pytest)                   # venv próprio: uv venv -p 3.14 .venv && uv pip install -p .venv -e ".[dev]"
 ```

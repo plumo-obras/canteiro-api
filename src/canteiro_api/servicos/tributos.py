@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from canteiro_dominio.gastos import soma_nos_gastos_avulsos
+from canteiro_dominio.gastos import gasto_conta
 from canteiro_dominio.tributos import (
     PARAMETROS_IBS_CBS,
     PARAMETROS_INSS,
@@ -70,7 +70,7 @@ async def tributos_da_obra(arm, u: UsuarioAtual, obra_id: str) -> dict:
                         residencial=destinacao in RESIDENCIAIS,
                         creditos=sum(g.get("ibs_cbs", 0) for g in gastos),
                         ano=hoje.year)
-    avulsos = [g for g in gastos if soma_nos_gastos_avulsos(g)]
+    avulsos = [g for g in gastos if gasto_conta(g)]
     pendentes = sorted((g for g in avulsos if natureza_padrao(g) is None), key=lambda g: -g["valor"])
     sem_nota = sorted((g for g in gastos if not g.get("estornado") and _sem_comprovacao(g)),
                       key=lambda g: -g["valor"])

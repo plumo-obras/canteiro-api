@@ -1,14 +1,11 @@
 """Gastos × orçamento: com orçamento, a árvore de gasto são as etapas dele (+ extras) e o gasto avulso soma no
-realizado da etapa; pagamento de pedido não soma de novo; gasto antigo da lista padrão vira "sem etapa do orçamento"
+realizado da etapa; gasto antigo da lista padrão vira "sem etapa do orçamento"
 e se reclassifica com Desfazer."""
 import secrets
-import uuid
 
 from test_gastos import JPEG, _agente, _campo, _confirmacao, _desfazer, _leitura
 from test_obras_orcamento import nova_obra, registro
 from test_orcamento_versoes import CONTRATO, mapa, orcamento, versao
-
-from canteiro_dominio.tipos import qtd
 
 
 async def _contrato(vila, obra):
@@ -94,20 +91,6 @@ async def test_gasto_avulso_soma_no_realizado_da_etapa_e_mexe_no_saldo(vila):
     # estornado sai do realizado
     await _desfazer(vila, g["registro_id"])
     assert _etapa(await orcamento(vila, obra), "2")["realizado"] == 0
-
-
-async def test_pagamento_de_pedido_nao_soma_de_novo_no_realizado(vila):
-    obra = vila.obra
-    await _contrato(vila, obra)
-    antes = await orcamento(vila, obra)
-    pedido_id = vila.pedido["PED-0158"]
-    await _gasto(vila, obra, etapa="2", valor=35000, pedido_id=pedido_id)
-    depois = await orcamento(vila, obra)
-    # o custo do pedido já conta pela entrega: o pagamento só marca o pedido como pago
-    assert depois["totais"] == antes["totais"]
-    assert depois["etapas"] == antes["etapas"]
-    r = await _resumo(vila, obra)
-    assert (r["total"], r["pagamentos_de_pedidos"]) == (0, 35000)
 
 
 async def test_gasto_em_etapa_extra_fica_fora_do_orcamento(vila):
@@ -263,41 +246,16 @@ async def test_etapa_criada_na_hora_vale_direto_no_confirmar(vila):
     assert (await orcamento(vila, obra))["totais"]["gastos"]["fora_do_orcamento"] == r["gasto"]["valor"]
 
 
-async def test_gasto_ate_hoje_e_pago_mais_entregue_a_pagar(vila):
+async def test_gasto_ate_hoje_e_o_que_foi_pago_no_resumo_no_desembolso_e_na_aba(vila):
     obra = vila.obra
     await _contrato(vila, obra)
     await _gasto(vila, obra, etapa="2", valor=5000)
-    await _gasto(vila, obra, etapa="2", valor=35000, pedido_id=vila.pedido["PED-0158"])
-    # chegaram 1.000 dos 3.200 kg do PED-0158 (R$ 20.800): R$ 6.500 entregues, R$ 350 pagos
-    e = await vila.http.post(f"/pedidos/{vila.pedido['PED-0158']}/recebimentos", headers=vila.h, json={
-        "linhas": [{"indice": 0, "quantidade": qtd(1000)}], "chave_idempotencia": uuid.uuid4().hex})
-    assert e.status_code == 201, e.text
+    await _gasto(vila, obra, etapa="1", valor=35000)
     fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
-    assert (fin["pago"], fin["entregue_a_pagar"]) == (40000, 650000 - 35000)
-    assert fin["realizado"] == fin["pago"] + fin["entregue_a_pagar"]
-    # a mesma conta do desembolso
+    assert (fin["pago"], fin["realizado"], fin["comprometido"], fin["cotando"]) == (40000, 40000, 40000, 0)
+    assert "entregue_a_pagar" not in fin
     des = (await vila.http.get(f"/obras/{obra}/desembolso", headers=vila.h)).json()["totais"]
-    assert (des["pago"], des["entregue_sem_pagamento"]) == (fin["pago"], fin["entregue_a_pagar"])
-    # e a aba de gastos mostra o mesmo, repartido pelas etapas dos pedidos
+    assert (des["pago"], des["realizado"]) == (40000, 40000) and "entregue_sem_pagamento" not in des
     r = await _resumo(vila, obra)
-    assert r["entregue_a_pagar"] == fin["entregue_a_pagar"]
-    assert sum(e["entregue_a_pagar"] for e in r["etapas"]) == r["entregue_a_pagar"]
-    assert next(e for e in r["etapas"] if e["etapa"] == "2")["total"] == 5000
-
-
-async def test_entregue_a_pagar_por_etapa_desconta_o_adiantamento_de_outro_pedido(vila):
-    obra = vila.obra
-    # PED-0158: chegaram 100 kg (R$ 650), nada pago; PED-0160: pago adiantado, nada entregue
-    e = await vila.http.post(f"/pedidos/{vila.pedido['PED-0158']}/recebimentos", headers=vila.h, json={
-        "linhas": [{"indice": 0, "quantidade": qtd(100)}], "chave_idempotencia": uuid.uuid4().hex})
-    assert e.status_code == 201, e.text
-    adiantado = await _gasto(vila, obra, etapa="eletrica", valor=65000, pedido_id=vila.pedido["PED-0160"])
-    r = await _resumo(vila, obra)
-    assert r["entregue_a_pagar"] == 0
-    assert sum(x["entregue_a_pagar"] for x in r["etapas"]) == 0
-    # adiantamento menor que o entregue: a etapa do pedido entregue fica com o líquido
-    await _desfazer(vila, adiantado["registro_id"])
-    await _gasto(vila, obra, etapa="eletrica", valor=20000, pedido_id=vila.pedido["PED-0160"])
-    r = await _resumo(vila, obra)
-    assert r["entregue_a_pagar"] == 45000
-    assert sum(x["entregue_a_pagar"] for x in r["etapas"]) == 45000
+    assert r["total"] == 40000 and "entregue_a_pagar" not in r
+    assert {e["etapa"]: e["total"] for e in r["etapas"]} == {"1": 35000, "2": 5000}

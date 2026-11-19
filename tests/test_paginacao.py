@@ -1,4 +1,4 @@
-"""Paginação por `antes_de` (exclusivo) nas listagens por data desc, e status múltiplo nos pedidos.
+"""Paginação por `antes_de` (exclusivo) nas listagens por data desc.
 
 A fronteira é o caso que importa: itens com o MESMO instante, um em cada lado do corte do `limite`. Com `<` puro o
 resto do empate sumiria; com `<=` a página seguinte repetiria o empate para sempre quando ele é do tamanho dela. A
@@ -7,7 +7,7 @@ API resolve completando o grupo empatado na própria página.
 from datetime import UTC, datetime, timedelta
 
 from canteiro_api.modelos import doc
-from canteiro_dominio.modelos import EntradaRegistro, Movimento, Pedido, Proposta, StatusPedido, TipoMovimento
+from canteiro_dominio.modelos import EntradaRegistro, Proposta
 
 BASE = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
 
@@ -79,53 +79,11 @@ async def test_antes_de_e_exclusivo_e_recusa_data_sem_fuso(vila):
 async def test_propostas_paginam(vila):
     ids = []
     for i, t in enumerate(instantes()):
-        p = Proposta(tenant_id=vila.tenant_id, obra_id=vila.obra, tipo="criar_pedido", titulo=f"p{i}", dados={},
+        p = Proposta(tenant_id=vila.tenant_id, obra_id=vila.obra, tipo="cronograma", titulo=f"p{i}", dados={},
                      criado_em=t)
         await vila.arm.criar("propostas", doc(p))
         ids.append(p.id)
     vistos = await paginar(vila, f"/propostas?obra_id={vila.obra}", 2)
-    assert set(ids) <= set(vistos)
-
-
-async def novos_pedidos(vila, status: list[StatusPedido]) -> list[str]:
-    ids = []
-    for i, (t, st) in enumerate(zip(instantes(), status, strict=True)):
-        p = Pedido(tenant_id=vila.tenant_id, numero=f"PED-T{i}", obra_id=vila.obra, insumo_id=vila.insumo["areia"],
-                   quantidade=1000, fornecedor="F", valor=100, status=st, criado_em=t)
-        await vila.arm.criar("pedidos", doc(p))
-        ids.append(p.id)
-    return ids
-
-
-async def test_pedidos_paginam_e_aceitam_status_multiplo(vila):
-    sts = [StatusPedido.CONFERIDO, StatusPedido.CANCELADO, StatusPedido.CONFERIDO, StatusPedido.CONFERIDO,
-           StatusPedido.CANCELADO]
-    ids = await novos_pedidos(vila, sts)
-    url = f"/obras/{vila.obra}/pedidos"
-    vistos = await paginar(vila, f"{url}?status=conferido&status=cancelado", 2)
-    assert set(ids) <= set(vistos)
-
-    r = await vila.http.get(url, headers=vila.h, params=[("status", "em_cotacao"), ("status", "aprovado")])
-    assert r.status_code == 200
-    assert {p["status"] for p in r.json()} <= {"em_cotacao", "aprovado"} and r.json()
-
-    # compatível com um status só, e status repetido igual não vira "in"
-    so_um = await vila.http.get(url, headers=vila.h, params={"status": "cancelado"})
-    assert {p["id"] for p in so_um.json()} == {ids[1], ids[4]} | {p["id"] for p in so_um.json()} - set(ids)
-    assert all(p["status"] == "cancelado" for p in so_um.json())
-    dobrado = await vila.http.get(url, headers=vila.h, params=[("status", "cancelado"), ("status", "cancelado")])
-    assert dobrado.json() == so_um.json()
-    assert (await vila.http.get(url, headers=vila.h, params={"status": "nao_existe"})).status_code == 422
-
-
-async def test_movimentos_paginam(vila):
-    ids = []
-    for t in instantes():
-        m = Movimento(tenant_id=vila.tenant_id, obra_id=vila.obra, insumo_id=vila.insumo["areia"],
-                      tipo=TipoMovimento.AJUSTE, quantidade=1000, quem="T", criado_em=t)
-        await vila.arm.criar("movimentos", doc(m))
-        ids.append(m.id)
-    vistos = await paginar(vila, f"/obras/{vila.obra}/insumos/{vila.insumo['areia']}/movimentos", 2)
     assert set(ids) <= set(vistos)
 
 
