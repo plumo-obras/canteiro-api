@@ -104,7 +104,7 @@ _CEM = 10000                           # 100% em centésimos de ponto percentual
 
 def custo_da_venda(valor: int, bdi: int) -> int:
     """O custo de um preço de venda com BDI: preço ÷ (1 + BDI), em centavos, arredondado para o mais próximo (meio para
-    longe do zero, para a supressão do aditivo dar o mesmo número com o sinal trocado). O orçado × realizado compara
+    longe do zero, para a supressão do aditivo dar o mesmo número com o sinal trocado). O orçado × gasto compara
     custo com custo: sem tirar o BDI, a margem apareceria como dinheiro que falta gastar."""
     if bdi <= 0:
         return valor

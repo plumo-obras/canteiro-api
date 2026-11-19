@@ -616,7 +616,7 @@ async def resumo(arm, u: UsuarioAtual, obra_id: str) -> dict:
         total = sum(por_topico.values())
         etapas.append({"etapa": chave, "nome": nome_da_etapa(chave, orcamento=orcamento, extras=extras_nomes),
                        "origem": origem_da_etapa(chave, orcamento), "total": total, "topicos": itens})
-    # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o realizado de lá
+    # a mesma repartição que o orçamento usa (domínio): o que aparece aqui fecha com o gasto de lá
     no_orcamento = gastos_no_orcamento(gastos, orcamento)
     return {"total": no_orcamento.total, "a_revisar": len(a_revisar), "tem_orcamento": bool(orcamento),
             "fora_do_orcamento": no_orcamento.fora_do_orcamento,
@@ -633,7 +633,7 @@ def _chave_rotulo(etapa: str, topico_id: str | None) -> str:
 async def reclassificar(arm, u: UsuarioAtual, gasto_id: str, corpo: ReclassificarCorpo) -> dict:
     """Leva um gasto para outra etapa (e tópico) da árvore de hoje. É o caminho do gasto "sem etapa do orçamento"
     (lançado na lista padrão antes de a obra importar orçamento) até a etapa certa do orçamento, onde ele passa a
-    somar no realizado. Com Desfazer, que devolve a etapa de antes (mesmo que ela não esteja mais na árvore)."""
+    somar no gasto dela. Com Desfazer, que devolve a etapa de antes (mesmo que ela não esteja mais na árvore)."""
     g = await arm.obter("gastos", u.tenant_id, gasto_id)
     if not g:
         raise NaoEncontrado("Gasto não encontrado.")

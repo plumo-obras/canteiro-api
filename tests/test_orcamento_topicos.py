@@ -190,14 +190,14 @@ async def test_organizar_em_fases_leva_os_topicos_junto_e_o_desfazer_volta(vila)
     assert {k: t for k, t in (await titulos()).items() if k in titulos_antes} == titulos_antes
 
 
-# --- orçado × realizado por tópico ---
+# --- orçado × gasto por tópico ---
 
 def _abertura(orc, etapa):
     e = next(x for x in orc["etapas"] if x["etapa"] == etapa)
     return e, {t["nome"]: t for t in e["topicos"]}
 
 
-async def test_orcado_e_realizado_por_topico(vila):
+async def test_orcado_e_gasto_por_topico(vila):
     obra = (await nova_obra(vila))["id"]
     await _importar(vila, obra)
     a = await _arvore(vila, obra)
@@ -214,21 +214,21 @@ async def test_orcado_e_realizado_por_topico(vila):
     orc = await orcamento(vila, obra)
     e11, t11 = _abertura(orc, "11")
     assert list(t11) == ["Portas", "Mão de Obra", "Sem tópico"]
-    assert (t11["Portas"]["contratado"], t11["Portas"]["comprometido"], t11["Portas"]["origem"]) == (
+    assert (t11["Portas"]["contratado"], t11["Portas"]["gasto"], t11["Portas"]["origem"]) == (
         3464668, 1700000, "orcamento")
     assert t11["Portas"]["saldo"] == 3464668 - 1700000 and not t11["Portas"]["estourou"]
     # R$ 9.804,00 orçados e R$ 10.000,00 gastos: o tópico estoura, a etapa não
     m = t11["Mão de Obra"]
-    assert (m["contratado"], m["gastos_avulsos"], m["realizado"], m["estourou"]) == (980400, 1_000_000, 1_000_000, True)
+    assert (m["contratado"], m["gasto"], m["estourou"]) == (980400, 1_000_000, True)
     assert not e11["estourou"]
     sem = t11["Sem tópico"]
-    assert (sem["topico_id"], sem["origem"], sem["contratado"], sem["comprometido"]) == (None, None, 0, 10000)
-    for k in ("contratado", "atual", "cotando", "comprometido", "realizado", "saldo", "gastos_avulsos"):
+    assert (sem["topico_id"], sem["origem"], sem["contratado"], sem["gasto"]) == (None, None, 0, 10000)
+    for k in ("contratado", "atual", "gasto", "saldo"):
         assert sum(t[k] for t in e11["topicos"]) == e11[k], k
 
     _, t7 = _abertura(orc, "7")
     assert list(t7) == ["Materiasi diversos", "Mão de Obra", "Andaime"]
-    assert (t7["Andaime"]["origem"], t7["Andaime"]["contratado"], t7["Andaime"]["realizado"]) == ("manual", 0, 35000)
+    assert (t7["Andaime"]["origem"], t7["Andaime"]["contratado"], t7["Andaime"]["gasto"]) == ("manual", 0, 35000)
     _, t12 = _abertura(orc, "12")
     assert list(t12) == ["Mão de Obra"]
     assert {x["topico_id"] for x in orc["itens"] if x["descricao"] == "Portas"} == {portas}
@@ -291,7 +291,7 @@ async def test_topico_de_versao_desligada_com_gasto_continua_do_orcamento(vila):
     await _importar(vila, obra, so_mao_de_obra)
     _, t11 = _abertura(await orcamento(vila, obra), "11")
     # não é manual: o PATCH /topicos dele responde 422, e a web não oferece renomear
-    assert (t11["Portas"]["origem"], t11["Portas"]["contratado"], t11["Portas"]["realizado"]) == (
+    assert (t11["Portas"]["origem"], t11["Portas"]["contratado"], t11["Portas"]["gasto"]) == (
         "orcamento", 0, 35000)
 
 

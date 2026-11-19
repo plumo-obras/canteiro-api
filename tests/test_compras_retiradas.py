@@ -51,7 +51,7 @@ async def test_pagamento_de_pedido_de_antes_conta_como_gasto(vila):
     await _gravar(vila, "gastos", id="g-ped", obra_id=obra, valor=50_000, data_pagamento="2026-10-10",
                   favorecido="Depósito", descricao="cimento", etapa="1", pedido_id="p1", estornado=False)
     orc = (await vila.http.get(f"/obras/{obra}/orcamento", headers=vila.h)).json()
-    assert next(e for e in orc["etapas"] if e["etapa"] == "1")["realizado"] == 50_000
-    assert orc["totais"]["realizado"] == 50_000
+    assert next(e for e in orc["etapas"] if e["etapa"] == "1")["gasto"] == 50_000
+    assert orc["totais"]["gasto"] == 50_000
     g = (await vila.http.get(f"/obras/{obra}/gastos", headers=vila.h)).json()
     assert [x["id"] for x in g] == ["g-ped"] and "pedido_id" not in g[0]

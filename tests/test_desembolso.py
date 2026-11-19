@@ -18,7 +18,7 @@ def _etapas(**kw):
 
 def _proj(etapas, **kw):
     args = {"inicio": "2026-01", "atraso": 0, "mes_atual": "2026-02", "pago_por_mes": {}, "previsto_por_mes": {},
-            "realizado_total": sum(e.realizado for e in etapas), **kw}
+            "gasto_total": sum(e.gasto for e in etapas), **kw}
     return projetar(etapas, **args)
 
 
@@ -90,12 +90,12 @@ def test_etapa_fora_do_cronograma_fica_sem_mes():
     assert (d.totais.sem_mes, d.etapas[2].sem_cronograma) == (50_000, True)
     assert d.totais.falta == A + B + 50_000
     sem = projetar(etapas, inicio=None, atraso=0, mes_atual="2026-02", pago_por_mes={}, previsto_por_mes={},
-                   realizado_total=0)
+                   gasto_total=0)
     assert (sem.base, sem.totais.sem_mes, _serie(sem)) == ("sem_cronograma", A + B + 50_000, {})
 
 
 def test_meses_vao_do_primeiro_pagamento_ou_do_plano_ao_ultimo_projetado():
-    d = _proj(_etapas(), pago_por_mes={"2025-12": 0, "2025-11": 5_000}, realizado_total=5_000,
+    d = _proj(_etapas(), pago_por_mes={"2025-12": 0, "2025-11": 5_000}, gasto_total=5_000,
               previsto_por_mes={"2026-01": 150_000, "2026-02": 100_000, "2026-03": 100_000})
     assert [m.mes for m in d.meses] == ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"]
     assert d.meses[2].previsto == 150_000
@@ -112,7 +112,7 @@ async def test_desembolso_pela_api(vila):
     assert d["base"] == "gastos" and d["mes_atual"] == "2026-02"
     assert [(m["mes"], m["pago"]) for m in d["meses"] if m["pago"]] == [("2026-01", 100_000)]
     t = d["totais"]
-    assert (t["orcado"], t["realizado"], t["pago"]) == (2_107_596, 100_000, 100_000)
+    assert (t["orcado"], t["gasto"], t["pago"]) == (2_107_596, 100_000, 100_000)
     assert t["falta"] == 2_107_596 - 100_000 and t["desvio"] == 0
     assert [m["previsto"] for m in d["meses"]] == [p["previsto"] for p in
                                                    (await vila.http.get(f"/obras/{obra}/cronograma",
@@ -141,7 +141,7 @@ def test_no_ritmo_atual_o_resto_se_estica():
     # mediu 25% quando o plano previa 50%: ritmo de 50%, cada mês de plano vira dois
     e = [EtapaBase("1", "Obra", 400_000, 100_000, [2500, 2500, 2500, 2500], 2500)]
     d = projetar(e, inicio="2026-01", atraso=1, mes_atual="2026-03", pago_por_mes={"2026-01": 100_000},
-                 previsto_por_mes={}, realizado_total=100_000, mes_referencia="2026-02", ritmo=5000)
+                 previsto_por_mes={}, gasto_total=100_000, mes_referencia="2026-02", ritmo=5000)
     # pelo cronograma: os 3 meses restantes (fev..abr) empurrados 1 → mar..mai
     assert _serie(d) == {"2026-03": 100_000, "2026-04": 100_000, "2026-05": 100_000}
     # no ritmo: os mesmos 3 meses de plano em 6 meses de calendário
@@ -167,10 +167,10 @@ def test_no_ritmo_resto_pequeno_de_etapa_antiga_nao_empurra_o_fim():
     b = EtapaBase("2", "Estrutura", 100_000, 0, [0] * 6 + [1667] * 5 + [1665], 0)
     args = {"inicio": "2026-01", "atraso": 0, "mes_atual": "2026-07", "pago_por_mes": {}, "previsto_por_mes": {},
             "mes_referencia": "2026-06", "ritmo": 9000}
-    so_b = projetar([b], realizado_total=0, **args)
+    so_b = projetar([b], gasto_total=0, **args)
     # A (R$ 1.000 em jan) medida 99% e paga: sobram R$ 10, que entram na fila em poucos dias e não mexem no fim
     a = EtapaBase("1", "Preliminares", 100_000, 99_000, [10000] + [0] * 11, 9900)
-    com_a = projetar([a, b], realizado_total=99_000, pago_por_mes={"2026-01": 99_000},
+    com_a = projetar([a, b], gasto_total=99_000, pago_por_mes={"2026-01": 99_000},
                      **{k: v for k, v in args.items() if k != "pago_por_mes"})
     assert so_b.termino_no_ritmo == com_a.termino_no_ritmo == "2027-01"
     assert all(m.projetado_no_ritmo > 0 for m in com_a.meses if "2026-07" <= m.mes <= "2027-01")   # sem buraco
@@ -180,14 +180,14 @@ def test_no_ritmo_espera_hoje_sem_esticar_o_vazio_ate_o_plano():
     # o plano (já empurrado) começa daqui a 2 meses: o vazio até lá não é trabalho, não se estica pelo ritmo
     e = [EtapaBase("1", "Obra", 200_000, 0, [0, 0, 0, 0, 5000, 5000], 0)]
     d = projetar(e, inicio="2026-01", atraso=0, mes_atual="2026-03", pago_por_mes={}, previsto_por_mes={},
-                 realizado_total=0, mes_referencia="2026-02", ritmo=5000)
+                 gasto_total=0, mes_referencia="2026-02", ritmo=5000)
     assert _ritmo(d) == {"2026-05": 50_000, "2026-06": 50_000, "2026-07": 50_000, "2026-08": 50_000}
 
 
 def test_sem_medicao_quase_tudo_gasto_continua_no_cronograma():
     e = [EtapaBase("1", "Obra", 1_000_000, 999_960, [5000, 5000])]
     d = projetar(e, inicio="2026-01", atraso=0, mes_atual="2026-01", pago_por_mes={"2026-01": 999_960},
-                 previsto_por_mes={}, realizado_total=999_960)
+                 previsto_por_mes={}, gasto_total=999_960)
     assert (d.etapas[0].sem_cronograma, d.totais.sem_mes, d.totais.falta) == (False, 0, 40)
     assert _serie(d) == {"2026-02": 40}
 

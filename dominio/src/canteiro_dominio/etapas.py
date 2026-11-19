@@ -3,7 +3,7 @@
 Todo gasto cai numa etapa; o tópico é opcional. A base da árvore depende da obra:
 
 - **Obra com orçamento**: as etapas do orçamento vigente (contrato + aditivos, na ordem dele, chave = o código da etapa
-  da EAP, como `"18"`). É o que faz o gasto somar no "realizado" da etapa certa do orçamento: a pessoa pensa na obra
+  da EAP, como `"18"`). É o que faz o gasto somar no gasto da etapa certa do orçamento: a pessoa pensa na obra
   pela planilha dela ("18 INSTALAÇÃO ELÉTRICA - 220V"), não por uma lista genérica.
 - **Obra sem orçamento**: a lista padrão (`ETAPAS_FIXAS`), que mora no código e é igual para todo cliente.
 

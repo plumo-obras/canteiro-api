@@ -412,12 +412,8 @@ class ItemComCurva(ItemOrcamento):
 
 
 class _Andamento(BaseModel):
-    """O que já foi gasto, em centavos: os gastos confirmados. `gasto` é o nome que fica; `cotando` (sempre 0),
-    `comprometido` e `realizado` (o mesmo número) ficam até os clientes lerem `gasto`."""
+    """O que já foi gasto, em centavos: os gastos confirmados."""
     gasto: int = 0
-    cotando: int = 0
-    comprometido: int = 0
-    realizado: int = 0
 
 
 class _OrcadoRealizado(_Andamento):
@@ -427,7 +423,6 @@ class _OrcadoRealizado(_Andamento):
     # Calculados aqui, não em quem lê: o agente só cita, e a tela não refaz a conta.
     saldo: int = Field(0, description="atual − gasto (negativo = estourou)")
     estourou: bool = Field(False, description="o gasto passou do orçado atual")
-    gastos_avulsos: int = Field(0, description="o mesmo do gasto (nome de quando havia pedido)")
 
 
 class TopicoOrcamento(_OrcadoRealizado):
@@ -441,7 +436,7 @@ class EtapaOrcamento(_OrcadoRealizado):
     descricao: str
     estimado: int = Field(0, description=(
         "serviços que a previsão da obra estimou (fonte \"estimativa\"), fora do orçado: o cronograma vê a obra "
-        "inteira, o orçado × realizado só o que a pessoa orçou"))
+        "inteira, o orçado × gasto só o que a pessoa orçou"))
     venda: int | None = Field(None, description="preço de venda da etapa, quando o orçamento veio da planilha de venda")
     topicos: list[TopicoOrcamento] = Field(default_factory=list, description=(
         "a etapa aberta por tópico: os do orçamento (mesmo sem nada lançado), os manuais que têm lançamento e \"Sem "
@@ -451,7 +446,7 @@ class EtapaOrcamento(_OrcadoRealizado):
 class GastosNoOrcamentoSaida(BaseModel):
     """Os gastos (comprovante confirmado) da obra, todos já somados nos totais, abertos por onde estão."""
     total: int = 0
-    nas_etapas: int = Field(0, description="nas etapas do orçamento (cada etapa traz o seu em gastos_avulsos)")
+    nas_etapas: int = Field(0, description="nas etapas do orçamento (cada etapa traz o seu em `gasto`)")
     fora_do_orcamento: int = Field(0, description="nas etapas extras da obra: não engordam etapa do orçamento")
     na_lista_padrao: int = Field(0, description="obra sem orçamento: gastos na lista padrão de etapas")
     sem_etapa_do_orcamento: int = Field(0, description="numa etapa que não é do orçamento vigente nem extra (lista "
@@ -660,15 +655,12 @@ class ResumoFinanceiro(BaseModel):
     aditivos: int = 0
     aditivos_pct: int | None = None
     orcado_atual: int = 0
-    cotando: int = 0
-    comprometido: int = 0
-    realizado: int = 0
     saldo: int = 0
-    # o placar da obra: gasto até hoje (realizado) + falta gastar fecham no orçado
-    falta_gastar: int = Field(0, description="orçado atual − realizado, nunca negativo")
-    realizado_pct: int | None = Field(None, description="realizado ÷ orçado atual, em centésimos de ponto percentual "
+    # o placar da obra: gasto até hoje + falta gastar fecham no orçado
+    falta_gastar: int = Field(0, description="orçado atual − gasto, nunca negativo")
+    realizado_pct: int | None = Field(None, description="gasto ÷ orçado atual, em centésimos de ponto percentual "
                                                         "(4,8% = 480); None sem orçado")
-    gasto: int = Field(0, description="os gastos confirmados da obra (o mesmo de `realizado`, o nome que fica)")
+    gasto: int = Field(0, description="os gastos confirmados da obra")
     pago: int = Field(0, description="todos os gastos confirmados, como no desembolso (o mesmo do gasto)")
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
@@ -952,22 +944,20 @@ class EtapaDesembolso(BaseModel):
     etapa: str
     descricao: str
     atual: int
-    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
-    realizado: int
-    executado_pct: int = Field(description="avanço usado na conta (centésimos): o medido, ou realizado ÷ orçado se a "
+    gasto: int = 0
+    executado_pct: int = Field(description="avanço usado na conta (centésimos): o medido, ou gasto ÷ orçado se a "
                                            "obra não tem medição")
-    falta: int = Field(description="orçado atual − realizado, nunca negativo")
-    devido_agora: int = Field(0, description="executado pela medição e ainda não realizado: cai no mês corrente")
+    falta: int = Field(description="orçado atual − gasto, nunca negativo")
+    devido_agora: int = Field(0, description="executado pela medição e ainda não gasto: cai no mês corrente")
     sem_cronograma: bool = Field(False, description="a etapa não está no cronograma: o que falta vai para `sem_mes`")
 
 
 class TotaisDesembolso(BaseModel):
     orcado: int
-    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
-    realizado: int
+    gasto: int = 0
     pago: int
     falta: int = Field(description="Σ projetado + sem_mes: o que ainda vai sair (o mesmo nos dois cenários)")
-    custo_final: int = Field(description="realizado + o que falta nas etapas")
+    custo_final: int = Field(description="gasto + o que falta nas etapas")
     desvio: int = Field(description="custo_final − orçado (positivo = acima do orçado, pelo que já estourou)")
     sem_mes: int = Field(0, description="o que falta nas etapas fora do cronograma")
 
@@ -1210,7 +1200,7 @@ class EtapaNoResumo(BaseModel):
 
 
 class ResumoGastos(BaseModel):
-    total: int = Field(description="gastos confirmados (centavos): é o que soma no realizado do orçamento")
+    total: int = Field(description="gastos confirmados (centavos): é o que soma no gasto do orçamento")
     a_revisar: int = Field(description="comprovantes esperando revisão (não contam em nada)")
     tem_orcamento: bool = Field(False, description="a árvore da obra vem do orçamento")
     fora_do_orcamento: int = Field(0, description="parte do total nas etapas extras")

@@ -329,7 +329,7 @@ def test_documentos_novos_nascem_com_padrao_certo():
     assert gasto_conta(g.model_dump())
 
 
-# --- árvore a partir do orçamento e gastos no realizado ---
+# --- árvore a partir do orçamento e gastos no orçamento ---
 
 ORCAMENTO = [("1", "SERVIÇOS PRELIMINARES"), ("18", "INSTALAÇÃO ELÉTRICA - 220V"), ("fundacoes", "FUNDAÇÕES"),
              ("18", "repetida no aditivo")]

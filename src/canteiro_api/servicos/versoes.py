@@ -1243,7 +1243,7 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         for e in v.get("lista_etapas") or []:
             posicao.setdefault(e["etapa"], len(posicao))
     somas = dict(sorted(somas.items(), key=lambda kv: posicao.get(kv[0], len(posicao))))
-    # O gasto (comprovante confirmado) é dinheiro que saiu: soma no comprometido e no realizado da etapa dele, e por
+    # O gasto (comprovante confirmado) é dinheiro que saiu: soma no gasto da etapa dele, e por
     # isso mexe no saldo e no estouro. A repartição é do domínio (inclusive o que não entra em etapa).
     avulsos = gastos_no_orcamento(await gastos_da_obra(arm, tenant_id, obra_id), {e for e in somas if e})
     nomes_topicos = {**{t["id"]: t["nome"] for t in await arm.consultar(
@@ -1259,7 +1259,7 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         etapas.append(etapa)
     # gasto que conta na obra sem estar numa etapa do orçamento (extra, a definir, etapa de versão desfeita)
     fora = avulsos.fora_das_etapas
-    sem = {"gasto": fora, "cotando": 0, "comprometido": fora, "realizado": fora}
+    sem = {"gasto": fora}
     contratado = sum(e.contratado for e in etapas)
     aditivos = sum(e.aditivos for e in etapas)
     andamento = {k: sum(getattr(e, k) for e in etapas) + sem[k] for k in sem}
@@ -1270,7 +1270,7 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         itens=[{**x, "curva": curvas.get(x["id"]), "topico_id": topico_do_item.get(x["id"])} for x in itens],
         etapas=etapas,
         totais=TotaisOrcamento(contratado=contratado, aditivos=aditivos, atual=contratado + aditivos,
-                               saldo=contratado + aditivos - andamento["comprometido"],
+                               saldo=contratado + aditivos - andamento["gasto"],
                                aditivos_pct=pct(aditivos, contratado) if contratado else None,
                                n_itens=sum(x["tipo"] == "item" for x in itens),
                                n_etapas=len(descricoes), sem_etapa=sem, estimado=sum(estimado.values()),
@@ -1440,8 +1440,7 @@ def _contas(contratado: int, aditivos: int, gasto: int) -> dict:
     """Saldo e estouro saem daqui prontos: quem lê (tela, agente) só mostra."""
     atual = contratado + aditivos
     return {"contratado": contratado, "aditivos": aditivos, "atual": atual, "saldo": atual - gasto,
-            "estourou": gasto > atual, "gasto": gasto, "gastos_avulsos": gasto, "cotando": 0, "comprometido": gasto,
-            "realizado": gasto}
+            "estourou": gasto > atual, "gasto": gasto}
 
 
 def _etapa(etapa: str, descricao: str, contratado: int, aditivos: int, gasto: int = 0) -> EtapaOrcamento:
@@ -1465,7 +1464,7 @@ def _topicos_da_etapa(etapa: str, do_orcamento: list[dict], orcado: dict[str | N
     for k in [*ids, *outros, None]:
         c, a = orcado.get(k, [0, 0])
         contas = _contas(c, a, avulsos.get(k, 0))
-        if k is None and not any(contas[x] for x in ("atual", "realizado")):
+        if k is None and not any(contas[x] for x in ("atual", "gasto")):
             continue
         nome = (next(t["nome"] for t in do_orcamento if t["id"] == k) if k in ids
                 else nomes.get(k, "Tópico") if k else SEM_TOPICO)

@@ -1,5 +1,5 @@
 """O orçamento padronizado: a planilha da pessoa entra encaixada na lista padrão de etapas (o nosso modelo), sempre em
-custo, com orçado × realizado por etapa e por tópico (a etapa da planilha de onde cada linha veio)."""
+custo, com orçado × gasto por etapa e por tópico (a etapa da planilha de onde cada linha veio)."""
 import json
 
 from test_gastos_orcamento import _gasto
@@ -53,8 +53,8 @@ async def test_planilha_feita_a_mao_entra_encaixada_na_lista_padrao(vila):
     await _gasto(vila, obra, valor=500000, etapa="esquadrias", topico_id=metalica["topico_id"])
     orc = await orcamento(vila, obra)
     t = next(t for t in orc["etapas"][1]["topicos"] if t["nome"] == "ESQUADRIA METÁLICA")
-    assert (t["realizado"], t["saldo"]) == (500000, 17500000)
-    assert orc["etapas"][1]["realizado"] == 500000
+    assert (t["gasto"], t["saldo"]) == (500000, 17500000)
+    assert orc["etapas"][1]["gasto"] == 500000
 
 
 async def test_a_pessoa_troca_o_destino_da_etapa_ou_de_uma_linha(vila):
@@ -153,5 +153,5 @@ async def test_gasto_lancado_na_lista_padrao_antes_da_planilha_conta_no_orcado(v
     await _padronizada(vila, obra, aplicar=True)
     orc = await orcamento(vila, obra)
     alvenaria = next(e for e in orc["etapas"] if e["etapa"] == "alvenaria")
-    assert (alvenaria["realizado"], alvenaria["saldo"]) == (120000, 31282900 - 120000)
+    assert (alvenaria["gasto"], alvenaria["saldo"]) == (120000, 31282900 - 120000)
     assert orc["totais"]["gastos"]["sem_etapa_do_orcamento"] == 0

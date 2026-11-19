@@ -14,8 +14,8 @@ da API**, **eventos via Google Pub/Sub**, **assinatura + consumo de IA por clien
                          ▼                          │                           ▼
    ┌──────────────────────────────────┐   ┌─────────┴──────────────┐   ┌──────────────────────┐
    │ API CENTRAL (FastAPI)            │   │ SERVIÇO DO AGENTE       │   │ INGESTÃO (workers)   │
-   │ domínio: obras, insumos,         │◄──┤ (Python, Anthropic SDK) │   │ WhatsApp · áudio→    │
-   │ estoque, pedidos, NF, medições,  │   │ loop do agente + tools  │   │ texto · NF-e · clima │
+   │ domínio: obras, orçamento,       │◄──┤ (Python, Anthropic SDK) │   │ WhatsApp · áudio→    │
+   │ gastos, tributos, medições,      │   │ loop do agente + tools  │   │ texto · NF-e · clima │
    │ RDO, equipe, cronograma,         │   │ = endpoints da API      │   │ · rastreio · import  │
    │ propostas, registro, billing     │   │ (via MCP)               │   │   de MS Project      │
    │ RBAC + multi-tenant              │   └────▲───────────┬────────┘   └──────────┬───────────┘
@@ -41,7 +41,7 @@ da API**, **eventos via Google Pub/Sub**, **assinatura + consumo de IA por clien
 ## 2. API central (FastAPI)
 
 - **Dona de todo dado e de toda regra.** Contas determinísticas ficam aqui, nunca no LLM:
-  `falta = precisa − saldo − a caminho − cotando − transferência`, curva ABC, medição pago × executado, janelas de clima.
+  gasto e saldo por etapa, curva ABC, medição, desembolso, tributos da obra, janelas de clima.
 - **Escrita do agente = proposta.** O agente nunca grava direto: chama `POST /propostas` (o que quer fazer, a
   conta, a fonte). A pessoa aprova na UI → a API executa e registra no log (quem, quando, origem: agente, WhatsApp,
   tela) → "Desfazer" é uma operação inversa registrada.
@@ -65,22 +65,21 @@ Busca vetorial (base de conhecimento) e eventos ficam atrás de interfaces próp
 ### Cuidados que valem nos dois bancos
 
 Documentos encaixam bem em obra, sessão de conversa, RDO, NF (XML vira documento), planta/metadados, cronograma importado.
-O cuidado está no que é **dinheiro e estoque**:
+O cuidado está no que é **dinheiro**:
 
-1. **Estoque e dinheiro como livro-razão, não como campo editado.** `movimentos` append-only (entrada, saída com
-   destino, transferência, ajuste de contagem) com chave de idempotência; o saldo é uma **projeção** (coleção
-   `saldos` atualizada na mesma transação, ou recalculável a partir dos movimentos). É o que torna o "Desfazer" e a
-   auditoria triviais e impede saldo corrompido por evento repetido.
-2. **Transações multi-documento** (replica set / Atlas) quando um ato mexe em várias coleções: aprovar uma
-   transferência baixa numa obra e dá entrada em outra.
-3. **Relatórios** (custo por etapa, curva ABC, consumo × previsto) por aggregation pipeline + projeções
+1. **Dinheiro como livro-razão, não como campo editado.** O gasto confirmado não se edita nem se apaga: o Desfazer o
+   marca estornado e devolve o comprovante para a fila. É o que torna o "Desfazer" e a auditoria triviais.
+2. **Transações multi-documento** (replica set / Atlas) quando um ato mexe em várias coleções: confirmar um
+   comprovante cria o gasto, fecha o comprovante e grava o registro juntos.
+3. **Relatórios** (gasto por etapa, curva ABC, desembolso) por aggregation pipeline + projeções
    pré-calculadas por obra; se um dia a parte financeira exigir muito join, ela pode ir para Postgres sem mudar o resto.
 
 Bônus: **Atlas Vector Search** para buscar dentro do memorial descritivo, contratos e PDFs da obra.
 
-Coleções iniciais: `tenants`, `usuarios`, `obras`, `insumos`, `movimentos`, `saldos`, `pedidos`, `nfs`,
-`medicoes`, `contratos`, `equipe`, `rdos`, `cronogramas`, `propostas`, `registro` (auditoria), `sessoes`
-(conversa + abas abertas), `eventos_outbox`, `uso_ia` (livro de consumo).
+Coleções: `tenants`, `usuarios`, `obras`, `versoes_orcamento`, `itens_orcamento`, `cronogramas`, `medicoes`,
+`comprovantes`, `gastos`, `fornecedores`, `etapas_extras`, `topicos`, `propostas`, `registro` (auditoria), `sessoes` e
+`mensagens` (conversa + abas abertas), `outbox`, `uso_ia` (livro de consumo). Compras, pedidos e estoque saíram do
+produto em 11/2026 (`insumos`, `movimentos`, `saldos`, `pedidos` e `recebimentos` saem com `apagar_pedidos`).
 
 ## 4. O agente em 2026: o que mudou desde a "cascata de prompts" no LangGraph
 
@@ -101,8 +100,8 @@ As quatro formas de montar, do mais controle ao menos infraestrutura:
 **Ferramentas via MCP.** Exponha as ferramentas da API central como um **servidor MCP** (gerado do OpenAPI, com o
 token do usuário). O seu agente usa; e o cliente também pode usar o Canteiro de dentro do Claude/ChatGPT dele (um
 concorrente já anunciou isso). Uma ferramenta por intenção de negócio, não por endpoint:
-`consultar_estoque(obra, insumo)`, `conta_de_falta(obra, insumo)`, `propor_pedido(...)`, `propor_remarcacao(...)`,
-`buscar_preco(termo, cep)`, `janelas_de_clima(obra, atividade)`, `gerar_rdo(obra, dia)`.
+`consultar_orcamento(obra)`, `consultar_cronograma(obra, mes)`, `propor_cronograma(...)`, `consultar_tributos(obra)`,
+`janelas_de_clima(obra, atividade)`, `gerar_rdo(obra, dia)`.
 
 **Escolha de modelo.** Modelos atuais e preço por milhão de tokens (entrada / saída):
 Claude Opus 5.5 ($4 / $20) · Claude Sonnet 5.5 ($2 / $10) · Claude Haiku 5.5 ($0,10 / $0,50) · Claude Fable 5.1
@@ -115,8 +114,8 @@ transcrição antes do agente; **DWG** → conversão (ver `pesquisa/integracoes
 
 ## 5. Eventos (Pub/Sub)
 
-- Tópicos: `dominio.eventos` (pedido.criado, nf.recebida, estoque.movimento, rastreio.atualizado,
-  clima.janela_mudou, whatsapp.mensagem…), `agente.tarefas` (o que o agente deve analisar) e `agente.resultados`
+- Tópicos: `dominio.eventos` (gasto.confirmado, orcamento.aprovado, proposta.criada, clima.janela_mudou,
+  whatsapp.mensagem…), `agente.tarefas` (o que o agente deve analisar) e `agente.resultados`
   (propostas, documentos gerados).
 - **Chave de ordenação = obra**, para eventos da mesma obra chegarem em ordem. **Idempotência** pelo `event_id`
   (Pub/Sub entrega pelo menos uma vez). Dead-letter com alerta.
@@ -161,10 +160,10 @@ plataforma escolhida antes de fechar.
 
 ## 9. Fases
 
-1. **MVP:** API central (obras, insumos, movimentos, pedidos, propostas, registro) + serviço do agente com Tool
+1. **MVP:** API central (obras, orçamento, cronograma, gastos, propostas, registro) + serviço do agente com Tool
    Runner e SSE + livro de consumo + login. Ingestão: WhatsApp (com transcrição) e importação de planilha.
 2. **Proativo:** Pub/Sub + filtro de eventos + briefing em Batch (ou Managed Agents agendado) + NF-e destinada.
-3. **Integrações:** MS Project (MPXJ), clima, busca de preço real (servidor + provedor), rastreio, planta (ver e marcar).
+3. **Integrações:** MS Project (MPXJ), clima, planta (ver e marcar).
 4. **Escala:** servidor MCP público para os clientes, Vector Search nos documentos, ERP de obra.
 
 ## 11. Chave própria × créditos da plataforma
@@ -186,10 +185,10 @@ consumo aparece como informativo).
 Um Cloud Run nosso recebe o evento (ou a pergunta). Dentro dele:
 
 1. **Roteador em código, sem LLM:** pelo tipo de evento escolhe as instruções e o subconjunto de ferramentas do caso
-   (ex.: `nf.recebida` → "conferência de recebimento").
-2. **Loop do agente** (Tool Runner do SDK): o modelo pede ferramentas (`buscar_pedido`, `ler_nf`,
+   (ex.: `comprovante.enviado` → "leitura do comprovante").
+2. **Loop do agente** (Tool Runner do SDK): o modelo pede ferramentas (`consultar_orcamento`, `ler_comprovante`,
    `buscar_conhecimento`…), o nosso código executa contra a API central e devolve o resultado, até o modelo terminar.
-3. **Saída = propostas** (`propor_abatimento`, `propor_pedido`…), nunca gravação direta.
+3. **Saída = propostas** (`propor_cronograma`…), nunca gravação direta.
 
 O grafo encolhe para o roteador do passo 1. Fluxos 100% previsíveis continuam em código comum, e o modelo entra só
 onde há julgamento. No Managed Agents muda só quem roda o loop; as ferramentas continuam rodando do nosso lado.
@@ -198,7 +197,7 @@ onde há julgamento. No Managed Agents muda só quem roda o loop; as ferramentas
 
 | Tipo | Exemplos | Acesso do agente |
 |---|---|---|
-| Dado estruturado e vivo | estoque, pedidos, NF, medições, cronograma | **sempre por ferramenta da API** (nunca pela base vetorial) |
+| Dado estruturado e vivo | orçamento, gastos, medições, cronograma | **sempre por ferramenta da API** (nunca pela base vetorial) |
 | Conhecimento em texto | projeto, memorial, contratos, RDOs antigos, procedimentos, histórico de problemas | RAG por `buscar_conhecimento(pergunta, obra, tipo)` → trechos **com fonte** (doc, página) para citar |
 | Memória aprendida | "a Joana sempre pede palete", "este fornecedor atrasa" | memória por cliente (ferramenta de memória do Claude ou armazenamento próprio) |
 
