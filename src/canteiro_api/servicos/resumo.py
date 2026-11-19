@@ -123,13 +123,13 @@ def resumo_cronograma(c, hoje: date) -> ResumoCronograma:
 def resumo_financeiro(o) -> ResumoFinanceiro:
     t = o.totais
     tem = any(v.ativa and v.tipo == "contrato" for v in o.versoes)
-    if not tem and not t.comprometido:
+    if not tem and not t.gasto:
         return ResumoFinanceiro(tem_orcamento=False)
     return ResumoFinanceiro(
         tem_orcamento=tem, contratado=t.contratado, aditivos=t.aditivos, aditivos_pct=t.aditivos_pct,
-        orcado_atual=t.atual, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado, saldo=t.saldo,
-        falta_gastar=max(t.atual - t.realizado, 0), pago=t.realizado,
-        realizado_pct=t.realizado * 10000 // t.atual if t.atual > 0 else None,
+        orcado_atual=t.atual, gasto=t.gasto, cotando=t.cotando, comprometido=t.comprometido, realizado=t.realizado,
+        saldo=t.saldo, falta_gastar=max(t.atual - t.gasto, 0), pago=t.gasto,
+        realizado_pct=t.gasto * 10000 // t.atual if t.atual > 0 else None,
         etapas_estouradas=[EtapaEstourada(etapa=e.etapa, descricao=e.descricao, saldo=e.saldo)
                            for e in o.etapas if e.estourou],
         gastos=t.gastos)

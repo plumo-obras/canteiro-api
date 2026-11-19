@@ -59,3 +59,21 @@ async def test_orcamento_vazio_nao_tem_percentual_de_aditivo(vila):
     o = await nova_obra(vila)
     t = (await vila.http.get(f"/obras/{o['id']}/orcamento", headers=vila.h)).json()["totais"]
     assert (t["saldo"], t["aditivos_pct"]) == (0, None)
+
+
+async def test_gasto_sai_com_o_nome_novo_ao_lado_dos_antigos(vila):
+    """`gasto` é o nome que fica; `comprometido` e `realizado` (o mesmo número) e `cotando` (0) saem depois."""
+    obra = await _obra_com_orcamento(vila)
+    await _gasto(vila, obra, valor=100000, etapa="1")
+    await _gasto(vila, obra, valor=7000, etapa=None)
+    o = (await vila.http.get(f"/obras/{obra}/orcamento", headers=vila.h)).json()
+    e1 = next(e for e in o["etapas"] if e["etapa"] == "1")
+    assert (e1["gasto"], e1["comprometido"], e1["realizado"], e1["cotando"]) == (100000, 100000, 100000, 0)
+    assert all(t["gasto"] == t["realizado"] for t in e1["topicos"])
+    t = o["totais"]
+    assert (t["gasto"], t["realizado"], t["sem_etapa"]["gasto"]) == (107000, 107000, 7000)
+    fin = (await vila.http.get(f"/obras/{obra}/resumo", headers=vila.h)).json()["financeiro"]
+    assert (fin["gasto"], fin["falta_gastar"], fin["pago"]) == (107000, t["atual"] - 107000, 107000)
+    des = (await vila.http.get(f"/obras/{obra}/desembolso", headers=vila.h)).json()
+    assert des["totais"]["gasto"] == des["totais"]["realizado"] == 107000
+    assert next(e for e in des["etapas"] if e["etapa"] == "1")["gasto"] == 100000

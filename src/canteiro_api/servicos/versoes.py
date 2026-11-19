@@ -1259,10 +1259,10 @@ async def orcamento_da_obra(arm, tenant_id: str, obra_id: str) -> OrcamentoObra:
         etapas.append(etapa)
     # gasto que conta na obra sem estar numa etapa do orçamento (extra, a definir, etapa de versão desfeita)
     fora = avulsos.fora_das_etapas
-    sem = {"cotando": 0, "comprometido": fora, "realizado": fora}
+    sem = {"gasto": fora, "cotando": 0, "comprometido": fora, "realizado": fora}
     contratado = sum(e.contratado for e in etapas)
     aditivos = sum(e.aditivos for e in etapas)
-    andamento = {k: sum(getattr(e, k) for e in etapas) + sem[k] for k in ("cotando", "comprometido", "realizado")}
+    andamento = {k: sum(getattr(e, k) for e in etapas) + sem[k] for k in sem}
     return OrcamentoObra(
         versoes=[{**v, "registro_id": id_derivado(tenant_id, "registro", v["id"]), **_textos_da_versao(v, versoes),
                   "situacao": await _situacao(arm, tenant_id, v)}
@@ -1440,7 +1440,7 @@ def _contas(contratado: int, aditivos: int, gasto: int) -> dict:
     """Saldo e estouro saem daqui prontos: quem lê (tela, agente) só mostra."""
     atual = contratado + aditivos
     return {"contratado": contratado, "aditivos": aditivos, "atual": atual, "saldo": atual - gasto,
-            "estourou": gasto > atual, "gastos_avulsos": gasto, "cotando": 0, "comprometido": gasto,
+            "estourou": gasto > atual, "gasto": gasto, "gastos_avulsos": gasto, "cotando": 0, "comprometido": gasto,
             "realizado": gasto}
 
 

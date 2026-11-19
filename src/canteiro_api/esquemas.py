@@ -412,8 +412,9 @@ class ItemComCurva(ItemOrcamento):
 
 
 class _Andamento(BaseModel):
-    """O que já foi gasto, em centavos: os gastos confirmados. Sem pedido, `cotando` é 0 e `comprometido` e
-    `realizado` são o mesmo número (os três nomes ficam até os clientes lerem `gasto`)."""
+    """O que já foi gasto, em centavos: os gastos confirmados. `gasto` é o nome que fica; `cotando` (sempre 0),
+    `comprometido` e `realizado` (o mesmo número) ficam até os clientes lerem `gasto`."""
+    gasto: int = 0
     cotando: int = 0
     comprometido: int = 0
     realizado: int = 0
@@ -667,7 +668,8 @@ class ResumoFinanceiro(BaseModel):
     falta_gastar: int = Field(0, description="orçado atual − realizado, nunca negativo")
     realizado_pct: int | None = Field(None, description="realizado ÷ orçado atual, em centésimos de ponto percentual "
                                                         "(4,8% = 480); None sem orçado")
-    pago: int = Field(0, description="todos os gastos confirmados, como no desembolso (o mesmo do realizado)")
+    gasto: int = Field(0, description="os gastos confirmados da obra (o mesmo de `realizado`, o nome que fica)")
+    pago: int = Field(0, description="todos os gastos confirmados, como no desembolso (o mesmo do gasto)")
     etapas_estouradas: list[EtapaEstourada] = Field(default_factory=list)
     gastos: GastosNoOrcamentoSaida = Field(default_factory=GastosNoOrcamentoSaida)
 
@@ -950,6 +952,7 @@ class EtapaDesembolso(BaseModel):
     etapa: str
     descricao: str
     atual: int
+    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
     realizado: int
     executado_pct: int = Field(description="avanço usado na conta (centésimos): o medido, ou realizado ÷ orçado se a "
                                            "obra não tem medição")
@@ -960,6 +963,7 @@ class EtapaDesembolso(BaseModel):
 
 class TotaisDesembolso(BaseModel):
     orcado: int
+    gasto: int = Field(0, description="o mesmo de `realizado` (o nome que fica)")
     realizado: int
     pago: int
     falta: int = Field(description="Σ projetado + sem_mes: o que ainda vai sair (o mesmo nos dois cenários)")

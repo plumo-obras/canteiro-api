@@ -363,9 +363,9 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   `etapas_itens` (JSON `{"ordem": "etapa"}`) aponta a etapa de itens específicos (`"escolhida"`; etapa que não existe
   no orçamento nem na planilha → 422; vale a chave da prévia ou a original da planilha). `etapa_planilha` guarda a etapa original. Título de etapa do aditivo que ficou
   sem item some da versão.
-- **Orçado × gasto**: cada etapa e os totais trazem `cotando`, `comprometido` e `realizado` (centavos). Sem compras,
-  `cotando` é sempre 0 e `comprometido` = `realizado` = os gastos confirmados da etapa (os três nomes ficam até os
-  clientes trocarem para `gasto`). `totais.sem_etapa` = o gasto que conta na obra sem estar numa etapa do orçamento
+- **Orçado × gasto**: cada etapa, cada tópico e os totais trazem `gasto` (centavos) = os gastos confirmados. Os nomes
+  de quando havia compras vêm juntos, com o mesmo número, até os clientes lerem `gasto`: `comprometido` = `realizado`
+  = `gasto`, e `cotando` = 0. `totais.sem_etapa` = o gasto que conta na obra sem estar numa etapa do orçamento
   (extra, a definir, lista padrão, etapa de versão desfeita; já somado nos totais). `atual` é o orçado da planilha como
   veio: na de **venda** (`natureza: "venda"`) já é o custo, e o preço do cliente vem à parte em `venda` (por etapa e em
   `totais`; `null` sem planilha de venda); na planilha de engenheiro importada como `custo` ele ainda é preço de
@@ -387,7 +387,7 @@ planilha. Cada importação é uma **versão**: o **contrato** (só um vigente; 
   que foi somado antes de aprovar (pranchas + planilha), não só a primeira importação. Sem aditivo de verdade, 0. É
   número neutro (não há limite legal: obra privada).
 - **Por tópico** (`etapas[].topicos`): cada etapa aberta em `[{topico_id, nome, origem, contratado, aditivos, atual,
-  cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
+  gasto, cotando, comprometido, realizado, saldo, estourou, gastos_avulsos}]`, com as mesmas contas da etapa. Entram, nesta
   ordem: os tópicos do orçamento da etapa (mesmo sem nada lançado; `contratado`/`aditivos` = a soma dos itens dele),
   os tópicos manuais que têm gasto na etapa (`origem: "manual"`, orçado 0), os de versão desligada
   que têm (`origem: "orcamento"`, orçado 0: continuam sem renomear nem arquivar) e
@@ -504,11 +504,12 @@ atual de cada etapa (contrato + aditivos vigentes).
     (o resto do plano empurrado por `atraso_meses`, nada antes do mês corrente); `projetado_no_ritmo` = o mesmo
     esticado pelo ritmo medido (`ritmo_pct` = % medido ÷ % previsto na última medição, entre 1000 e 10000; 10000 sem
     medição, e aí os dois cenários são iguais). Os dois somam `totais.falta − totais.sem_mes`.
-  - `etapas`: `[{etapa, descricao, atual, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`. `falta` =
+  - `etapas`: `[{etapa, descricao, atual, gasto, realizado, executado_pct, falta, devido_agora, sem_cronograma}]`
+    (`realizado` = `gasto`, até os clientes lerem `gasto`). `falta` =
     orçado atual − realizado (nunca negativo: não projeta economia nem estouro por tendência); `devido_agora` =
     executado pela medição e ainda não realizado, no mês corrente.
-  - `totais`: `{orcado, realizado, pago, falta, custo_final, desvio, sem_mes}`; `realizado` = `pago` (os gastos
-    confirmados); `custo_final` = realizado + Σ falta das etapas; `desvio` = custo_final − orçado (o estouro que já
+  - `totais`: `{orcado, gasto, realizado, pago, falta, custo_final, desvio, sem_mes}`; `gasto` = `realizado` = `pago`
+    (os gastos confirmados); `custo_final` = realizado + Σ falta das etapas; `desvio` = custo_final − orçado (o estouro que já
     houve, e gasto fora do orçamento).
 
 ## Resumo de uma obra ("como está a obra?")
@@ -528,12 +529,13 @@ atual de cada etapa (contrato + aditivos vigentes).
     ou com situação diferente de `nao_comecou`, nunca "começa"); `etapas_atrasadas` = `{etapa, descricao, medido_acumulado,
     previsto_ate_referencia, atraso_pct}`, maior atraso primeiro. `cadastrado: false` = sem cronograma (só
     `termino_contratual` pela obra).
-  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, cotando, comprometido, realizado,
-    saldo, falta_gastar, realizado_pct, pago, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os totais de
-    `GET …/orcamento`, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra: `falta_gastar` = orçado atual −
-    realizado (nunca negativo; realizado + falta fecham no orçado) e `realizado_pct` = realizado ÷ orçado em centésimos
+  - `financeiro`: `{tem_orcamento, contratado, aditivos, aditivos_pct, orcado_atual, gasto, cotando, comprometido,
+    realizado, saldo, falta_gastar, realizado_pct, pago, etapas_estouradas: [{etapa, descricao, saldo}], gastos}` (os
+    totais de `GET …/orcamento`, e `gastos` = o mesmo `totais.gastos`). Para o placar da obra: `falta_gastar` = orçado
+    atual − gasto (nunca negativo; gasto + falta fecham no orçado) e `realizado_pct` = gasto ÷ orçado em centésimos
     de ponto (`null` sem orçado). `pago` = todo gasto confirmado e não estornado, o mesmo `totais.pago` do desembolso e
-    o mesmo número do `realizado`.
+    o mesmo número do `gasto`. `cotando` (0), `comprometido` e `realizado` (= `gasto`) ficam até os clientes lerem
+    `gasto`.
   - `pendencias`: `{propostas, titulos}` (até 5 títulos, as mais novas primeiro).
 
 ## Gastos da obra: comprovantes, leitura por IA e revisão
